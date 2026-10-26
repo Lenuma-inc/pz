@@ -2932,7 +2932,7 @@ fn runTui(
                     }
 
                     // Command preview intercept
-                    if (ui.picker) |*cp| {
+                    if (ui.picker) |*cp| completion: {
                         switch (key) {
                             .up => {
                                 cp.up();
@@ -2975,7 +2975,7 @@ fn runTui(
                                     if (key == .enter) {
                                         ui.picker = null;
                                         ui.clearPathItems();
-                                        break; // complete + submit
+                                        break :completion; // complete + submit
                                     }
                                 } else {
                                     // Cmd mode: if editor already has arguments (space after /cmd),
@@ -2984,7 +2984,7 @@ fn runTui(
                                     if (std.mem.indexOfScalar(u8, text, ' ') != null) {
                                         ui.picker = null;
                                         ui.clearPathItems();
-                                        break; // fall through to submit handling below
+                                        break :completion; // submit the completed command below
                                     }
                                     // No arguments yet: fill command name
                                     const cmd = cp.selected();
