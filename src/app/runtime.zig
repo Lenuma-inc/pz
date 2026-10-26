@@ -100,6 +100,55 @@ fn parseNativeProviderKind(provider: []const u8) ?NativeProviderKind {
     return native_provider_kind_map.get(provider);
 }
 
+fn nativeProviderName(kind: NativeProviderKind) []const u8 {
+    return switch (kind) {
+        .anthropic => "anthropic",
+        .openai => "openai",
+    };
+}
+
+fn firstConfiguredNativeProvider(
+    alloc: std.mem.Allocator,
+    hooks: core.providers.auth.Hooks,
+) !?NativeProviderKind {
+    for ([_]NativeProviderKind{ .anthropic, .openai }) |kind| {
+        const provider: core.providers.auth.Provider = switch (kind) {
+            .anthropic => .anthropic,
+            .openai => .openai,
+        };
+        var result = core.providers.auth.loadForProviderWithHooks(alloc, provider, hooks) catch |err| {
+            if (err == error.AuthNotFound) continue;
+            return err;
+        };
+        result.deinit();
+        return kind;
+    }
+    return null;
+}
+
+fn modelProvider(model: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, model, "claude-")) return "anthropic";
+    if (std.mem.startsWith(u8, model, "gpt-") or
+        std.mem.startsWith(u8, model, "o1") or
+        std.mem.startsWith(u8, model, "o3") or
+        std.mem.startsWith(u8, model, "o4")) return "openai";
+    return null;
+}
+
+fn defaultModelForProvider(provider: []const u8) []const u8 {
+    if (std.mem.eql(u8, provider, "anthropic")) return default_model;
+    if (std.mem.eql(u8, provider, "openai")) return "gpt-5";
+    return "";
+}
+
+fn activeModel(run_cmd: cli.Run) []const u8 {
+    return run_cmd.runtime_model orelse resolveDefault(run_cmd.cfg.model);
+}
+
+fn activeProvider(run_cmd: cli.Run) []const u8 {
+    return run_cmd.runtime_provider orelse resolveDefaultProvider(run_cmd.cfg.provider);
+}
+
 fn parseSyslogTransport(s: []const u8) ?core.syslog.Transport {
     if (std.mem.eql(u8, s, "udp")) return .udp;
     if (std.mem.eql(u8, s, "tcp")) return .tcp;
@@ -202,6 +251,7 @@ const NativeProviderRuntime = union(enum) {
 };
 
 const missing_provider_msg = "provider unavailable; choose anthropic/openai with credentials or set --provider-cmd/PZ_PROVIDER_CMD";
+const no_model_selected_msg = "No model selected. Set a default provider/model or run /login <provider> and select a model.";
 const missing_anthropic_provider_msg = "anthropic credentials missing; set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN, run /login anthropic, or set --provider-cmd/PZ_PROVIDER_CMD";
 const missing_openai_provider_msg = "openai credentials missing; set OPENAI_API_KEY, run /login openai, or set --provider-cmd/PZ_PROVIDER_CMD";
 const unsupported_native_provider_msg = "native provider unavailable for this provider label; use anthropic/openai or set --provider-cmd/PZ_PROVIDER_CMD";
@@ -1849,12 +1899,13 @@ fn execWithIoHooks(
 
 fn execWithIoTuiHooks(
     alloc: std.mem.Allocator,
-    run_cmd: cli.Run,
+    run_cmd_in: cli.Run,
     in: ?*std.Io.Reader,
     out: ?*std.Io.Writer,
     audit_hooks: AuditHooks,
     tui_hooks: TuiHooks,
 ) (Err || anyerror)![]u8 {
+    var run_cmd = run_cmd_in;
     var provider_rt: ProviderRuntime = undefined;
     var native_rt: NativeProviderRuntime = undefined;
     var hooks = audit_hooks;
@@ -1862,6 +1913,26 @@ fn execWithIoTuiHooks(
     if (hooks.ca_file == null) hooks.ca_file = run_cmd.cfg.ca_file;
     hooks.auth_lock = run_cmd.cfg.policy_lock;
     if (hooks.auth_home == null) hooks.auth_home = run_cmd.home;
+
+    var provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
+    var model_name = resolveDefault(run_cmd.cfg.model);
+    if (run_cmd.cfg.provider_cmd == null and std.mem.eql(u8, run_cmd.cfg.provider, "default")) {
+        if (modelProvider(model_name)) |model_provider| {
+            provider_name = model_provider;
+        } else if (try firstConfiguredNativeProvider(alloc, hooks.auth())) |kind| {
+            provider_name = nativeProviderName(kind);
+        } else {
+            provider_name = "";
+        }
+        if (std.mem.eql(u8, run_cmd.cfg.model, "default")) {
+            model_name = if (provider_name.len == 0) "" else defaultModelForProvider(provider_name);
+        }
+    } else if (std.mem.eql(u8, run_cmd.cfg.model, "default") and provider_name.len != 0) {
+        model_name = defaultModelForProvider(provider_name);
+    }
+    run_cmd.runtime_provider = provider_name;
+    run_cmd.runtime_model = model_name;
+
     var missing_provider = MissingProvider{
         .alloc = alloc,
         .msg = missing_provider_msg,
@@ -1978,7 +2049,6 @@ fn execWithIoTuiHooks(
         has_provider_rt = true;
         provider = &provider_rt.client.provider;
     } else {
-        const provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
         if (parseNativeProviderKind(provider_name)) |native_kind| {
             if (NativeProviderRuntime.init(alloc, native_kind, hooks.auth())) |nr| {
                 native_rt = nr;
@@ -1993,7 +2063,7 @@ fn execWithIoTuiHooks(
                 provider = &missing_provider.provider;
             }
         } else {
-            missing_provider.msg = unsupported_native_provider_msg;
+            missing_provider.msg = if (provider_name.len == 0) no_model_selected_msg else unsupported_native_provider_msg;
             provider = &missing_provider.provider;
         }
     }
@@ -2150,8 +2220,8 @@ fn runPrint(
         .alloc = alloc,
         .sid = sid,
         .prompt = prompt,
-        .model = resolveDefault(run_cmd.cfg.model),
-        .provider_label = run_cmd.cfg.provider,
+        .model = activeModel(run_cmd),
+        .provider_label = activeProvider(run_cmd),
         .provider = provider,
         .store = store,
         .reg = reg.registry(),
@@ -2325,8 +2395,8 @@ fn runJson(
         try tctx.run(.{
             .sid = sid,
             .prompt = prompt,
-            .model = resolveDefault(run_cmd.cfg.model),
-            .provider_label = resolveDefaultProvider(run_cmd.cfg.provider),
+            .model = activeModel(run_cmd),
+            .provider_label = activeProvider(run_cmd),
             .provider_opts = popts,
             .system_prompt = sys_prompt,
         });
@@ -2345,8 +2415,8 @@ fn runJson(
         try tctx.run(.{
             .sid = sid,
             .prompt = trimmed,
-            .model = resolveDefault(run_cmd.cfg.model),
-            .provider_label = resolveDefaultProvider(run_cmd.cfg.provider),
+            .model = activeModel(run_cmd),
+            .provider_label = activeProvider(run_cmd),
             .provider_opts = popts,
             .system_prompt = sys_prompt,
         });
@@ -2376,10 +2446,10 @@ fn runTui(
 ) !void {
     const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
-    var model: []const u8 = resolveDefault(run_cmd.cfg.model);
+    var model: []const u8 = activeModel(run_cmd);
     var model_owned: ?[]u8 = null;
     defer if (model_owned) |m| alloc.free(m);
-    var provider_label: []const u8 = resolveDefaultProvider(run_cmd.cfg.provider);
+    var provider_label: []const u8 = activeProvider(run_cmd);
     var provider_owned: ?[]u8 = null;
     defer if (provider_owned) |p| alloc.free(p);
     var sys_prompt: ?[]const u8 = sys_prompt_arg;
@@ -3532,10 +3602,10 @@ fn runRpc(
 ) !void {
     const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
-    var model: []const u8 = resolveDefault(run_cmd.cfg.model);
+    var model: []const u8 = activeModel(run_cmd);
     var model_owned: ?[]u8 = null;
     defer if (model_owned) |m| alloc.free(m);
-    var provider_label: []const u8 = resolveDefaultProvider(run_cmd.cfg.provider);
+    var provider_label: []const u8 = activeProvider(run_cmd);
     var provider_owned: ?[]u8 = null;
     defer if (provider_owned) |p| alloc.free(p);
 
@@ -6157,14 +6227,13 @@ test "missingProviderMsgForInitErr is provider-specific" {
 }
 
 const default_model = "claude-opus-4-6";
-const default_provider = "anthropic";
 
 fn resolveDefault(model: []const u8) []const u8 {
-    return if (std.mem.eql(u8, model, "default")) default_model else model;
+    return if (std.mem.eql(u8, model, "default")) "" else model;
 }
 
 fn resolveDefaultProvider(provider: []const u8) []const u8 {
-    return if (std.mem.eql(u8, provider, "default")) default_provider else provider;
+    return if (std.mem.eql(u8, provider, "default")) "" else provider;
 }
 
 fn modelCtxWindow(model: []const u8) u64 {

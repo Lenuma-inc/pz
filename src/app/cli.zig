@@ -16,6 +16,8 @@ pub const Run = struct {
     mode: Args.Mode,
     prompt: ?[]const u8,
     cfg: config.Config,
+    runtime_provider: ?[]const u8 = null,
+    runtime_model: ?[]const u8 = null,
     home: ?[]const u8 = null,
     tmp_dir: []const u8 = config.Env.tmp_dir_default,
     state_dir: ?[]const u8 = null,
