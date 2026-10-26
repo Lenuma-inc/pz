@@ -137,7 +137,7 @@ fn modelProvider(model: []const u8) ?[]const u8 {
 
 fn defaultModelForProvider(provider: []const u8) []const u8 {
     if (std.mem.eql(u8, provider, "anthropic")) return default_model;
-    if (std.mem.eql(u8, provider, "openai")) return "gpt-5";
+    if (std.mem.eql(u8, provider, "openai")) return openai_models[0];
     return "";
 }
 
@@ -159,6 +159,13 @@ fn parseSyslogTransport(s: []const u8) ?core.syslog.Transport {
 const NativeProviderRuntime = union(enum) {
     anthropic: core.providers.anthropic.Client,
     openai: core.providers.openai.Client,
+
+    fn providerKind(self: *const NativeProviderRuntime) NativeProviderKind {
+        return switch (self.*) {
+            .anthropic => .anthropic,
+            .openai => .openai,
+        };
+    }
 
     fn init(alloc: std.mem.Allocator, kind: NativeProviderKind, hooks: core.providers.auth.Hooks) !NativeProviderRuntime {
         return switch (kind) {
@@ -247,6 +254,34 @@ const NativeProviderRuntime = union(enum) {
             .openai => |*client| client.deinit(),
         }
         self.* = undefined;
+    }
+};
+
+// Keep one stable Provider address while switching the authenticated backend.
+const NativeRouter = struct {
+    alloc: std.mem.Allocator,
+    hooks: core.providers.auth.Hooks,
+    slot: *NativeProviderRuntime,
+    ready: *bool,
+    el: ?*event_loop.EventLoop = null,
+    cancel: ?*core.providers.CancelPoll = null,
+    provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
+
+    fn prepare(self: *NativeRouter, model: []const u8) !void {
+        const name = modelProvider(model) orelse return error.UnknownModelProvider;
+        const kind = parseNativeProviderKind(name) orelse return error.UnknownProvider;
+        if (self.ready.* and self.slot.providerKind() == kind) return;
+        var next = try NativeProviderRuntime.init(self.alloc, kind, self.hooks);
+        if (self.el) |el| next.setEventLoop(el);
+        if (self.cancel) |cancel| next.setCancel(cancel);
+        if (self.ready.*) self.slot.deinit();
+        self.slot.* = next;
+        self.ready.* = true;
+    }
+
+    fn start(self: *NativeRouter, req: core.providers.Request) !*core.providers.Stream {
+        try self.prepare(req.model);
+        return self.slot.providerPtr().start(req);
     }
 };
 
@@ -1771,6 +1806,7 @@ pub fn execWithIo(
 }
 
 const TuiHooks = struct {
+    native: ?*NativeRouter = null,
     stdin_fd: std.posix.fd_t = std.posix.STDIN_FILENO,
     live: ?bool = null,
     raw_mode: bool = true,
@@ -2068,6 +2104,19 @@ fn execWithIoTuiHooks(
         }
     }
 
+    var native_router = NativeRouter{
+        .alloc = alloc,
+        .hooks = hooks.auth(),
+        .slot = &native_rt,
+        .ready = &has_native_rt,
+        .el = if (el) |*e| e else null,
+    };
+    var live_hooks = tui_hooks;
+    if (run_cmd.cfg.provider_cmd == null) {
+        provider = &native_router.provider;
+        live_hooks.native = &native_router;
+    }
+
     // Init store
     // Headless modes (print/json) disable durable session writes
     // by default. The user must opt in via --continue, --resume,
@@ -2146,7 +2195,7 @@ fn execWithIoTuiHooks(
                 sys_prompt,
                 has_native_rt and native_rt.isSub(),
                 hooks,
-                tui_hooks,
+                live_hooks,
                 if (has_native_rt) &native_rt else null,
                 needs_login,
             ),
@@ -2458,10 +2507,11 @@ fn runTui(
 
     // Model cycle list: from config or default
     const cfg_models = run_cmd.cfg.enabled_models;
-    const models_list: []const []const u8 = if (cfg_models) |m| blk: {
+    var available = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+    var models_list: []const []const u8 = if (cfg_models) |m| blk: {
         const ptr: [*]const []const u8 = @ptrCast(m.ptr);
         break :blk ptr[0..m.len];
-    } else &model_cycle;
+    } else available.items();
 
     const cwd_path = getProjectPath(alloc, run_cmd.io, home) catch "";
     defer if (cwd_path.len > 0) alloc.free(cwd_path);
@@ -2546,7 +2596,7 @@ fn runTui(
         .cache = &cmd_cache,
     };
 
-    const tctx = TurnCtx{
+    var tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
         .store = store,
@@ -2613,21 +2663,31 @@ fn runTui(
             try ui.draw(out);
             var login_buf: [4096]u8 = undefined;
             var login_writer: std.Io.Writer = .fixed(&login_buf);
-            runLoginFlow(alloc, &login_writer, .{
+            const logged_in = runLoginFlow(alloc, &login_writer, .{
                 .prov = prov,
                 .prov_name = core.providers.auth.providerName(prov),
                 .key = "",
-            }, audit_hooks.auth()) catch |err| {
+            }, audit_hooks.auth()) catch |err| failed: {
                 const em = try report.fromName(alloc, @errorName(err));
                 defer alloc.free(em);
                 try ui.tr.infoText(em);
+                break :failed false;
             };
             const login_out = login_writer.buffered();
             if (login_out.len > 0) {
                 try infoTextSafe(alloc, &ui, login_out);
             }
-            if (native_rt) |nrt| {
-                nrt.reloadAuth(alloc, audit_hooks.auth()) catch {};
+            if (logged_in) {
+                available = try availableModels(alloc, audit_hooks.auth(), false);
+                if (cfg_models == null) models_list = available.items();
+                if (tui_hooks.native) |router| {
+                    if (model.len > 0) {
+                        try router.prepare(model);
+                        try router.slot.reloadAuth(alloc, audit_hooks.auth());
+                        tctx.skip_prompt_guard = router.slot.isSub();
+                        ui.panels.is_sub = router.slot.isSub();
+                    }
+                }
             }
             try ui.draw(out);
         }
@@ -2709,7 +2769,7 @@ fn runTui(
         if (cmd == .compacted) {
             ui.panels.noteCompaction();
         }
-        if (cmd == .handled or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
+        if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
             const cmd_text = init_cmd_writer.buffered();
             if (cmd_text.len > 0) {
                 try infoTextSafe(alloc, &ui, cmd_text);
@@ -2755,6 +2815,11 @@ fn runTui(
             nrt.setCancel(&live_turn.cancel_flag.cancel_poll);
         }
         defer if (native_rt) |nrt| nrt.clearCancel();
+        if (tui_hooks.native) |router| router.cancel = &live_turn.cancel_flag.cancel_poll;
+        defer if (tui_hooks.native) |router| {
+            router.cancel = null;
+            if (router.ready.*) router.slot.clearCancel();
+        };
 
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
@@ -2829,9 +2894,26 @@ fn runTui(
                                 };
                                 switch (ui.ov.?.kind) {
                                     .model => {
+                                        if (live_turn.isRunning()) {
+                                            try ui.tr.infoText("Finish the current turn before switching models");
+                                            try ui.draw(out);
+                                            continue;
+                                        }
+                                        if (tui_hooks.native) |router| {
+                                            router.prepare(sel) catch |err| {
+                                                const msg = try report.cli(alloc, "select model", err);
+                                                defer alloc.free(msg);
+                                                try ui.tr.infoText(msg);
+                                                try ui.draw(out);
+                                                continue;
+                                            };
+                                            live_tctx.skip_prompt_guard = router.slot.isSub();
+                                            ui.panels.is_sub = router.slot.isSub();
+                                        }
                                         const argv: core.audit.Str = .{ .text = sel, .vis = .@"pub" };
                                         try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                                         try replaceOwnedText(alloc, &model, &model_owned, sel);
+                                        if (modelProvider(sel)) |name| try replaceOwnedText(alloc, &provider_label, &provider_owned, name);
                                         const attrs = [_]core.audit.Attribute{
                                             .{
                                                 .key = "provider",
@@ -2842,6 +2924,7 @@ fn runTui(
                                         try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                                         ui.panels.ctx_limit = modelCtxWindow(model);
                                         try ui.setModel(model);
+                                        try ui.setProvider(provider_label);
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
@@ -3129,7 +3212,26 @@ fn runTui(
                                 try ui.draw(out);
                                 continue;
                             }
-                            if (cmd == .handled or cmd == .compacted or cmd == .resumed) {
+                            if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
+                                if (cmd == .logged_in) {
+                                    available = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+                                    if (cfg_models == null) models_list = available.items();
+                                    if (model.len == 0) {
+                                        const req = try parseAuthReq(std.mem.trim(u8, prompt["/login".len..], " \t"), null);
+                                        if (parseNativeProviderKind(req.prov_name) != null) {
+                                            try replaceOwnedText(alloc, &model, &model_owned, defaultModelForProvider(req.prov_name));
+                                            try replaceOwnedText(alloc, &provider_label, &provider_owned, req.prov_name);
+                                        }
+                                    }
+                                    if (tui_hooks.native) |router| {
+                                        if (!live_turn.isRunning() and model.len > 0) {
+                                            try router.prepare(model);
+                                            try router.slot.reloadAuth(alloc, audit_hooks.auth());
+                                            live_tctx.skip_prompt_guard = router.slot.isSub();
+                                            ui.panels.is_sub = router.slot.isSub();
+                                        }
+                                    }
+                                }
                                 if (cmd == .compacted) ui.panels.noteCompaction();
                                 const cmd_text = cmd_writer.buffered();
                                 if (cmd_text.len > 0) {
@@ -3551,7 +3653,7 @@ fn runTui(
             if (cmd == .resumed) {
                 _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
             }
-            if (cmd == .handled or cmd == .compacted or cmd == .resumed) {
+            if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
                 if (cmd == .compacted) ui.panels.noteCompaction();
                 try syncBgFooter(alloc, &ui, &bg_mgr);
                 try ui.setModel(model);
@@ -4305,7 +4407,7 @@ fn runLoginFlow(
     out: *std.Io.Writer,
     req: AuthReq,
     hooks: core.providers.auth.Hooks,
-) !void {
+) !bool {
     const kind = classifyLoginInput(req.prov, req.key);
     const oauth_info = core.providers.auth.oauthLoginInfo(req.prov);
     if (kind == .oauth_start) {
@@ -4320,7 +4422,7 @@ fn runLoginFlow(
             const em = try report.cli(alloc, "start local oauth callback server", err);
             defer alloc.free(em);
             try out.writeAll(em);
-            return;
+            return false;
         };
         defer listener.deinit();
 
@@ -4328,7 +4430,7 @@ fn runLoginFlow(
             const em = try report.cli(alloc, info.start_action, err);
             defer alloc.free(em);
             try out.writeAll(em);
-            return;
+            return false;
         };
         defer flow.deinit(alloc);
 
@@ -4337,41 +4439,42 @@ fn runLoginFlow(
                 const em = try report.cli(alloc, "wait for oauth callback", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
-                return;
+                return false;
             },
             else => {
                 const em = try report.cli(alloc, info.complete_action, err);
                 defer alloc.free(em);
                 try out.writeAll(em);
-                return;
+                return false;
             },
         };
-        return;
+        return true;
     }
     if (kind == .oauth_complete) {
         const info = oauth_info orelse return error.OAuthNotSupported;
         const oauth_name = core.providers.auth.providerName(req.prov);
         const verifier = takePendingVerifier(req.prov) orelse {
             try out.writeAll("no pending oauth verifier; start a new /login flow first\n");
-            return;
+            return false;
         };
         defer clearPendingVerifier();
         core.providers.auth.completeOAuthWithHooks(alloc, req.prov, req.key, verifier, hooks) catch |err| {
             const em = try report.cli(alloc, info.complete_action, err);
             defer alloc.free(em);
             try out.writeAll(em);
-            return;
+            return false;
         };
         try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
-        return;
+        return true;
     }
     if (req.key.len == 0) {
         const env_var = provider_env_map.get(req.prov_name) orelse "API_KEY";
         try writeTextLine(alloc, out, "Paste API key: /login {s} <key> (or set {s})\n", .{ req.prov_name, env_var });
-        return;
+        return false;
     }
     try core.providers.auth.saveApiKeyWithHooks(alloc, req.prov, req.key, hooks);
     try writeTextLine(alloc, out, "API key saved for {s}\n", .{req.prov_name});
+    return true;
 }
 
 fn runOAuthCallbackLogin(
@@ -4480,6 +4583,7 @@ fn runRpcLogout(
 const CmdRes = enum {
     unhandled,
     handled,
+    logged_in,
     compacted,
     resumed,
     quit,
@@ -4640,6 +4744,7 @@ fn handleSlashCommand(
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
             try runtimeCtlAudit(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
             try replaceOwnedText(alloc, model, model_owned, arg);
+            if (modelProvider(arg)) |name| try replaceOwnedText(alloc, provider, provider_owned, name);
             const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "provider",
@@ -4658,6 +4763,12 @@ fn handleSlashCommand(
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
             try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
             try replaceOwnedText(alloc, provider, provider_owned, arg);
+            if (parseNativeProviderKind(arg) != null) {
+                const current = modelProvider(model.*);
+                if (current == null or !std.mem.eql(u8, current.?, arg)) {
+                    try replaceOwnedText(alloc, model, model_owned, defaultModelForProvider(arg));
+                }
+            }
             try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "provider set to {s}\n", .{provider.*});
         },
@@ -4989,13 +5100,13 @@ fn handleSlashCommand(
                 try writeTextLine(alloc, out, "unknown provider: {s}\n", .{prov_name});
                 return .handled;
             };
-            runLoginFlow(alloc, out, req, audit_hooks.auth()) catch |err| {
+            const logged_in = runLoginFlow(alloc, out, req, audit_hooks.auth()) catch |err| {
                 const em = try report.cli(alloc, "login", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
-            return .handled;
+            return if (logged_in) .logged_in else .handled;
         },
         .logout => {
             if (arg.len != 0) {
@@ -6301,6 +6412,83 @@ const model_cycle = [_][]const u8{
     "claude-sonnet-4-5",
     "claude-haiku-4-5-20251001",
 };
+
+// Pi's OpenAI Codex catalog (packages/ai/scripts/generate-models.ts).
+const openai_models = [_][]const u8{
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+};
+
+const ModelList = struct {
+    buf: [model_cycle.len + openai_models.len][]const u8 = undefined,
+    len: usize = 0,
+
+    fn items(self: *const ModelList) []const []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool) !ModelList {
+    var result = ModelList{};
+    inline for (.{ .{ core.providers.auth.Provider.anthropic, &model_cycle }, .{ core.providers.auth.Provider.openai, &openai_models } }) |entry| {
+        var enabled = external;
+        if (!external) {
+            if (core.providers.auth.loadForProviderWithHooks(alloc, entry[0], hooks)) |loaded| {
+                var auth = loaded;
+                auth.deinit();
+                enabled = true;
+            } else |err| {
+                if (err != error.AuthNotFound) return err;
+            }
+        }
+        if (enabled) {
+            for (entry[1]) |id| {
+                result.buf[result.len] = id;
+                result.len += 1;
+            }
+        }
+    }
+    return result;
+}
+
+test "OpenAI credentials unlock picker and native backend together" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    const hooks = core.providers.auth.Hooks{ .home_override = home };
+    try core.providers.auth.saveApiKeyWithHooks(alloc, .openai, "sk-test-no-network", hooks);
+    var models = try availableModels(alloc, hooks, false);
+    var ui = try tui_harness.Ui.init(alloc, 80, 24, "", "");
+    defer ui.deinit();
+    var first: ?usize = null;
+    for (models.items(), 0..) |id, i| {
+        if (std.mem.eql(u8, id, "gpt-6.1-sol")) first = i;
+    }
+    try std.testing.expect(first != null);
+    ui.ov = tui_overlay.Overlay.init(models.items(), first.?);
+    ui.ov.?.down();
+    const selected = ui.ov.?.selected().?;
+    var slot: NativeProviderRuntime = undefined;
+    var ready = false;
+    var router = NativeRouter{ .alloc = alloc, .hooks = hooks, .slot = &slot, .ready = &ready };
+    defer if (ready) slot.deinit();
+    try router.prepare(selected);
+    try ui.setModel(selected);
+    try ui.setProvider(nativeProviderName(slot.providerKind()));
+    try std.testing.expectError(error.UnknownModelProvider, router.prepare("invalid"));
+    const state = try std.fmt.allocPrint(alloc, "model={s}\nprovider={s}\nready={any}", .{
+        selected, nativeProviderName(slot.providerKind()), ready,
+    });
+    defer alloc.free(state);
+    try @import("../test/helpers.zig").expectSnapText(@src(), "model=gpt-6-astra\nprovider=openai\nready=true", state);
+}
 
 const provider_args = core.providers.auth.provider_names;
 const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill" };

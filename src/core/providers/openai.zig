@@ -11,6 +11,14 @@ pub const Cfg = struct {
     pub const api_host = "api.openai.com";
     pub const api_path = "/v1/responses";
 
+    pub fn apiUri(is_sub: bool) std.Uri {
+        return .{
+            .scheme = "https",
+            .host = .{ .raw = if (is_sub) "chatgpt.com" else api_host },
+            .path = .{ .raw = if (is_sub) "/backend-api/codex/responses" else api_path },
+        };
+    }
+
     pub const ExtFields = struct {
         saw_tool_call: bool,
         tool_call_id: std.ArrayListUnmanaged(u8),
@@ -36,6 +44,10 @@ pub const Cfg = struct {
             .oauth => |oauth| {
                 const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
                 try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+                try hdrs.append(ar, .{ .name = "chatgpt-account-id", .value = try accountId(ar, oauth.access) });
+                try hdrs.append(ar, .{ .name = "OpenAI-Beta", .value = "responses=experimental" });
+                try hdrs.append(ar, .{ .name = "originator", .value = "pz" });
+                try hdrs.append(ar, .{ .name = "accept", .value = "text/event-stream" });
             },
             .api_key => |key| {
                 const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{key});
@@ -45,8 +57,8 @@ pub const Cfg = struct {
         return hdrs;
     }
 
-    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, _: bool) ![]u8 {
-        return buildBodyImpl(alloc, req);
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_sub: bool) ![]u8 {
+        return buildBodyForAuth(alloc, req, is_sub);
     }
 
     pub fn parseSseData(self: *Stream, data: []const u8) anyerror!?providers.Event {
@@ -355,7 +367,29 @@ fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
     };
 }
 
+fn accountId(alloc: std.mem.Allocator, token: []const u8) ![]const u8 {
+    var parts = std.mem.splitScalar(u8, token, '.');
+    _ = parts.next() orelse return error.InvalidOAuthToken;
+    const encoded = parts.next() orelse return error.InvalidOAuthToken;
+    _ = parts.next() orelse return error.InvalidOAuthToken;
+    if (parts.next() != null) return error.InvalidOAuthToken;
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const bytes = try alloc.alloc(u8, try decoder.calcSizeForSlice(encoded));
+    try decoder.decode(bytes, encoded);
+    const Claims = struct {
+        @"https://api.openai.com/auth": struct { chatgpt_account_id: []const u8 },
+    };
+    const claims = try std.json.parseFromSlice(Claims, alloc, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    const id = claims.value.@"https://api.openai.com/auth".chatgpt_account_id;
+    if (id.len == 0) return error.InvalidOAuthToken;
+    return id;
+}
+
 fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
+    return buildBodyForAuth(alloc, req, false);
+}
+
+fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bool) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -378,8 +412,24 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     try js.objectField("store");
     try js.write(false);
 
-    try js.objectField("max_output_tokens");
-    try js.write(req.opts.max_out orelse default_max_output_tokens);
+    if (!is_sub) {
+        try js.objectField("max_output_tokens");
+        try js.write(req.opts.max_out orelse default_max_output_tokens);
+    } else {
+        try js.objectField("instructions");
+        var instructions: std.Io.Writer.Allocating = .init(ar);
+        for (req.msgs) |msg| {
+            if (msg.role != .system) continue;
+            for (msg.parts) |part| switch (part) {
+                .text => |text| {
+                    if (instructions.written().len > 0) try instructions.writer.writeByte('\n');
+                    try instructions.writer.writeAll(text);
+                },
+                else => return error.UnsupportedPartType,
+            };
+        }
+        try js.write(if (instructions.written().len > 0) instructions.written() else "You are a helpful assistant.");
+    }
 
     if (req.opts.temp) |temp| {
         try js.objectField("temperature");
@@ -401,7 +451,16 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     }
 
     try js.objectField("input");
-    try writeInput(ar, &js, req.msgs);
+    if (is_sub) {
+        try js.beginArray();
+        for (req.msgs) |msg| switch (msg.role) {
+            .system => {},
+            .user => try writeTextInput(ar, &js, "user", msg.parts),
+            .assistant => try writeAssistantInput(ar, &js, msg.parts),
+            .tool => try writeToolInput(ar, &js, msg.parts),
+        };
+        try js.endArray();
+    } else try writeInput(ar, &js, req.msgs);
 
     if (req.tools.len > 0) {
         try js.objectField("tools");
@@ -777,6 +836,40 @@ test "parseSseData unknown and invalid return null" {
 test "callIdFromToolId strips item suffix" {
     try testing.expectEqualStrings("call-1", callIdFromToolId("call-1|fc_123"));
     try testing.expectEqualStrings("call-2", callIdFromToolId("call-2"));
+}
+
+test "ChatGPT OAuth body uses instructions without API token limits" {
+    const body = try Cfg.buildBody(testing.allocator, .{
+        .model = "gpt-6.1-sol",
+        .msgs = &.{
+            .{ .role = .system, .parts = &.{.{ .text = "rules" }} },
+            .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
+        },
+        .opts = .{ .thinking = .off, .max_out = 123 },
+    }, true);
+    defer testing.allocator.free(body);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"gpt-6.1-sol","stream":true,"store":false,"instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+    );
+}
+
+test "ChatGPT OAuth requires an account claim" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const claims =
+        \\{"https://api.openai.com/auth":{"chatgpt_account_id":"test-account"}}
+    ;
+    const encoder = std.base64.url_safe_no_pad.Encoder;
+    const encoded = try alloc.alloc(u8, encoder.calcSize(claims.len));
+    _ = encoder.encode(encoded, claims);
+    const token = try std.fmt.allocPrint(alloc, "header.{s}.signature", .{encoded});
+    try expectSnap(@src(), try alloc.dupe(u8, try accountId(alloc, token)),
+        \\[]u8
+        \\  "test-account"
+    );
+    try testing.expectError(error.InvalidOAuthToken, accountId(alloc, "invalid"));
 }
 
 test "buildBody minimal request has model stream and input" {

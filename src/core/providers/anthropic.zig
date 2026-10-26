@@ -13,6 +13,14 @@ pub const Cfg = struct {
     pub const api_host = "api.anthropic.com";
     pub const api_path = "/v1/messages";
 
+    pub fn apiUri(_: bool) std.Uri {
+        return .{
+            .scheme = "https",
+            .host = .{ .raw = api_host },
+            .path = .{ .raw = api_path },
+        };
+    }
+
     pub const ExtFields = struct {
         cache_write: u64,
         tool_id: std.ArrayListUnmanaged(u8),

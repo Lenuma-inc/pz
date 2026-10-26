@@ -2380,6 +2380,35 @@ test "pty: error display from provider" {
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "something went wrong") != null);
 }
 
+test "pty: OpenAI login exposes selectable models without restarting" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    _ = ctx.env.swapRemove("OPENAI_API_KEY");
+    _ = ctx.env.swapRemove("ANTHROPIC_API_KEY");
+    _ = ctx.env.swapRemove("ANTHROPIC_OAUTH_TOKEN");
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/login openai sk-test-no-network\r" },
+        .{ .wait_for = .{ .text = "API key saved for openai", .timeout_ms = 3000 } },
+        .{ .inject = "\x0c" },
+        .{ .wait_for = .{ .text = "Select Model", .timeout_ms = 3000 } },
+        .{ .inject = "\x1b[B\x1b[B\x1b[B\r" },
+        .{ .sleep = 200 },
+        .{ .snapshot = "selected_openai" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session",
+    }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "gpt-6-luna") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "openai") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "Select Model") == null);
+}
+
 test "pty: settings toggle via slash command" {
     const alloc = std.testing.allocator;
     var ctx = try setupInteractiveEnv(alloc);
