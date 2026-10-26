@@ -631,7 +631,7 @@ fn trustedUpdateRing() !core.signing.KeyRing {
 }
 
 fn checkDefaultKeyRelease() bool {
-    if (builtin.mode == .Debug) return false;
+    if (builtin.mode == .debug) return false;
     return isDefaultDevKey();
 }
 
@@ -776,9 +776,9 @@ fn isBadHeaderTransport(err: anyerror) bool {
 }
 
 fn isBadHeaderBody(body: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(body, "invalid header name") != null or
-        std.ascii.indexOfIgnoreCase(body, "bad header name") != null or
-        std.ascii.indexOfIgnoreCase(body, "invalid http header name") != null;
+    return std.ascii.findIgnoreCase(body, "invalid header name") != null or
+        std.ascii.findIgnoreCase(body, "bad header name") != null or
+        std.ascii.findIgnoreCase(body, "invalid http header name") != null;
 }
 
 fn shouldRetryForBadHeaderResponse(res: HttpResult) bool {
@@ -842,7 +842,7 @@ fn statusHint(status: u16) []const u8 {
 
 fn indexOfIgnoreCasePos(hay: []const u8, start: usize, needle: []const u8) ?usize {
     if (start >= hay.len) return null;
-    const rel = std.ascii.indexOfIgnoreCase(hay[start..], needle) orelse return null;
+    const rel = std.ascii.findIgnoreCase(hay[start..], needle) orelse return null;
     return start + rel;
 }
 
@@ -887,7 +887,7 @@ fn htmlTagTextAlloc(alloc: std.mem.Allocator, body: []const u8, tag: []const u8)
     var close_buf: [20]u8 = undefined;
     const open = std.fmt.bufPrint(&open_buf, "<{s}", .{tag}) catch return null;
     const close = std.fmt.bufPrint(&close_buf, "</{s}>", .{tag}) catch return null;
-    const open_idx = std.ascii.indexOfIgnoreCase(body, open) orelse return null;
+    const open_idx = std.ascii.findIgnoreCase(body, open) orelse return null;
     const gt_rel = std.mem.indexOfScalar(u8, body[open_idx..], '>') orelse return null;
     const val_start = open_idx + gt_rel + 1;
     const close_idx = indexOfIgnoreCasePos(body, val_start, close) orelse return null;
@@ -902,7 +902,7 @@ fn htmlTagTextAlloc(alloc: std.mem.Allocator, body: []const u8, tag: []const u8)
 }
 
 fn responseDetailAlloc(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
-    if (std.ascii.indexOfIgnoreCase(body, "<html") != null) {
+    if (std.ascii.findIgnoreCase(body, "<html") != null) {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(alloc);
         const tags = [_][]const u8{ "title", "h1", "h2", "p" };

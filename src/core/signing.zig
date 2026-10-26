@@ -65,7 +65,7 @@ fn ParseMixin(comptime T: type, comptime len: usize, comptime E: type, comptime 
         fn wipeStack(buf: *[len]u8) void {
             if (T != Seed) return;
             const p: *volatile [len]u8 = buf;
-            p.* = [_]u8{0} ** len;
+            p.* = @splat(0);
         }
 
         pub fn parse(raw_in: []const u8) E!T {
@@ -102,7 +102,7 @@ pub const Seed = struct {
     /// Zero seed bytes. Uses volatile write to prevent compiler elision.
     pub fn wipe(self: *Seed) void {
         const ptr: *volatile [seed_len]u8 = @ptrCast(&self.raw);
-        ptr.* = [_]u8{0} ** seed_len;
+    ptr.* = @splat(0);
     }
 
     pub fn deinit(self: *Seed) void {
@@ -236,7 +236,7 @@ pub const KeyPair = struct {
         var seed_copy = seed.bytes().*;
         defer {
             const p: *volatile [seed_len]u8 = &seed_copy;
-            p.* = [_]u8{0} ** seed_len;
+    p.* = @splat(0);
         }
         const pair = Ed25519.KeyPair.generateDeterministic(seed_copy) catch return error.BadSeed;
         return .{ .pair = pair };
@@ -258,7 +258,7 @@ pub const KeyPair = struct {
     /// Zero secret key bytes. Uses volatile write to prevent compiler elision.
     pub fn wipe(self: *KeyPair) void {
         const ptr: *volatile [Ed25519.SecretKey.encoded_length]u8 = @ptrCast(&self.pair.secret_key);
-        ptr.* = [_]u8{0} ** Ed25519.SecretKey.encoded_length;
+    ptr.* = @splat(0);
     }
 
     pub fn deinit(self: *KeyPair) void {
@@ -603,7 +603,7 @@ fn seedFromParts(a: u64, b: u64, c: u64, d: u64) Seed {
     var raw: [seed_len]u8 = undefined;
     defer {
         const p: *volatile [seed_len]u8 = &raw;
-        p.* = [_]u8{0} ** seed_len;
+    p.* = @splat(0);
     }
     std.mem.writeInt(u64, raw[0..8], a, .little);
     std.mem.writeInt(u64, raw[8..16], b, .little);
@@ -882,7 +882,7 @@ test "manifest parse rejects bad header" {
 }
 
 test "manifest parse rejects missing fields" {
-    try testing.expectError(error.MissingField, Manifest.parse("pz-manifest-v1\nsig=00" ++ "00" ** 63 ++ "\n"));
+    try testing.expectError(error.MissingField, Manifest.parse("pz-manifest-v1\nsig=00" ++ @as([126]u8, @splat('0')) ++ "\n"));
 }
 
 test "ctEql matches identical slices" {
@@ -1036,12 +1036,12 @@ test "manifest key_id in canonical form" {
 }
 
 test "manifest parse rejects missing key_id" {
-    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ "aa" ** 32 ++ "\nurl=u\nsig=" ++ "00" ** 64 ++ "\n";
+    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ @as([64]u8, @splat('a')) ++ "\nurl=u\nsig=" ++ @as([128]u8, @splat('0')) ++ "\n";
     try testing.expectError(error.MissingField, Manifest.parse(raw));
 }
 
 test "manifest parse rejects bad key_id length" {
-    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ "aa" ** 32 ++ "\nurl=u\nkey_id=short\nsig=" ++ "00" ** 64 ++ "\n";
+    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ @as([64]u8, @splat('a')) ++ "\nurl=u\nkey_id=short\nsig=" ++ @as([128]u8, @splat('0')) ++ "\n";
     try testing.expectError(error.BadField, Manifest.parse(raw));
 }
 

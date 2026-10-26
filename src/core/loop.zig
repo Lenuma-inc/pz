@@ -1571,7 +1571,7 @@ test "loop smoke composes replay provider tool and mode" {
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         tool_result_ct: usize = 0,
-        tool_result_out: [64]u8 = [_]u8{0} ** 64,
+        tool_result_out: [64]u8 = @splat(0),
         tool_result_len: usize = 0,
         replay_evs: []const session.Event = &.{},
         replay_sid: []const u8 = "",
@@ -3307,7 +3307,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         err_ct: usize = 0,
-        last_err: [128]u8 = [_]u8{0} ** 128,
+        last_err: [128]u8 = @splat(0),
         last_err_len: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -3459,7 +3459,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
-        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text: [128]u8 = @splat(0),
         last_text_len: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -3776,7 +3776,7 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
-        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text: [128]u8 = @splat(0),
         last_text_len: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -3919,7 +3919,7 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
-        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text: [128]u8 = @splat(0),
         last_text_len: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -4755,7 +4755,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
 
     const ModeImpl = struct {
         mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
-        order: [8]u8 = [_]u8{0} ** 8,
+        order: [8]u8 = @splat(0),
         len: usize = 0,
 
         fn push(self: *@This(), ev: ModeEv) !void {
@@ -5071,7 +5071,7 @@ test "UX8b: agent tool returns structured result with status" {
     const StoreImpl = struct {
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
-        tool_out: [256]u8 = [_]u8{0} ** 256,
+        tool_out: [256]u8 = @splat(0),
         tool_out_len: usize = 0,
         tool_is_err: bool = false,
 
@@ -5218,7 +5218,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     const StoreImpl = struct {
         session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
-        tool_out: [256]u8 = [_]u8{0} ** 256,
+        tool_out: [256]u8 = @splat(0),
         tool_out_len: usize = 0,
         tool_is_err: bool = false,
 

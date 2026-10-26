@@ -283,8 +283,8 @@ test "snapshot: verify survives rotation and tracks last tag" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
 
-    const k1 = Key{ .id = 1, .bytes = [_]u8{0x11} ** mac_len };
-    const k2 = Key{ .id = 2, .bytes = [_]u8{0x22} ** mac_len };
+    const k1 = Key{ .id = 1, .bytes = @splat(0x11) };
+    const k2 = Key{ .id = 2, .bytes = @splat(0x22) };
 
     const l1 = try sealAlloc(testing.allocator, k1, null, "{\"seq\":1}");
     defer testing.allocator.free(l1);
@@ -323,7 +323,7 @@ test "snapshot: verify stops at first tampered line" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
 
-    const key = Key{ .id = 7, .bytes = [_]u8{0x33} ** mac_len };
+    const key = Key{ .id = 7, .bytes = @splat(0x33) };
     const l1 = try sealAlloc(testing.allocator, key, null, "{\"seq\":1}");
     defer testing.allocator.free(l1);
     const raw1 = try lineJoinAlloc(testing.allocator, &.{l1});
@@ -381,7 +381,7 @@ test "seq tracker persists and rejects replayed seq" {
 }
 
 test "verify rejects replayed sequence numbers" {
-    const key = Key{ .id = 1, .bytes = [_]u8{0x55} ** mac_len };
+    const key = Key{ .id = 1, .bytes = @splat(0x55) };
 
     const l1 = try sealAllocSeq(testing.allocator, key, null, "{\"a\":1}", 5);
     defer testing.allocator.free(l1);
@@ -401,7 +401,7 @@ test "verify rejects replayed sequence numbers" {
 }
 
 test "crash recovery resumes from last good tag" {
-    const key = Key{ .id = 1, .bytes = [_]u8{0x44} ** mac_len };
+    const key = Key{ .id = 1, .bytes = @splat(0x44) };
 
     const l1 = try sealAlloc(testing.allocator, key, null, "{\"seq\":1}");
     defer testing.allocator.free(l1);

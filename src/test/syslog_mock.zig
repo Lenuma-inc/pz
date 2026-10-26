@@ -26,7 +26,7 @@ pub const UdpCollector = struct {
     goal: usize = 1,
     count: usize = 0,
     bufs: [max_msgs][max_msg_len]u8 = undefined,
-    lens: [max_msgs]usize = [_]usize{0} ** max_msgs,
+    lens: [max_msgs]usize = @splat(0),
 
     pub fn init() !UdpCollector {
         const addr = try net.IpAddress.parse("127.0.0.1", 0);
@@ -51,7 +51,7 @@ pub const UdpCollector = struct {
         if (n == 0 or n > max_msgs) return error.InvalidCount;
         self.goal = n;
         self.count = 0;
-        self.lens = [_]usize{0} ** max_msgs;
+        self.lens = @splat(0);
         return std.Thread.spawn(.{}, runUdp, .{self});
     }
 
@@ -73,7 +73,7 @@ pub const TcpCollector = struct {
     goal: usize = 1,
     count: usize = 0,
     bufs: [max_msgs][max_msg_len]u8 = undefined,
-    lens: [max_msgs]usize = [_]usize{0} ** max_msgs,
+    lens: [max_msgs]usize = @splat(0),
 
     pub fn init() !TcpCollector {
         const addr = try net.IpAddress.parse("127.0.0.1", 0);
@@ -98,7 +98,7 @@ pub const TcpCollector = struct {
         if (n == 0 or n > max_msgs) return error.InvalidCount;
         self.goal = n;
         self.count = 0;
-        self.lens = [_]usize{0} ** max_msgs;
+        self.lens = @splat(0);
         return std.Thread.spawn(.{}, runTcp, .{self});
     }
 

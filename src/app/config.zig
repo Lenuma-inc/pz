@@ -50,9 +50,9 @@ pub const Env = struct {
     }
 
     pub fn deinit(self: *Env, alloc: std.mem.Allocator) void {
-        inline for (@typeInfo(Env).@"struct".fields) |f| {
-            if (f.type == ?[]const u8) {
-                if (@field(self, f.name)) |v| alloc.free(v);
+        inline for (@typeInfo(Env).@"struct".field_names, @typeInfo(Env).@"struct".field_types) |name, T| {
+            if (T == ?[]const u8) {
+                if (@field(self, name)) |v| alloc.free(v);
             }
         }
         self.* = undefined;
@@ -87,13 +87,13 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         if (self.syslog_fwd) |*fwd| fwd.deinit(alloc);
-        inline for (@typeInfo(Config).@"struct".fields) |f| {
-            if (f.type == []u8) {
-                alloc.free(@field(self, f.name));
-            } else if (f.type == ?[]u8) {
-                if (@field(self, f.name)) |v| alloc.free(v);
-            } else if (f.type == ?[][]u8) {
-                if (@field(self, f.name)) |models| {
+        inline for (@typeInfo(Config).@"struct".field_names, @typeInfo(Config).@"struct".field_types) |name, T| {
+            if (T == []u8) {
+                alloc.free(@field(self, name));
+            } else if (T == ?[]u8) {
+                if (@field(self, name)) |v| alloc.free(v);
+            } else if (T == ?[][]u8) {
+                if (@field(self, name)) |models| {
                     for (models) |m| alloc.free(m);
                     alloc.free(models);
                 }

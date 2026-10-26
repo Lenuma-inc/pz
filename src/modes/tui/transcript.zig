@@ -638,6 +638,7 @@ pub const Transcript = struct {
         var buf: std.ArrayListUnmanaged(u8) = .{
             .items = txt,
             .capacity = txt.len,
+            .pointer_stability = .{},
         };
         errdefer buf.deinit(self.alloc);
         return self.insertBlock(.{

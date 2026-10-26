@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn resolve(alloc: std.mem.Allocator, host: []const u8, port: u16) ![]std.Io.net.IpAddress {
     if (std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidHostName;
-    const name = try alloc.dupeZ(u8, host);
+    const name = try alloc.dupeSentinel(u8, host, 0);
     defer alloc.free(name);
     var first: ?*std.c.addrinfo = null;
     var hints = std.mem.zeroes(std.c.addrinfo);

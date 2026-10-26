@@ -2203,7 +2203,7 @@ test "e2e: denied cmd → seal → syslog frame → udp mock → verify HMAC + r
     };
 
     // 2. Seal with HMAC chain (first entry, no prev)
-    const hmac_key = integrity.Key{ .id = 42, .bytes = [_]u8{0xAB} ** integrity.mac_len };
+    const hmac_key = integrity.Key{ .id = 42, .bytes = @splat(0xAB) };
     const sealed = try sealAlloc(talloc, ent, hmac_key, null, null);
     defer talloc.free(sealed);
 

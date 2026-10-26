@@ -95,7 +95,7 @@ pub const Editor = struct {
     hist_idx: ?usize = null, // null = editing new input
     stash: std.ArrayListUnmanaged(u8) = .empty, // saves current input when browsing history
     // Kill ring (emacs-style)
-    kill_ring: [8]?[]u8 = .{null} ** 8,
+    kill_ring: [8]?[]u8 = @splat(null),
     kr_head: u8 = 0,
     kr_len: u8 = 0,
     kr_yank_idx: u8 = 0,

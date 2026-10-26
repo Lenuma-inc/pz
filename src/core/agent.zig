@@ -1312,7 +1312,7 @@ pub const BgAgent = struct {
 /// Pool of concurrent background agents with bounded capacity.
 pub const BgPool = struct {
     alloc: std.mem.Allocator,
-    agents: [MultiTracker.max_agents]?*BgAgent = [_]?*BgAgent{null} ** MultiTracker.max_agents,
+    agents: [MultiTracker.max_agents]?*BgAgent = @splat(null),
     len: u8 = 0,
     tracker: MultiTracker = .{},
 
@@ -2241,7 +2241,7 @@ test "BgPool lifecycle: init, inject agents, poll to done" {
     var agents: [2]*BgAgent = undefined;
     for (&agents) |*slot| {
         const bg = try alloc.create(BgAgent);
-        bg.* = try BgAgent.init(alloc, "test-agent", "0" ** 64);
+        bg.* = try BgAgent.init(alloc, "test-agent", &@as([64]u8, @splat('0')));
         const idx = try pool.tracker.add("test-agent", 0);
         pool.agents[idx] = bg;
         pool.len += 1;

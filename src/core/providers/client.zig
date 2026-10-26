@@ -330,7 +330,7 @@ const MockRawTr = struct {
 };
 
 const WaitLog = struct {
-    waits: [8]u64 = [_]u64{0} ** 8,
+    waits: [8]u64 = @splat(0),
     len: usize = 0,
 
     pub fn wait(self: *WaitLog, wait_ms: u64) void {

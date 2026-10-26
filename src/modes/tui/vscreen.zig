@@ -193,7 +193,7 @@ pub const VScreen = struct {
         if (is_private) i += 1;
 
         // Collect params.
-        var params: [16]u16 = .{0} ** 16;
+        var params: [16]u16 = @splat(0);
         var pc: usize = 0;
         while (i < data.len) {
             if (data[i] >= '0' and data[i] <= '9') {

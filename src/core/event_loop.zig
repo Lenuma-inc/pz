@@ -90,12 +90,12 @@ pub const EventLoop = struct {
     wake_w: posix.fd_t,
     timer_count: u32 = 0,
     timer_fds: if (is_epoll) [max_timers]posix.fd_t else void =
-        if (is_epoll) [_]posix.fd_t{-1} ** max_timers else {},
+        if (is_epoll) @as([max_timers]posix.fd_t, @splat(-1)) else {},
     // Fd → handler dispatch table
-    fd_handlers: [max_handlers]FdEntry = [_]FdEntry{.{ .fd = -1, .handler = undefined }} ** max_handlers,
+    fd_handlers: [max_handlers]FdEntry = @splat(.{ .fd = -1, .handler = undefined }),
     fd_handler_count: u32 = 0,
     // Timer handlers
-    timer_handlers: [max_timers]?*TimerHandler = [_]?*TimerHandler{null} ** max_timers,
+    timer_handlers: [max_timers]?*TimerHandler = @splat(null),
     // SIGCHLD signalfd (Linux) or kqueue EVFILT_SIGNAL
     sigchld_fd: posix.fd_t = -1,
     sigchld_handler: ?*Handler = null,

@@ -260,7 +260,7 @@ pub fn isBlockedIp4(ip: [4]u8) bool {
 }
 
 pub fn isBlockedIp6(ip: [16]u8) bool {
-    const zero = [_]u8{0} ** 16;
+    const zero: [16]u8 = @splat(0);
     if (std.mem.eql(u8, ip[0..], zero[0..])) return true;
     if (std.mem.eql(u8, ip[0..15], zero[0..15]) and ip[15] == 1) return true;
     if ((ip[0] & 0xfe) == 0xfc) return true;
@@ -368,7 +368,7 @@ pub const SignedDoc = struct {
     doc: Doc,
     pk: signing.PublicKey,
     sig: signing.Signature,
-    key_id: [signing.key_id_len]u8 = [_]u8{0} ** signing.key_id_len,
+    key_id: [signing.key_id_len]u8 = @splat(0),
 };
 
 /// Tracks last-seen policy generation for rollback detection.
@@ -2281,9 +2281,9 @@ test "network policy blocks local and private ranges" {
     try testing.expect(isBlockedNetAddr(netIp4(.{ 172, 16, 1, 9 }, 443)));
     try testing.expect(isBlockedNetAddr(netIp4(.{ 192, 168, 4, 5 }, 443)));
     try testing.expect(isBlockedNetAddr(netIp4(.{ 169, 254, 2, 9 }, 443)));
-    try testing.expect(isBlockedNetAddr(netIp6(.{0} ** 15 ++ .{1}, 443)));
-    try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfe, 0x80 } ++ .{0} ** 14, 443)));
-    try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfc, 0 } ++ .{0} ** 14, 443)));
+    try testing.expect(isBlockedNetAddr(netIp6(@as([16]u8, @splat(0)) ++ .{1}, 443)));
+    try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfe, 0x80 } ++ @as([14]u8, @splat(0)), 443)));
+    try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfc, 0 } ++ @as([14]u8, @splat(0)), 443)));
 }
 
 test "network policy allows public addresses" {

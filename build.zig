@@ -110,9 +110,6 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.stdio = .inherit;
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
     const run_step = b.step("run", "Run pz");
     run_step.dependOn(&run_cmd.step);
 
@@ -246,9 +243,9 @@ fn depRoot(b: *std.Build, name: []const u8) []const u8 {
         const dep_name, const dep_hash = dep;
         if (!std.mem.eql(u8, dep_name, name)) continue;
 
-        inline for (@typeInfo(pkgs).@"struct".decls) |decl| {
-            if (std.mem.eql(u8, dep_hash, decl.name)) {
-                return @field(pkgs, decl.name).build_root;
+        inline for (@typeInfo(pkgs).@"struct".decl_names) |decl_name| {
+            if (std.mem.eql(u8, dep_hash, decl_name)) {
+                return @field(pkgs, decl_name).build_root;
             }
         }
         unreachable;

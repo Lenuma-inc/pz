@@ -2,9 +2,7 @@
 const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
-const libc = @cImport({
-    @cInclude("sys/stat.h");
-});
+const c_std = std.c;
 const posix = std.posix;
 
 const native_os = builtin.os.tag;
@@ -192,26 +190,12 @@ fn mapParentDirErr(dir: Dir, name: []const u8, err: anyerror) anyerror {
         error.FileNotFound => return error.FileNotFound,
         else => return err,
     };
-    if ((st.st_mode & posix.S.IFMT) == posix.S.IFLNK) return error.AccessDenied;
+    if (st.kind == .sym_link) return error.AccessDenied;
     return error.FileNotFound;
 }
 
-fn fstatatNoFollow(dir_fd: posix.fd_t, name: []const u8) !libc.struct_stat {
-    var name_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (name.len >= name_buf.len) return error.NameTooLong;
-    @memcpy(name_buf[0..name.len], name);
-    name_buf[name.len] = 0;
-
-    var st: libc.struct_stat = undefined;
-    switch (posix.errno(libc.fstatat(dir_fd, name_buf[0..name.len :0].ptr, &st, std.c.AT.SYMLINK_NOFOLLOW))) {
-        .SUCCESS => return st,
-        .ACCES => return error.AccessDenied,
-        .PERM => return error.PermissionDenied,
-        .LOOP => return error.SymLinkLoop,
-        .NOENT => return error.FileNotFound,
-        .NOTDIR => return error.NotDir,
-        else => |errno| return posix.unexpectedErrno(errno),
-    }
+fn fstatatNoFollow(dir_fd: posix.fd_t, name: []const u8) !File.Stat {
+    return (Dir{ .handle = dir_fd }).statFile(sys.io, name, .{ .follow_symlinks = false });
 }
 
 fn relPath(path: []const u8) ![]const u8 {
@@ -392,8 +376,8 @@ fn maybeRace(dir_fd: posix.fd_t, path: []const u8) !void {
 
 fn ensureStableFile(dir_fd: posix.fd_t, path: []const u8, fd: posix.fd_t) !void {
     const got = fstatFd(fd) catch return error.AccessDenied;
-    if (!isReg(got.st_mode)) return error.AccessDenied;
-    if (got.st_nlink != 1) return error.AccessDenied;
+    if (!isReg(got)) return error.AccessDenied;
+    if (got.nlink != 1) return error.AccessDenied;
 
     const want = fstatatNoFollow(dir_fd, path) catch |err| switch (err) {
         error.FileNotFound,
@@ -403,28 +387,21 @@ fn ensureStableFile(dir_fd: posix.fd_t, path: []const u8, fd: posix.fd_t) !void 
         => return error.AccessDenied,
         else => return err,
     };
-    if (!isReg(want.st_mode)) return error.AccessDenied;
-    if (want.st_nlink != 1) return error.AccessDenied;
+    if (!isReg(want)) return error.AccessDenied;
+    if (want.nlink != 1) return error.AccessDenied;
     if (!sameFile(got, want)) return error.AccessDenied;
 }
 
-fn fstatFd(fd: posix.fd_t) !libc.struct_stat {
-    var st: libc.struct_stat = undefined;
-    switch (posix.errno(libc.fstat(fd, &st))) {
-        .SUCCESS => return st,
-        .ACCES => return error.AccessDenied,
-        .PERM => return error.PermissionDenied,
-        .BADF => return error.FileNotFound,
-        else => |errno| return posix.unexpectedErrno(errno),
-    }
+fn fstatFd(fd: posix.fd_t) !File.Stat {
+    return (File{ .handle = fd, .flags = .{ .nonblocking = false } }).stat(sys.io);
 }
 
-fn isReg(mode: posix.mode_t) bool {
-    return (mode & posix.S.IFMT) == posix.S.IFREG;
+fn isReg(st: File.Stat) bool {
+    return st.kind == .file;
 }
 
-fn sameFile(a: libc.struct_stat, b: libc.struct_stat) bool {
-    return a.st_dev == b.st_dev and a.st_ino == b.st_ino;
+fn sameFile(a: File.Stat, b: File.Stat) bool {
+    return a.inode == b.inode;
 }
 
 /// Resolve `path` component-by-component under `root`, following symlinks at

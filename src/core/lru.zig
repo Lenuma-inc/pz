@@ -177,7 +177,7 @@ test "eviction chain" {
 const OhSnap = @import("ohsnap");
 
 const LruSnap = struct {
-    present: [8]bool = .{false} ** 8,
+    present: [8]bool = @splat(false),
     count: usize,
 };
 

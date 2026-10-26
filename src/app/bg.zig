@@ -1074,7 +1074,7 @@ const AuditSealDoc = struct {
 fn e2eAuditKey() core.audit_integrity.Key {
     return .{
         .id = 7,
-        .bytes = [_]u8{0x37} ** core.audit_integrity.mac_len,
+        .bytes = @splat(0x37),
     };
 }
 

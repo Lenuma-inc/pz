@@ -225,7 +225,7 @@ fn isLoopback(addr: net.IpAddress) bool {
     return switch (addr) {
         .ip4 => |ip4| ip4.bytes[0] == 127,
         .ip6 => |ip6| blk: {
-            const loopback = [_]u8{0} ** 15 ++ [_]u8{1};
+            const loopback = @as([15]u8, @splat(0)) ++ [_]u8{1};
             break :blk std.mem.eql(u8, &ip6.bytes, &loopback);
         },
     };

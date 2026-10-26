@@ -7332,8 +7332,8 @@ const TurnCtx = struct {
 };
 
 fn needsAskHint(prompt: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(prompt, "ask me questions") != null or
-        std.ascii.indexOfIgnoreCase(prompt, "ask questions") != null;
+    return std.ascii.findIgnoreCase(prompt, "ask me questions") != null or
+        std.ascii.findIgnoreCase(prompt, "ask questions") != null;
 }
 
 test "buildAskRows includes type-something-else and next navigation" {
@@ -8497,7 +8497,7 @@ fn noopPolicy() RuntimePolicy {
         .alloc = std.testing.allocator,
         .resolved = .{
             .doc = .{ .rules = &.{} },
-            .hash_hex = [_]u8{'0'} ** 64,
+            .hash_hex = @splat('0'),
             .has_files = false,
             .locked = false,
         },
