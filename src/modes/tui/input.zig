@@ -482,6 +482,33 @@ pub const Reader = struct {
 };
 
 fn mapCsiParam(seq: []const u8) Event {
+    // CSI arrow keys can include an explicit modifier parameter, for example
+    // "1;1A" (unmodified) or "1;5D" (Ctrl+Left).
+    if (seq.len >= 2) {
+        const final = seq[seq.len - 1];
+        const params = seq[0 .. seq.len - 1];
+        if (final == 'A' or final == 'B' or final == 'C' or final == 'D') {
+            if (std.mem.indexOfScalar(u8, params, ';')) |sep| {
+                const modifier = std.fmt.parseInt(u8, params[sep + 1 ..], 10) catch 1;
+                const mods = modifier -| 1;
+                const alt = mods & 2 != 0;
+                const ctrl = mods & 4 != 0;
+                if (alt and !ctrl and (final == 'A' or final == 'B')) {
+                    return .{ .key = if (final == 'A') .alt_up else .alt_down };
+                }
+                if (ctrl and !alt and (final == 'C' or final == 'D')) {
+                    return .{ .key = if (final == 'C') .ctrl_right else .ctrl_left };
+                }
+            }
+            return .{ .key = switch (final) {
+                'A' => .up,
+                'B' => .down,
+                'C' => .right,
+                'D' => .left,
+                else => return .none,
+            } };
+        }
+    }
     // "3~" = delete, "1~"/"7~" = home, "4~"/"8~" = end, "5~"/"6~" = page up/down
     if (seq.len == 2 and seq[1] == '~') {
         return switch (seq[0]) {
@@ -658,6 +685,26 @@ test "parse arrow left" {
     @memcpy(r.buf[0..3], "\x1b[D");
     r.len = 3;
     try expectKey(r.parseOne().?, .left);
+}
+
+test "parse parameterized terminal arrows" {
+    const seq = "\x1b[1;1A";
+    var r = Reader.init(-1);
+    @memcpy(r.buf[0..seq.len], seq);
+    r.len = seq.len;
+    try expectKey(r.parseOne().?, .up);
+
+    const alt_seq = "\x1b[1;3A";
+    r = Reader.init(-1);
+    @memcpy(r.buf[0..alt_seq.len], alt_seq);
+    r.len = alt_seq.len;
+    try expectKey(r.parseOne().?, .alt_up);
+
+    const ctrl_seq = "\x1b[1;5D";
+    r = Reader.init(-1);
+    @memcpy(r.buf[0..ctrl_seq.len], ctrl_seq);
+    r.len = ctrl_seq.len;
+    try expectKey(r.parseOne().?, .ctrl_left);
 }
 
 test "parse ss3 arrow up" {

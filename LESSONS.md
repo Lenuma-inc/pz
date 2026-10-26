@@ -2,6 +2,11 @@
 
 Hard-won patterns and anti-patterns from building pz. **Update this file at the end of every session** with new discoveries.
 
+## Session Notes (2026-10-27)
+
+### Do Not Do
+- Do not assume every terminal sends bare CSI arrow sequences; accept parameterized CSI arrows such as `1;1A` alongside standard CSI and SS3 forms.
+
 ---
 
 ## Session Notes (2026-03-24)
