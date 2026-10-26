@@ -1,4 +1,5 @@
 //! Filesystem path completion for the editor.
+const sys = @import("pz_io");
 
 const std = @import("std");
 
@@ -12,13 +13,13 @@ pub fn list(alloc: std.mem.Allocator, prefix: []const u8) std.mem.Allocator.Erro
     const partial = if (last_sep) |s| prefix[s + 1 ..] else prefix;
     const dir_prefix = if (last_sep) |s| prefix[0 .. s + 1] else "";
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    const dir = std.Io.Dir.cwd().openDir(sys.io, dir_path, .{ .iterate = true }) catch return null;
+    defer dir.close(sys.io);
 
     var names = std.ArrayList([]u8).empty;
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(sys.io) catch null) |entry| {
         if (names.items.len >= max_results) break;
         if (entry.name.len > 0 and entry.name[0] == '.' and (partial.len == 0 or partial[0] != '.')) continue;
         if (partial.len > 0 and !std.mem.startsWith(u8, entry.name, partial)) continue;

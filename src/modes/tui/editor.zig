@@ -786,7 +786,7 @@ test "new keys produce correct actions" {
 
 test "input history navigates with up/down" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -840,7 +840,7 @@ test "input history navigates with up/down" {
 
 test "history stashes current input" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -909,7 +909,7 @@ test "ctrl-u kills whole line" {
 
 test "ctrl-w kills word backward" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1081,7 +1081,7 @@ test "yank with empty kill ring is no-op" {
 
 test "yank-pop cycles through kill ring" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1174,7 +1174,7 @@ test "ctrl-] no match stays in place" {
 
 test "ctrl-] cancel with non-char key" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1225,7 +1225,7 @@ test "undo groups consecutive inserts" {
 
 test "redo after undo" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 

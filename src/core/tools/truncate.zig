@@ -82,7 +82,7 @@ fn streamName(stream: Stream) []const u8 {
 
 test "output apply keeps chunk when within limit" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const got = apply("abc", 3);
     const snap = try std.fmt.allocPrint(std.testing.allocator, "chunk={s}\ntruncated={}\nmeta={}\n", .{
         got.chunk,
@@ -101,7 +101,7 @@ test "output apply keeps chunk when within limit" {
 
 test "output apply truncates chunk and emits metadata" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const got = apply("abcd", 3);
     const meta = got.meta orelse return error.TestUnexpectedResult;
     const snap = try std.fmt.allocPrint(std.testing.allocator, "chunk={s}\ntruncated={}\nmeta={d}|{d}|{d}|{d}\n", .{

@@ -84,7 +84,7 @@ fn parseNum(buf: []const u8, pos: *usize) ?usize {
 
 test "parse snapshots are stable" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     const snap = ParseSnap{
         .scroll_up = parse("\x1b[<64;10;5M").?,

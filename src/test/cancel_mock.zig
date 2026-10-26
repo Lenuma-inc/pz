@@ -1,4 +1,5 @@
 //! Test mock: atomic cancellation flag.
+const sys = @import("pz_io");
 const std = @import("std");
 const loop = @import("../core/loop.zig");
 
@@ -24,7 +25,11 @@ pub const DelayTrip = struct {
     delay_ms: u64,
 
     pub fn run(self: *DelayTrip) void {
-        std.Thread.sleep(self.delay_ms * std.time.ns_per_ms);
+        std.Io.sleep(
+            sys.io,
+            .fromMilliseconds(@intCast(self.delay_ms)),
+            .awake,
+        ) catch return;
         self.flag.request();
     }
 };

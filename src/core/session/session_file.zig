@@ -1,25 +1,28 @@
 //! Session file lifecycle: create, close, orphan cleanup.
+const sys = @import("pz_io");
 const std = @import("std");
 const builtin = @import("builtin");
 const fs_secure = @import("../fs_secure.zig");
 const sid_path = @import("path.zig");
 
+const Dir = std.Io.Dir;
+
 /// Wraps a session file path with lifecycle tracking.
 /// If `close()` is never called, `deinit()` logs a warning and deletes the orphan.
 pub const File = struct {
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: Dir,
     path: []const u8,
     closed: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8) !File {
+    pub fn init(alloc: std.mem.Allocator, dir: Dir, path: []const u8) !File {
         const owned = try alloc.dupe(u8, path);
         errdefer alloc.free(owned);
 
         // Confined create: O_NOFOLLOW + hardlink check for .pz state.
         var f = try fs_secure.createConfined(dir, owned, .{ .truncate = false });
-        errdefer dir.deleteFile(owned) catch {}; // cleanup: propagation impossible
-        f.close();
+        errdefer dir.deleteFile(sys.io, owned) catch {}; // cleanup: propagation impossible
+        f.close(sys.io);
 
         return .{
             .alloc = alloc,
@@ -34,7 +37,7 @@ pub const File = struct {
 
     pub fn deinit(self: *File) void {
         if (!self.closed) {
-            self.dir.deleteFile(self.path) catch {}; // cleanup: propagation impossible
+            self.dir.deleteFile(sys.io, self.path) catch {}; // cleanup: propagation impossible
         }
         self.alloc.free(self.path);
         self.* = undefined;
@@ -43,7 +46,7 @@ pub const File = struct {
 
 pub fn createSessionFile(
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: Dir,
     sid: []const u8,
     ext: []const u8,
 ) !File {
@@ -53,12 +56,12 @@ pub fn createSessionFile(
 }
 
 /// Delete any orphaned `.compact.tmp` files left by interrupted compactions.
-pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
+pub fn cleanOrphanTmpFiles(dir: Dir) void {
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(sys.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.endsWith(u8, entry.name, ".compact.tmp")) {
-            dir.deleteFile(entry.name) catch {}; // cleanup: propagation impossible
+            dir.deleteFile(sys.io, entry.name) catch {}; // cleanup: propagation impossible
         }
     }
 }
@@ -74,7 +77,7 @@ test "deinit without close deletes the file" {
     // File should be gone.
     try std.testing.expectError(
         error.FileNotFound,
-        tmp.dir.statFile("test-sess.jsonl"),
+        tmp.dir.statFile(std.testing.io, "test-sess.jsonl", .{}),
     );
 }
 
@@ -87,7 +90,7 @@ test "close then deinit preserves the file" {
     sf.deinit();
 
     // File should still exist.
-    const stat = try tmp.dir.statFile("test-sess.jsonl");
+    const stat = try tmp.dir.statFile(std.testing.io, "test-sess.jsonl", .{});
     try std.testing.expect(stat.size == 0);
 }
 
@@ -101,36 +104,36 @@ test "session file uses 0600 mode" {
     sf.close();
     sf.deinit();
 
-    const stat = try tmp.dir.statFile("test-sess.jsonl");
-    try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), stat.mode & 0o777);
+    const stat = try tmp.dir.statFile(std.testing.io, "test-sess.jsonl", .{});
+    try std.testing.expectEqual(fs_secure.file_mode.toMode() & 0o777, stat.permissions.toMode() & 0o777);
 }
 
 test "cleanOrphanTmpFiles removes compact.tmp files" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Create orphan tmp files and a normal session file.
     {
-        var f = try tmp.dir.createFile("s1.jsonl.compact.tmp", .{});
-        f.close();
+        var f = try tmp.dir.createFile(std.testing.io, "s1.jsonl.compact.tmp", .{});
+        f.close(std.testing.io);
     }
     {
-        var f = try tmp.dir.createFile("s2.jsonl.compact.tmp", .{});
-        f.close();
+        var f = try tmp.dir.createFile(std.testing.io, "s2.jsonl.compact.tmp", .{});
+        f.close(std.testing.io);
     }
     {
-        var f = try tmp.dir.createFile("s1.jsonl", .{});
-        f.close();
+        var f = try tmp.dir.createFile(std.testing.io, "s1.jsonl", .{});
+        f.close(std.testing.io);
     }
 
     cleanOrphanTmpFiles(tmp.dir);
 
     // Tmp files should be gone.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("s1.jsonl.compact.tmp"));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("s2.jsonl.compact.tmp"));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "s1.jsonl.compact.tmp", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "s2.jsonl.compact.tmp", .{}));
 
     // Normal file should survive.
-    _ = try tmp.dir.statFile("s1.jsonl");
+    _ = try tmp.dir.statFile(std.testing.io, "s1.jsonl", .{});
 }
 
 test "createSessionFile uses session id plus extension" {

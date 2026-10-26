@@ -395,7 +395,7 @@ fn parseExtColor(params: []const u16, i: *usize) Color {
 
 test "vscreen basic text rendering" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var vs = try VScreen.init(std.testing.allocator, 20, 3);
     defer vs.deinit();
 

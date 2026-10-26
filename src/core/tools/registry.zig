@@ -1,7 +1,6 @@
 //! Comptime tool registry: kind-keyed dispatch table generation.
 const std = @import("std");
 
-
 pub fn bind(
     comptime Kind: type,
     comptime Spec: type,
@@ -43,7 +42,7 @@ pub fn bind(
                         .push = pushFn,
                     };
                     fn pushFn(s: *Sink, ev: Event) anyerror!void {
-                        const self: *T = @fieldParentPtr("sink", s);
+                        const self: *T = @alignCast(@fieldParentPtr("sink", s));
                         return push_fn(self, ev);
                     }
                 };
@@ -67,7 +66,7 @@ pub fn bind(
                         .run = runFn,
                     };
                     fn runFn(d: *Dispatch, call: Call, sink: *Sink) anyerror!Result {
-                        const self: *T = @fieldParentPtr("dispatch", d);
+                        const self: *T = @alignCast(@fieldParentPtr("dispatch", d));
                         return run_fn(self, call, sink);
                     }
                 };
@@ -144,7 +143,7 @@ const TReg = bind(TKind, TSpec, TCall, TEv, TResult);
 
 test "registry lookup resolves by name and kind" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Snap = struct {
         read_is_read: bool,
         write_is_write: bool,
@@ -197,7 +196,7 @@ test "registry lookup resolves by name and kind" {
 
 test "registry run dispatches to named handler" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const SinkSnap = struct {
         ct: usize,
         last: u8,

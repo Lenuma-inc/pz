@@ -159,7 +159,7 @@ fn dupInfo(
 
 test "skill handler returns cached body with appended args" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     const skills = try std.testing.allocator.alloc(core_skill.SkillInfo, 1);
     skills[0] = try dupInfo(std.testing.allocator, "review-plan", "Use critic", false);

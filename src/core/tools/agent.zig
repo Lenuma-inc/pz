@@ -207,7 +207,10 @@ const SinkBridge = struct {
 };
 
 fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunResult, dropped: u32) Err!tools.Result {
-    const raw = try renderAlloc(self.alloc, agent_id, run_res, dropped);
+    const raw = renderAlloc(self.alloc, agent_id, run_res, dropped) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return fail(call, .io, @errorName(err)),
+    };
     defer self.alloc.free(raw);
     // Redact secrets from child agent output before returning to model.
     const full = audit.redactTextAlloc(self.alloc, raw, .@"pub") catch return error.OutOfMemory;
@@ -286,9 +289,9 @@ fn finalFor(run_res: rpc.ChildProc.RunResult) tools.Result.Final {
 }
 
 fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.ChildProc.RunResult, dropped: u32) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
-    const wr = out.writer(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const wr = &out.writer;
 
     const kind = if (run_res.out) |msg| @tagName(msg.kind) else "none";
     const stop = if (run_res.done) |done| @tagName(done.stop) else if (run_res.err != null) "err" else "missing";
@@ -313,14 +316,14 @@ fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.Chil
         try wr.writeAll(rpc_err.message);
     }
 
-    return out.toOwnedSlice(alloc);
+    return try out.toOwnedSlice();
 }
 
 const fail = shared.fail;
 
 test "agent handler renders info block and output" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const HookImpl = struct {
         hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
@@ -385,7 +388,7 @@ test "agent handler renders info block and output" {
 
 test "agent handler truncates deterministically" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const HookImpl = struct {
         hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
@@ -451,7 +454,7 @@ test "agent handler truncates deterministically" {
 
 test "agent handler maps rpc error to failed final" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const HookImpl = struct {
         hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
@@ -544,7 +547,7 @@ test "agent handler rejects missing policy hash" {
 
 test "stream hook emits progress via sink bridge" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     const StreamImpl = struct {
         stream_hook: StreamHook = .{ .vt = &Bind.vt },

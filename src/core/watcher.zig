@@ -1,9 +1,67 @@
 //! Filesystem watcher: kqueue (macOS) / inotify (Linux) event stream.
+const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
+const core_time = @import("time.zig");
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
+
+fn closeFd(fd: std.posix.fd_t) void {
+    _ = std.c.close(fd);
+}
+
+fn sleepNs(ns: u64) void {
+    std.Io.sleep(sys.io, .fromNanoseconds(@intCast(ns)), .awake) catch {};
+}
+
+const KqueueError = error{
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+} || std.posix.UnexpectedError;
+
+const KeventError = error{
+    EventNotFound,
+    SystemResources,
+    ProcessNotFound,
+    Overflow,
+} || std.posix.UnexpectedError;
+
+fn makeKqueue() KqueueError!std.posix.fd_t {
+    const rc = std.posix.system.kqueue();
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn runKevent(
+    kq: std.posix.fd_t,
+    changes: []const std.posix.Kevent,
+    events: []std.posix.Kevent,
+    timeout: ?*const std.posix.timespec,
+) KeventError!usize {
+    while (true) {
+        const rc = std.posix.system.kevent(
+            kq,
+            changes.ptr,
+            std.math.cast(c_int, changes.len) orelse return error.Overflow,
+            events.ptr,
+            std.math.cast(c_int, events.len) orelse return error.Overflow,
+            timeout,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .NOENT => return error.EventNotFound,
+            .NOMEM => return error.SystemResources,
+            .SRCH => return error.ProcessNotFound,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
 
 pub const Kind = enum {
     write,
@@ -31,12 +89,12 @@ pub fn sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Event) void, c
     return .{ .ctx = ctx };
 }
 
-pub const InitError = std.fs.Dir.StatFileError || error{
+pub const InitError = std.Io.Dir.StatFileError || error{
     EmptyPathSet,
     EmptyPath,
     InvalidPollMs,
     OutOfMemory,
-} || if (is_macos) std.posix.KQueueError || std.posix.OpenError || std.posix.KEventError else if (is_linux) error{InotifyInitFailed} else error{};
+} || if (is_macos) KqueueError || std.posix.OpenError || KeventError else if (is_linux) error{InotifyInitFailed} else error{};
 
 const Backend = if (is_macos) struct {
     kq: std.posix.fd_t,
@@ -62,8 +120,8 @@ const Backend = if (is_macos) struct {
         errdefer alloc.free(fds);
         @memset(fds, null);
 
-        const kq = try std.posix.kqueue();
-        errdefer std.posix.close(kq);
+        const kq = try makeKqueue();
+        errdefer closeFd(kq);
 
         return .{
             .kq = kq,
@@ -73,17 +131,17 @@ const Backend = if (is_macos) struct {
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         for (self.fds) |fd| {
-            if (fd) |live| std.posix.close(live);
+            if (fd) |live| closeFd(live);
         }
         alloc.free(self.fds);
-        std.posix.close(self.kq);
+        closeFd(self.kq);
         self.* = undefined;
     }
 
-    fn ensurePath(self: *@This(), idx: usize, path: []const u8) (std.posix.OpenError || std.posix.KEventError)!bool {
+    fn ensurePath(self: *@This(), idx: usize, path: []const u8) (std.posix.OpenError || KeventError)!bool {
         if (self.fds[idx] != null) return true;
 
-        const fd = std.posix.open(path, .{
+        const fd = std.posix.openat(std.Io.Dir.cwd().handle, path, .{
             .ACCMODE = .RDONLY,
             .EVTONLY = true,
             .CLOEXEC = true,
@@ -91,7 +149,7 @@ const Backend = if (is_macos) struct {
             error.FileNotFound => return false,
             else => return err,
         };
-        errdefer std.posix.close(fd);
+        errdefer closeFd(fd);
 
         var out: [0]std.posix.Kevent = .{};
         const change = [_]std.posix.Kevent{.{
@@ -102,14 +160,14 @@ const Backend = if (is_macos) struct {
             .data = 0,
             .udata = idx + 1,
         }};
-        _ = try std.posix.kevent(self.kq, change[0..], out[0..], null);
+        _ = try runKevent(self.kq, change[0..], out[0..], null);
         self.fds[idx] = fd;
         return true;
     }
 
     fn drop(self: *@This(), idx: usize) void {
         if (self.fds[idx]) |fd| {
-            std.posix.close(fd);
+            closeFd(fd);
             self.fds[idx] = null;
         }
     }
@@ -139,7 +197,7 @@ const Backend = if (is_macos) struct {
         const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
         if (@as(isize, @bitCast(rc)) < 0) return error.InotifyInitFailed;
         const ifd: std.posix.fd_t = @intCast(rc);
-        errdefer std.posix.close(ifd);
+        errdefer closeFd(ifd);
 
         return .{
             .ifd = ifd,
@@ -152,7 +210,7 @@ const Backend = if (is_macos) struct {
             if (wd >= 0) _ = linux.inotify_rm_watch(self.ifd, wd);
         }
         alloc.free(self.wds);
-        std.posix.close(self.ifd);
+        closeFd(self.ifd);
         self.* = undefined;
     }
 
@@ -163,7 +221,7 @@ const Backend = if (is_macos) struct {
         const rc = linux.inotify_add_watch(self.ifd, &sentinel, watch_mask);
         const signed: isize = @bitCast(rc);
         if (signed < 0) {
-            const err: linux.E = @enumFromInt(@as(u32, @truncate(-% @as(u64, @bitCast(signed)))));
+            const err: linux.E = @enumFromInt(@as(u32, @truncate(-%@as(u64, @bitCast(signed)))));
             if (err == .NOENT) return false;
             return error.InotifyInitFailed;
         }
@@ -268,12 +326,12 @@ pub const Watcher = struct {
         // Platform fallback: poll-based watcher for OSes without kqueue/inotify.
         // macOS uses kqueue (watchLoopKqueue), Linux uses inotify (watchLoopInotify).
         while (!stop.load(.acquire)) {
-            const now = std.time.nanoTimestamp();
+            const now = core_time.nanoTimestamp();
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
                 try self.scanOne(i, now, snk);
             }
-            std.Thread.sleep(self.poll_ns); // platform fallback: no native FS events
+            sleepNs(self.poll_ns); // platform fallback: no native FS events
         }
     }
 
@@ -297,7 +355,7 @@ pub const Watcher = struct {
         const changes = [_]std.posix.Kevent{};
 
         while (!stop.load(.acquire)) {
-            const pre_wait = std.time.nanoTimestamp();
+            const pre_wait = core_time.nanoTimestamp();
 
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
@@ -306,8 +364,8 @@ pub const Watcher = struct {
             }
 
             var timeout = nsToTimespec(self.poll_ns);
-            const count = try std.posix.kevent(self.backend.kq, changes[0..], events[0..], &timeout);
-            const now = std.time.nanoTimestamp();
+            const count = try runKevent(self.backend.kq, changes[0..], events[0..], &timeout);
+            const now = core_time.nanoTimestamp();
 
             var n: usize = 0;
             while (n < count) : (n += 1) {
@@ -352,7 +410,7 @@ pub const Watcher = struct {
         var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
 
         while (!stop.load(.acquire)) {
-            const pre_wait = std.time.nanoTimestamp();
+            const pre_wait = core_time.nanoTimestamp();
 
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
@@ -368,7 +426,7 @@ pub const Watcher = struct {
             }};
             const poll_ms: i32 = @intCast(self.poll_ns / std.time.ns_per_ms);
             _ = try std.posix.poll(&pfd, poll_ms);
-            const now = std.time.nanoTimestamp();
+            const now = core_time.nanoTimestamp();
 
             if ((pfd[0].revents & std.posix.POLL.IN) != 0) {
                 const len = std.posix.read(self.backend.ifd, &buf) catch |err| switch (err) {
@@ -448,15 +506,15 @@ pub const Watcher = struct {
     }
 };
 
-fn snapPath(path: []const u8) std.fs.Dir.StatFileError!Watcher.Snap {
-    const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
+fn snapPath(path: []const u8) std.Io.Dir.StatFileError!Watcher.Snap {
+    const stat = std.Io.Dir.cwd().statFile(sys.io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
     return .{
         .exists = true,
         .size = stat.size,
-        .mtime = stat.mtime,
+        .mtime = stat.mtime.toNanoseconds(),
     };
 }
 
@@ -520,15 +578,15 @@ const Recorder = struct {
 };
 
 const WriteCtx = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     sub_path: []const u8,
     data: []const u8,
     delay_ms: u64,
     ok: bool = true,
 
     fn run(self: *WriteCtx) void {
-        std.Thread.sleep(self.delay_ms * std.time.ns_per_ms);
-        self.dir.writeFile(.{
+        sleepNs(self.delay_ms * std.time.ns_per_ms);
+        self.dir.writeFile(std.testing.io, .{
             .sub_path = self.sub_path,
             .data = self.data,
         }) catch {
@@ -538,7 +596,7 @@ const WriteCtx = struct {
 };
 
 const BurstWriteCtx = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     sub_path: []const u8,
     start_ms: u64,
     step_ms: u64,
@@ -546,7 +604,7 @@ const BurstWriteCtx = struct {
     ok: bool = true,
 
     fn run(self: *BurstWriteCtx) void {
-        std.Thread.sleep(self.start_ms * std.time.ns_per_ms);
+        sleepNs(self.start_ms * std.time.ns_per_ms);
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             var buf: [32]u8 = undefined;
@@ -554,42 +612,42 @@ const BurstWriteCtx = struct {
                 self.ok = false;
                 return;
             };
-            self.dir.writeFile(.{
+            self.dir.writeFile(std.testing.io, .{
                 .sub_path = self.sub_path,
                 .data = data,
             }) catch {
                 self.ok = false;
                 return;
             };
-            if (i + 1 < self.count) std.Thread.sleep(self.step_ms * std.time.ns_per_ms);
+            if (i + 1 < self.count) sleepNs(self.step_ms * std.time.ns_per_ms);
         }
     }
 };
 
 const DeleteCtx = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     sub_path: []const u8,
     delay_ms: u64,
     ok: bool = true,
 
     fn run(self: *DeleteCtx) void {
-        std.Thread.sleep(self.delay_ms * std.time.ns_per_ms);
-        self.dir.deleteFile(self.sub_path) catch {
+        sleepNs(self.delay_ms * std.time.ns_per_ms);
+        self.dir.deleteFile(std.testing.io, self.sub_path) catch {
             self.ok = false;
         };
     }
 };
 
 const RenameCtx = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     from: []const u8,
     to: []const u8,
     delay_ms: u64,
     ok: bool = true,
 
     fn run(self: *RenameCtx) void {
-        std.Thread.sleep(self.delay_ms * std.time.ns_per_ms);
-        self.dir.rename(self.from, self.to) catch {
+        sleepNs(self.delay_ms * std.time.ns_per_ms);
+        self.dir.rename(self.from, self.dir, self.to, std.testing.io) catch {
             self.ok = false;
         };
     }
@@ -603,7 +661,7 @@ const DeadlineCtx = struct {
         var left = self.delay_ms;
         while (left > 0 and !self.stop.load(.acquire)) {
             const step: u64 = if (left < 5) left else 5;
-            std.Thread.sleep(step * std.time.ns_per_ms);
+            sleepNs(step * std.time.ns_per_ms);
             left -= step;
         }
         if (!self.stop.load(.acquire)) self.stop.store(true, .release);
@@ -620,11 +678,11 @@ test "watchLoop emits debounced write event" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "watched.txt",
         .data = "a",
     });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "watched.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "watched.txt", testing.allocator);
     defer testing.allocator.free(path);
 
     var watcher = try Watcher.init(testing.allocator, .{
@@ -658,7 +716,7 @@ test "watchLoop emits debounced write event" {
     try testing.expect(write_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
 
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
         \\core.watcher.EventSnap
@@ -673,11 +731,11 @@ test "watchLoop flushes write storm after max window" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "watched.txt",
         .data = "seed",
     });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "watched.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "watched.txt", testing.allocator);
     defer testing.allocator.free(path);
 
     var watcher = try Watcher.init(testing.allocator, .{
@@ -712,7 +770,7 @@ test "watchLoop flushes write storm after max window" {
     try testing.expect(burst_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
 
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
         \\core.watcher.EventSnap
@@ -727,11 +785,11 @@ test "watchLoop emits delete event" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "watched.txt",
         .data = "a",
     });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "watched.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "watched.txt", testing.allocator);
     defer testing.allocator.free(path);
 
     var watcher = try Watcher.init(testing.allocator, .{
@@ -764,7 +822,7 @@ test "watchLoop emits delete event" {
     try testing.expect(delete_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
 
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
         \\core.watcher.EventSnap
@@ -779,7 +837,7 @@ test "watchLoop emits write event when missing path appears" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir_path);
     const path = try std.fs.path.join(testing.allocator, &.{ dir_path, "late.txt" });
     defer testing.allocator.free(path);
@@ -815,7 +873,7 @@ test "watchLoop emits write event when missing path appears" {
     try testing.expect(write_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
 
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
         \\core.watcher.EventSnap
@@ -832,11 +890,11 @@ test "watchLoop emits rename event on macOS" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "watched.txt",
         .data = "a",
     });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "watched.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "watched.txt", testing.allocator);
     defer testing.allocator.free(path);
 
     var watcher = try Watcher.init(testing.allocator, .{
@@ -870,7 +928,7 @@ test "watchLoop emits rename event on macOS" {
     try testing.expect(rename_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
 
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
         \\core.watcher.EventSnap

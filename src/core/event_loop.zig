@@ -1,5 +1,6 @@
 //! Platform-native event loop: kqueue (macOS/BSD) or epoll (Linux).
 const std = @import("std");
+const sys = @import("pz_io");
 const posix = std.posix;
 
 const native_os = @import("builtin").os.tag;
@@ -44,7 +45,7 @@ pub const Handler = struct {
                 .on_ready = onReadyFn,
             };
             fn onReadyFn(h: *Handler, fd: posix.fd_t, readable: bool, writable: bool) void {
-                const self: *T = @fieldParentPtr("handler", h);
+                const self: *T = @alignCast(@fieldParentPtr("handler", h));
                 on_ready_fn(self, fd, readable, writable);
             }
         };
@@ -69,7 +70,7 @@ pub const TimerHandler = struct {
                 .on_timer = onTimerFn,
             };
             fn onTimerFn(th: *TimerHandler, id: TimerId) void {
-                const self: *T = @fieldParentPtr("timer_handler", th);
+                const self: *T = @alignCast(@fieldParentPtr("timer_handler", th));
                 on_timer_fn(self, id);
             }
         };
@@ -100,13 +101,13 @@ pub const EventLoop = struct {
     sigchld_handler: ?*Handler = null,
 
     pub fn init() !EventLoop {
-        const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        const pipe = try makePipe();
         errdefer {
-            posix.close(pipe[0]);
-            posix.close(pipe[1]);
+            _ = std.c.close(pipe[0]);
+            _ = std.c.close(pipe[1]);
         }
         const fd = try backendCreate();
-        errdefer posix.close(fd);
+        errdefer _ = std.c.close(fd);
         var self = EventLoop{
             .backend = fd,
             .wake_r = pipe[0],
@@ -135,7 +136,7 @@ pub const EventLoop = struct {
             _ = try kqueueWaitChanges(self.backend, &changelist, &.{}, null);
         } else {
             const tfd = timerfdCreate() catch return error.TimerCreateFailed;
-            errdefer posix.close(tfd);
+            errdefer _ = std.c.close(tfd);
             try timerfdSet(tfd, ms);
             var ev = std.os.linux.epoll_event{
                 .events = std.os.linux.EPOLL.IN,
@@ -143,7 +144,7 @@ pub const EventLoop = struct {
             };
             const rc = std.os.linux.epoll_ctl(@intCast(self.backend), std.os.linux.EPOLL.CTL_ADD, @intCast(tfd), &ev);
             if (std.posix.errno(rc) != .SUCCESS) {
-                posix.close(tfd);
+                _ = std.c.close(tfd);
                 return error.TimerCreateFailed;
             }
             self.timer_fds[id] = tfd;
@@ -166,7 +167,7 @@ pub const EventLoop = struct {
         } else {
             if (id < max_timers and self.timer_fds[id] >= 0) {
                 _ = std.os.linux.epoll_ctl(@intCast(self.backend), std.os.linux.EPOLL.CTL_DEL, @intCast(self.timer_fds[id]), null);
-                posix.close(self.timer_fds[id]);
+                _ = std.c.close(self.timer_fds[id]);
                 self.timer_fds[id] = -1;
             }
         }
@@ -242,7 +243,7 @@ pub const EventLoop = struct {
             var mask = std.mem.zeroes(posix.sigset_t);
             sigaddset(&mask, posix.SIG.CHLD);
             _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
-            const sfd = std.os.linux.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
+            const sfd = std.c.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
             if (std.posix.errno(sfd) != .SUCCESS) return error.SignalFdFailed;
             self.sigchld_fd = @intCast(sfd);
             try self.registerFd(self.sigchld_fd, .read);
@@ -259,13 +260,13 @@ pub const EventLoop = struct {
         }
         if (is_epoll) {
             for (self.timer_fds) |tfd| {
-                if (tfd >= 0) posix.close(tfd);
+                if (tfd >= 0) _ = std.c.close(tfd);
             }
-            if (self.sigchld_fd >= 0) posix.close(self.sigchld_fd);
+            if (self.sigchld_fd >= 0) _ = std.c.close(self.sigchld_fd);
         }
-        posix.close(self.backend);
-        posix.close(self.wake_r);
-        posix.close(self.wake_w);
+        _ = std.c.close(self.backend);
+        _ = std.c.close(self.wake_r);
+        _ = std.c.close(self.wake_w);
         self.* = undefined;
     }
 
@@ -369,7 +370,7 @@ pub const EventLoop = struct {
 
     /// Interrupt a blocking wait() from another thread or signal handler.
     pub fn wake(self: *EventLoop) void {
-        _ = posix.write(self.wake_w, "\x01") catch return; // cleanup: propagation impossible
+        _ = fdWrite(self.wake_w, "\x01") catch return; // cleanup: propagation impossible
     }
 
     fn findTimerId(self: *const EventLoop, fd: posix.fd_t) ?TimerId {
@@ -498,7 +499,7 @@ fn epollWait(epfd: posix.fd_t, events: []std.os.linux.epoll_event, timeout_ms: i
 }
 
 fn timerfdCreate() !posix.fd_t {
-    const rc = std.os.linux.timerfd_create(std.os.linux.CLOCK.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+    const rc = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (std.posix.errno(rc) != .SUCCESS) return error.TimerCreateFailed;
     return @intCast(rc);
 }
@@ -507,10 +508,10 @@ fn timerfdSet(fd: posix.fd_t, ms: u32) !void {
     const secs: i64 = @divTrunc(ms, 1000);
     const nsecs: i64 = @rem(ms, 1000) * 1_000_000;
     const spec = std.os.linux.itimerspec{
-        .interval = .{ .sec = 0, .nsec = 0 }, // one-shot
-        .value = .{ .sec = secs, .nsec = nsecs },
+        .it_interval = .{ .sec = 0, .nsec = 0 }, // one-shot
+        .it_value = .{ .sec = secs, .nsec = nsecs },
     };
-    const rc = std.os.linux.timerfd_settime(@intCast(fd), 0, &spec, null);
+    const rc = std.os.linux.timerfd_settime(@intCast(fd), .{}, &spec, null);
     if (std.posix.errno(rc) != .SUCCESS) return error.TimerSetFailed;
 }
 
@@ -519,13 +520,17 @@ fn drainTimerfd(fd: posix.fd_t) void {
     _ = posix.read(fd, &buf) catch {}; // cleanup: drain expiration count
 }
 
-fn sigaddset(set: *posix.sigset_t, sig: u6) void {
-    if (is_epoll) {
-        std.os.linux.sigaddset(set, sig);
-    } else {
-        // macOS/BSD: sigset_t is u32, signal bit = 1 << (sig - 1)
-        set.* |= @as(u32, 1) << @intCast(sig - 1);
-    }
+fn sigaddset(set: *posix.sigset_t, sig: posix.SIG) void {
+    _ = std.c.sigaddset(set, sig);
+}
+
+test "libc signal mask works with signalfd" {
+    if (!is_epoll) return error.SkipZigTest;
+    var mask = std.mem.zeroes(posix.sigset_t);
+    sigaddset(&mask, posix.SIG.CHLD);
+    const fd = std.c.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
 }
 
 fn drain(fd: posix.fd_t) void {
@@ -542,14 +547,14 @@ test "register pipe, write, wait returns ready" {
     defer el.deinit();
 
     // Create a pipe to monitor.
-    const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-    defer posix.close(pipe[0]);
-    defer posix.close(pipe[1]);
+    const pipe = try makePipe();
+    defer _ = std.c.close(pipe[0]);
+    defer _ = std.c.close(pipe[1]);
 
     try el.register(pipe[0], .read);
 
     // Write to pipe so read end becomes ready.
-    _ = try posix.write(pipe[1], "x");
+    _ = try fdWrite(pipe[1], "x");
 
     var buf: [max_events]Event = undefined;
     const events = try el.wait(1000, &buf);
@@ -574,7 +579,7 @@ test "wake interrupts blocking wait" {
     // Spawn thread that wakes after short delay.
     const t = try std.Thread.spawn(.{}, struct {
         fn run(loop: *EventLoop) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(sys.io, .fromMilliseconds(10), .awake) catch @panic("test sleep canceled");
             loop.wake();
         }
     }.run, .{&el});
@@ -590,15 +595,15 @@ test "unregister removes fd" {
     var el = try EventLoop.init();
     defer el.deinit();
 
-    const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-    defer posix.close(pipe[0]);
-    defer posix.close(pipe[1]);
+    const pipe = try makePipe();
+    defer _ = std.c.close(pipe[0]);
+    defer _ = std.c.close(pipe[1]);
 
     try el.register(pipe[0], .read);
     try el.unregister(pipe[0]);
 
     // Write to pipe — should NOT appear in events since unregistered.
-    _ = try posix.write(pipe[1], "y");
+    _ = try fdWrite(pipe[1], "y");
 
     var buf: [max_events]Event = undefined;
     const events = try el.wait(0, &buf);
@@ -609,18 +614,18 @@ test "multiple fds" {
     var el = try EventLoop.init();
     defer el.deinit();
 
-    const p1 = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-    defer posix.close(p1[0]);
-    defer posix.close(p1[1]);
-    const p2 = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-    defer posix.close(p2[0]);
-    defer posix.close(p2[1]);
+    const p1 = try makePipe();
+    defer _ = std.c.close(p1[0]);
+    defer _ = std.c.close(p1[1]);
+    const p2 = try makePipe();
+    defer _ = std.c.close(p2[0]);
+    defer _ = std.c.close(p2[1]);
 
     try el.register(p1[0], .read);
     try el.register(p2[0], .read);
 
-    _ = try posix.write(p1[1], "a");
-    _ = try posix.write(p2[1], "b");
+    _ = try fdWrite(p1[1], "a");
+    _ = try fdWrite(p2[1], "b");
 
     var buf: [max_events]Event = undefined;
     const events = try el.wait(1000, &buf);
@@ -662,4 +667,34 @@ test "cancelled timer does not fire" {
     const events = try el.wait(100, &buf); // 100ms — timer was cancelled
     // Should get 0 events (timer cancelled, nothing else registered)
     try std.testing.expectEqual(@as(usize, 0), events.len);
+}
+
+pub fn makePipe() ![2]posix.fd_t {
+    const flags: posix.O = .{ .NONBLOCK = true, .CLOEXEC = true };
+    var fds: [2]std.posix.fd_t = undefined;
+    if (@import("builtin").os.tag == .linux) {
+        if (std.c.pipe2(&fds, flags) != 0) return error.Io;
+        return fds;
+    }
+    if (std.c.pipe(&fds) != 0) return error.Io;
+    errdefer for (fds) |fd| {
+        _ = std.c.close(fd);
+    };
+    for (fds) |fd| {
+        if (flags.CLOEXEC and std.c.fcntl(fd, std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) < 0) return error.Io;
+        if (flags.NONBLOCK and std.c.fcntl(fd, std.posix.F.SETFL, @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) < 0) return error.Io;
+    }
+    return fds;
+}
+
+fn fdWrite(fd: posix.fd_t, bytes: []const u8) !usize {
+    while (true) {
+        const rc = std.c.write(fd, bytes.ptr, bytes.len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }

@@ -160,7 +160,7 @@ const TRt = bind(TKind, TSpec, TCall, TEv, TResult);
 
 test "runtime emits start output finish in order" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const SinkImpl = struct {
         sink: TRt.Sink = .{ .vt = &Bind.vt },
         start_seen: bool = false,
@@ -277,7 +277,7 @@ test "runtime emits start output finish in order" {
 
 test "runtime emits start and finish when handler has no output" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const SinkImpl = struct {
         sink: TRt.Sink = .{ .vt = &Bind.vt },
         evs: [4]TEv = undefined,
@@ -323,13 +323,13 @@ test "runtime emits start and finish when handler has no output" {
     }, &sink_impl.sink);
 
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const w = &fbs;
     for (sink_impl.evs[0..sink_impl.ct]) |ev| {
         try w.print("{s}\n", .{@tagName(ev)});
     }
 
-    const snap = fbs.getWritten();
+    const snap = fbs.buffered();
     try oh.snap(@src(),
         \\[]u8
         \\  "start
@@ -340,7 +340,7 @@ test "runtime emits start and finish when handler has no output" {
 
 test "runtime preserves handler error type and does not emit finish" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const SinkImpl = struct {
         sink: TRt.Sink = .{ .vt = &Bind.vt },
         start_seen: bool = false,
@@ -390,13 +390,13 @@ test "runtime preserves handler error type and does not emit finish" {
     }, &sink_impl.sink));
 
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const w = &fbs;
     for (sink_impl.evs[0..sink_impl.ct]) |ev| {
         try w.print("{s}\n", .{@tagName(ev)});
     }
 
-    const snap = fbs.getWritten();
+    const snap = fbs.buffered();
     try oh.snap(@src(),
         \\[]u8
         \\  "start

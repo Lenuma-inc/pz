@@ -7,7 +7,7 @@ const retry_state = @import("retry_state.zig");
 
 test "session persistence regression covers compacted replay and retry restore" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

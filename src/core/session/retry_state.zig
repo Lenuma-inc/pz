@@ -1,4 +1,5 @@
 //! Persisted retry state: survive restarts across transient failures.
+const sys = @import("pz_io");
 const std = @import("std");
 const sid_path = @import("path.zig");
 const fs_secure = @import("../fs_secure.zig");
@@ -24,7 +25,7 @@ pub const State = struct {
 
 pub fn save(
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     sid: []const u8,
     state: State,
 ) !void {
@@ -41,21 +42,22 @@ pub fn save(
     var file = try fs_secure.createFileAt(dir, path, .{
         .truncate = true,
     });
-    defer file.close();
-    try file.writeAll(raw);
-    try file.writeAll("\n");
-    try file.sync();
+    const active_io = sys.io;
+    defer file.close(active_io);
+    try file.writeStreamingAll(active_io, raw);
+    try file.writeStreamingAll(active_io, "\n");
+    try file.sync(active_io);
 }
 
 pub fn load(
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     sid: []const u8,
 ) !?State {
     const path = try sid_path.sidExtAlloc(alloc, sid, ".retry.json");
     defer alloc.free(path);
 
-    const raw = dir.readFileAlloc(alloc, path, 64 * 1024) catch |read_err| switch (read_err) {
+    const raw = dir.readFileAlloc(sys.io, path, alloc, .limited(64 * 1024)) catch |read_err| switch (read_err) {
         error.FileNotFound => return null,
         else => return read_err,
     };
@@ -75,7 +77,7 @@ pub fn load(
 
 test "retry state persists and restores counters after reload" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -96,11 +98,12 @@ test "retry state persists and restores counters after reload" {
         \\  .tries_done: u16 = 4
         \\  .fail_count: u16 = 3
         \\  .next_wait_ms: u64 = 250
-        \\  .last_err: core.session.retry_state.ErrKind = .transient
+        \\  .last_err: core.session.retry_state.ErrKind
+        \\    .transient
     ).expectEqual(out);
     if (@import("builtin").os.tag != .windows) {
-        const st = try tmp.dir.statFile("s1.retry.json");
-        try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
+        const st = try tmp.dir.statFile(std.testing.io, "s1.retry.json", .{});
+        try std.testing.expectEqual(fs_secure.file_mode.toMode() & 0o777, st.permissions.toMode() & 0o777);
     }
 }
 
@@ -130,7 +133,7 @@ test "retry state rejects torn file without trailing newline" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "s1.retry.json",
         .data = "{\"version\":1,\"tries_done\":1,\"fail_count\":1,\"next_wait_ms\":0,\"last_err\":\"none\"}",
     });

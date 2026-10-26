@@ -1,4 +1,5 @@
 //! Skill discovery: scan directories for SKILL.md metadata.
+const sys = @import("pz_io");
 const std = @import("std");
 
 pub const SkillMeta = struct {
@@ -192,7 +193,7 @@ pub fn discoverAndRead(alloc: std.mem.Allocator, home: ?[]const u8) ![]SkillInfo
 
     // Project: .pz/skills/*/SKILL.md relative to cwd
     {
-        const cwd_path = std.fs.cwd().realpathAlloc(alloc, ".") catch |err| switch (err) {
+        const cwd_path = std.Io.Dir.cwd().realPathFileAlloc(sys.io, ".", alloc) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => null,
         };
@@ -216,20 +217,23 @@ fn scanDir(
     base_path: []const u8,
     source: Source,
 ) !void {
-    var dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch return; // dir not found or inaccessible
-    defer dir.close();
+    const active_io = sys.io;
+    var dir = std.Io.Dir.openDirAbsolute(active_io, base_path, .{ .iterate = true }) catch return; // dir not found or inaccessible
+    defer dir.close(active_io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(active_io)) |entry| {
         if (entry.kind != .directory) continue;
         if (!isValidDirName(entry.name)) continue;
 
-        var sub = dir.openDir(entry.name, .{}) catch continue; // subdir inaccessible
-        defer sub.close();
-        const skill_file = sub.openFile("SKILL.md", .{}) catch continue; // no SKILL.md in this dir
-        defer skill_file.close();
+        var sub = dir.openDir(active_io, entry.name, .{}) catch continue; // subdir inaccessible
+        defer sub.close(active_io);
+        const skill_file = sub.openFile(active_io, "SKILL.md", .{}) catch continue; // no SKILL.md in this dir
+        defer skill_file.close(active_io);
 
-        const content = skill_file.readToEndAlloc(alloc, max_file) catch |err| switch (err) {
+        var file_buf: [4096]u8 = undefined;
+        var reader = skill_file.readerStreaming(active_io, &file_buf);
+        const content = reader.interface.allocRemaining(alloc, .limited(max_file)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => continue, // I/O read failed
         };
@@ -343,7 +347,7 @@ test "parseFrontmatter: oversized" {
     const alloc = std.testing.allocator;
     // >4KB frontmatter block
     // Build: "---\n" + 4100 x's + "\n---\nbody"
-    var list = std.ArrayListUnmanaged(u8){};
+    var list = std.ArrayListUnmanaged(u8).empty;
     defer list.deinit(alloc);
     try list.appendSlice(alloc, "---\n");
     try list.appendNTimes(alloc, 'x', 4100);

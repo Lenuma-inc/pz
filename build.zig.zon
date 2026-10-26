@@ -2,15 +2,15 @@
     .name = .pz,
     .version = "0.1.8",
     .fingerprint = 0xde36f32b1b6b5635, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .ohsnap = .{
-            .url = "https://github.com/mnemnion/ohsnap/archive/refs/tags/v0.4.2.tar.gz",
-            .hash = "ohsnap-0.4.2-iWxzyiGcAAAbUPJG3B6agP55LfeqGbtTOQ4PcgSGUb9-",
+            .url = "https://github.com/mnemnion/ohsnap/archive/b5008f5664ddff81c903b7f8cc9645c77c1b20b5.tar.gz",
+            .hash = "ohsnap-0.5.1-iWxzykCqAACOZm_M12yHTooq6IC4YrtKGoXzpcw629ct",
         },
         .zcheck = .{
-            .url = "https://github.com/joelreymont/zcheck/archive/refs/heads/master.tar.gz",
-            .hash = "zcheck-0.1.0-Px1bihTWAAAkvAodyD2kta9DXdUztoCIfdS1s6TzqghA",
+            .url = "https://github.com/joelreymont/zcheck/archive/4b3b885864b30fd09ecf7ca397aedce4da7c39be.tar.gz",
+            .hash = "zcheck-0.1.0-Px1biqfWAACMYPXbbytGNG8-bE6dy3Qa0rF9Xgzyk0pe",
         },
     },
     .paths = .{

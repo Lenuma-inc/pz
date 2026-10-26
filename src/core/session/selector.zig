@@ -1,7 +1,9 @@
 //! Session selector: resolve SID from args or create new.
+const sys = @import("pz_io");
 const std = @import("std");
 const sid_path = @import("path.zig");
 
+const Dir = std.Io.Dir;
 const jsonl_ext = ".jsonl";
 
 pub const Plan = struct {
@@ -16,11 +18,12 @@ pub const Plan = struct {
 };
 
 pub fn latestInDir(alloc: std.mem.Allocator, base_dir: []const u8) !Plan {
-    var dir = std.fs.cwd().openDir(base_dir, .{ .iterate = true }) catch |err| switch (err) {
+    const active_io = sys.io;
+    var dir = Dir.cwd().openDir(active_io, base_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.SessionNotFound,
         else => return err,
     };
-    defer dir.close();
+    defer dir.close(active_io);
 
     const sid = try latestSidAlloc(alloc, dir);
     errdefer alloc.free(sid);
@@ -33,17 +36,18 @@ pub fn latestInDir(alloc: std.mem.Allocator, base_dir: []const u8) !Plan {
 pub fn fromIdOrPrefix(alloc: std.mem.Allocator, base_dir: []const u8, tok: []const u8) !Plan {
     try sid_path.validateSid(tok);
 
-    var dir = std.fs.cwd().openDir(base_dir, .{ .iterate = true }) catch |err| switch (err) {
+    const active_io = sys.io;
+    var dir = Dir.cwd().openDir(active_io, base_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.SessionNotFound,
         else => return err,
     };
-    defer dir.close();
+    defer dir.close(active_io);
 
     const exact_file = try sid_path.sidJsonlAlloc(alloc, tok);
     defer alloc.free(exact_file);
 
     const has_exact = blk: {
-        dir.access(exact_file, .{}) catch |err| switch (err) {
+        dir.access(active_io, exact_file, .{}) catch |err| switch (err) {
             error.FileNotFound => break :blk false,
             else => return err,
         };
@@ -60,7 +64,7 @@ pub fn fromIdOrPrefix(alloc: std.mem.Allocator, base_dir: []const u8, tok: []con
     defer if (matched_sid) |v| alloc.free(v);
 
     var it = dir.iterate();
-    while (try it.next()) |ent| {
+    while (try it.next(active_io)) |ent| {
         if (ent.kind != .file) continue;
         const sid = fileSid(ent.name) orelse continue;
         if (!std.mem.startsWith(u8, sid, tok)) continue;
@@ -101,12 +105,12 @@ pub fn fromPath(alloc: std.mem.Allocator, raw_path: []const u8) !Plan {
     defer alloc.free(file_path);
 
     if (std.fs.path.isAbsolute(file_path)) {
-        std.fs.accessAbsolute(file_path, .{}) catch |err| switch (err) {
+        Dir.accessAbsolute(sys.io, file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.SessionNotFound,
             else => return err,
         };
     } else {
-        std.fs.cwd().access(file_path, .{}) catch |err| switch (err) {
+        Dir.cwd().access(sys.io, file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.SessionNotFound,
             else => return err,
         };
@@ -118,24 +122,24 @@ pub fn fromPath(alloc: std.mem.Allocator, raw_path: []const u8) !Plan {
     };
 }
 
-fn latestSidAlloc(alloc: std.mem.Allocator, dir: std.fs.Dir) ![]u8 {
-    const Mtime = @TypeOf((@as(std.fs.File.Stat, undefined)).mtime);
+fn latestSidAlloc(alloc: std.mem.Allocator, dir: Dir) ![]u8 {
+    const active_io = sys.io;
     var best_sid: ?[]u8 = null;
     defer if (best_sid) |v| alloc.free(v);
-    var best_mtime: ?Mtime = null;
+    var best_mtime: ?std.Io.Timestamp = null;
 
     var it = dir.iterate();
-    while (try it.next()) |ent| {
+    while (try it.next(active_io)) |ent| {
         if (ent.kind != .file) continue;
         const sid = fileSid(ent.name) orelse continue;
         sid_path.validateSid(sid) catch continue;
 
-        const st = try dir.statFile(ent.name);
+        const st = try dir.statFile(active_io, ent.name, .{});
         const better = if (best_sid == null)
             true
-        else if (st.mtime > best_mtime.?)
+        else if (st.mtime.nanoseconds > best_mtime.?.nanoseconds)
             true
-        else if (st.mtime == best_mtime.? and std.mem.order(u8, sid, best_sid.?) == .gt)
+        else if (st.mtime.nanoseconds == best_mtime.?.nanoseconds and std.mem.order(u8, sid, best_sid.?) == .gt)
             true
         else
             false;
@@ -159,7 +163,7 @@ fn fileSid(name: []const u8) ?[]const u8 {
 
 test "latest selector picks newest session and falls back deterministically" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Snap = struct {
         sid: []const u8,
         same_dir: bool,
@@ -167,16 +171,16 @@ test "latest selector picks newest session and falls back deterministically" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "100.jsonl",
         .data = "{\"version\":1,\"at_ms\":1,\"data\":{\"prompt\":{\"text\":\"a\"}}}\n",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "200.jsonl",
         .data = "{\"version\":1,\"at_ms\":1,\"data\":{\"prompt\":{\"text\":\"b\"}}}\n",
     });
 
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
     var plan = try latestInDir(std.testing.allocator, dir_path);
@@ -197,16 +201,16 @@ test "id selector resolves exact id and unique prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "abc123.jsonl",
         .data = "{}\n",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "def456.jsonl",
         .data = "{}\n",
     });
 
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
     var exact = try fromIdOrPrefix(std.testing.allocator, dir_path, "abc123");
@@ -224,16 +228,16 @@ test "id selector rejects ambiguous prefix" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "aa1.jsonl",
         .data = "{}\n",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "aa2.jsonl",
         .data = "{}\n",
     });
 
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
     try std.testing.expectError(error.AmbiguousSession, fromIdOrPrefix(std.testing.allocator, dir_path, "aa"));
@@ -241,7 +245,7 @@ test "id selector rejects ambiguous prefix" {
 
 test "path selector resolves sid and directory from jsonl path" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Snap = struct {
         sid: []const u8,
         same_dir: bool,
@@ -249,13 +253,13 @@ test "path selector resolves sid and directory from jsonl path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("sess");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "sess");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sess/sid-1.jsonl",
         .data = "{}\n",
     });
 
-    const file_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess/sid-1.jsonl");
+    const file_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "sess/sid-1.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(file_abs);
     const dir_abs = std.fs.path.dirname(file_abs) orelse return error.TestUnexpectedResult;
     var plan = try fromPath(std.testing.allocator, file_abs);
@@ -271,7 +275,7 @@ test "path selector resolves sid and directory from jsonl path" {
         .same_dir = std.mem.eql(u8, dir_abs, plan.dir_path),
     });
 
-    const missing_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    const missing_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "sess", std.testing.allocator);
     defer std.testing.allocator.free(missing_abs);
     const missing_file = try std.fs.path.join(std.testing.allocator, &.{ missing_abs, "missing.jsonl" });
     defer std.testing.allocator.free(missing_file);

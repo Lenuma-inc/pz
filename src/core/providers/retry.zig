@@ -114,7 +114,7 @@ fn retryOnTransient(err: RetryErr) bool {
 
 test "retry policy retries retryable errors until max tries" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Result = struct {
         step1: Step,
         step2: Step,
@@ -153,7 +153,7 @@ test "retry policy retries retryable errors until max tries" {
 
 test "retry policy backoff is capped by max delay" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Result = struct {
         step1: Step,
         step2: Step,

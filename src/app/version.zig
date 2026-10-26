@@ -1,4 +1,5 @@
 //! Version check: fetch latest release from GitHub, compare semver.
+const sys = @import("pz_io");
 const std = @import("std");
 const app_tls = @import("tls.zig");
 const cli = @import("cli.zig");
@@ -78,12 +79,13 @@ pub const Checker = struct {
 const Deps = struct {
     init_client: *const fn (?*anyopaque, std.mem.Allocator) anyerror!std.http.Client = initClientRuntime,
     init_client_ctx: ?*anyopaque = null,
+    environ_map: ?*const std.process.Environ.Map = null,
     uri: std.Uri = release_uri,
     current_version: []const u8 = cli.version,
 };
 
 fn initClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
-    return try app_tls.initRuntimeClient(alloc, null);
+    return try app_tls.initRuntimeClient(alloc, sys.io, null);
 }
 
 /// Checker GitHub releases for a newer version. Returns version string if newer, null otherwise.
@@ -91,15 +93,21 @@ fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
     return try checkLatestWith(alloc, .{ .uri = versionUriFromEnv() orelse release_uri });
 }
 
+fn getenv(name: [*:0]const u8) ?[]const u8 {
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
 fn versionUriFromEnv() ?std.Uri {
-    const raw = std.posix.getenv(version_url_env) orelse return null;
+    const raw = getenv(version_url_env) orelse return null;
     return std.Uri.parse(raw) catch null;
 }
 
 fn checkLatestWith(alloc: std.mem.Allocator, deps: Deps) !?[]u8 {
     var http = try deps.init_client(deps.init_client_ctx, alloc);
     defer http.deinit();
-    try http.initDefaultProxies(alloc);
+    var proxy_arena = std.heap.ArenaAllocator.init(alloc);
+    defer proxy_arena.deinit();
+    if (deps.environ_map) |env| try http.initDefaultProxies(proxy_arena.allocator(), env);
 
     const ua = "pz/" ++ cli.version;
     var req = try http.request(.GET, deps.uri, .{
@@ -174,16 +182,16 @@ const ClientTap = struct {
 
     fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
         const tap: *ClientTap = @ptrCast(@alignCast(ctx.?));
-        var http = try app_tls.initRuntimeClient(alloc, null);
+        const http = try app_tls.initRuntimeClient(alloc, sys.io, null);
         tap.ca_len = http.ca_bundle.map.size;
-        tap.rescan_disabled = !@atomicLoad(bool, &http.next_https_rescan_certs, .acquire);
+        tap.rescan_disabled = http.now != null;
         return http;
     }
 };
 
 const writeCfg = fixtures.writeCfg;
 
-fn writeCaPem(tmp: std.testing.TmpDir, name: []const u8) ![]u8 {
+fn writeCaPem(tmp: std.testing.TmpDir, name: []const u8) ![:0]u8 {
     return fixtures.writeCert(tmp.dir, name);
 }
 
@@ -198,7 +206,7 @@ fn releaseUriFor(port: u16) std.Uri {
 
 test "parseVersion basic" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const v = parseVersion("0.1.0").?;
     try oh.snap(@src(),
         \\app.version.Semver
@@ -210,7 +218,7 @@ test "parseVersion basic" {
 
 test "parseVersion strips v prefix" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const v = parseVersion("v1.2.3").?;
     try oh.snap(@src(),
         \\app.version.Semver
@@ -222,7 +230,7 @@ test "parseVersion strips v prefix" {
 
 test "parseVersion strips suffix" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const v = parseVersion("0.1.0-rc1").?;
     try oh.snap(@src(),
         \\app.version.Semver
@@ -264,7 +272,7 @@ test "extractTagName missing" {
 
 test "checkLatest uses runtime CA bundle for version checks" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -321,11 +329,11 @@ test "checkLatest fails closed on invalid runtime CA bundle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
-    const bad_path = try tmp.dir.realpathAlloc(std.testing.allocator, "bad.pem");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
+    const bad_path = try tmp.dir.realPathFileAlloc(std.testing.io, "bad.pem", std.testing.allocator);
     defer std.testing.allocator.free(bad_path);
 
     // initClient with bad CA cert should fail during cert parsing,
     // before any TCP connection is attempted.
-    try testing.expectError(error.MissingEndCertificateMarker, app_tls.initClient(std.testing.allocator, bad_path));
+    try testing.expectError(error.MissingEndCertificateMarker, app_tls.initClient(std.testing.allocator, std.testing.io, bad_path));
 }

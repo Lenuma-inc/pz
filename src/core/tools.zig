@@ -81,7 +81,7 @@ pub const CancelSrc = struct {
                 .is_canceled = isCanceledFn,
             };
             fn isCanceledFn(cs: *CancelSrc) bool {
-                const self: *T = @fieldParentPtr("cancel_src", cs);
+                const self: *T = @alignCast(@fieldParentPtr("cancel_src", cs));
                 return method(self);
             }
         };

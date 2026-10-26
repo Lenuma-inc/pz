@@ -801,17 +801,17 @@ test "builtin runtime registry exposes all core tools" {
 
 test "builtin runtime uses call timestamp in result envelope" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "in.txt",
         .data = "abc\n",
     });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "in.txt", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var rt = Runtime.init(.{
@@ -852,7 +852,7 @@ test "builtin runtime uses call timestamp in result envelope" {
 
 test "builtin runtime supports deterministic tool mask filtering" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Snap = struct {
         len: usize,
         first: []const u8,
@@ -883,7 +883,7 @@ test "builtin runtime supports deterministic tool mask filtering" {
 
 test "agent tool uses runtime hook output" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const AgentImpl = struct {
         hook: agent_tool.Hook = .{ .vt = &Bind.vt },
         seen: usize = 0,
@@ -975,7 +975,7 @@ test "agent tool uses runtime hook output" {
 
 test "ask tool requires interactive hook" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
@@ -1035,7 +1035,7 @@ test "ask tool requires interactive hook" {
 
 test "ask tool rejects empty question list" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
@@ -1083,7 +1083,7 @@ test "ask tool rejects empty question list" {
 
 test "ask tool uses hook output" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const AskImpl = struct {
         ask_hook: AskHook = .{ .vt = &Bind.vt },
         alloc: std.mem.Allocator,
@@ -1167,7 +1167,7 @@ test "ask tool uses hook output" {
 
 test "ask tool reports hook failure" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const AskImpl = struct {
         ask_hook: AskHook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AskArgs) ![]u8 {
@@ -1236,7 +1236,7 @@ test "ask tool reports hook failure" {
 
 test "ask tool maps cancelled hook output to cancelled final" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const AskImpl = struct {
         ask_hook: AskHook = .{ .vt = &Bind.vt },
         alloc: std.mem.Allocator,

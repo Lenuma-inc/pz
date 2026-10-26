@@ -266,11 +266,11 @@ pub const Picker = struct {
 fn snapAlloc(alloc: std.mem.Allocator, cp: Picker) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(alloc);
-    try std.fmt.format(buf.writer(alloc), "n={} sel={} scroll={}", .{ cp.n, cp.sel, cp.scroll });
+    try buf.print(alloc, "n={} sel={} scroll={}", .{ cp.n, cp.sel, cp.scroll });
     var i: usize = 0;
     while (i < cp.n) : (i += 1) {
         const name = if (cp.arg_src) |items| items[cp.matches[i]] else cmds[cp.matches[i]].name;
-        try std.fmt.format(buf.writer(alloc), "\n[{d}] {s}", .{ i, name });
+        try buf.print(alloc, "\n[{d}] {s}", .{ i, name });
     }
     return buf.toOwnedSlice(alloc);
 }
@@ -279,7 +279,7 @@ fn snapAlloc(alloc: std.mem.Allocator, cp: Picker) ![]u8 {
 
 test "update empty prefix returns all" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const cp = Picker.update("").?;
     const Snap = struct {
         n: u8,
@@ -297,7 +297,7 @@ test "update empty prefix returns all" {
 
 test "update filters by prefix" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const cp = Picker.update("co").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
@@ -312,7 +312,7 @@ test "update filters by prefix" {
 
 test "update ex matches exit and export" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const cp = Picker.update("ex").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
@@ -342,7 +342,7 @@ test "update fuzzy fallback" {
 
 test "update exact match" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const cp = Picker.update("help").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
@@ -355,7 +355,7 @@ test "update exact match" {
 
 test "up wraps to bottom" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var cp = Picker.update("").?;
     cp.up();
     const Snap = struct {
@@ -374,7 +374,7 @@ test "up wraps to bottom" {
 
 test "down wraps to top" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var cp = Picker.update("ex").?; // 2 items
     cp.down(); // sel=1
     cp.down(); // wrap to 0
@@ -394,7 +394,7 @@ test "down wraps to top" {
 
 test "down scrolls window" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var cp = Picker.update("").?; // 22 items, max_vis=5
     var i: u8 = 0;
     while (i < max_vis) : (i += 1) cp.down();
@@ -414,7 +414,7 @@ test "down scrolls window" {
 
 test "up scrolls back" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var cp = Picker.update("").?;
     var i: u8 = 0;
     while (i < max_vis + 2) : (i += 1) cp.down();
@@ -435,7 +435,7 @@ test "up scrolls back" {
 
 test "selected returns correct cmd" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var cp = Picker.update("ex").?;
     const snap0 = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -462,7 +462,7 @@ test "selected returns correct cmd" {
 
 test "renderDown selected row has arrow and bold" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -502,7 +502,7 @@ test "renderDown selected row has arrow and bold" {
 
 test "renderDown description at col 32 when wide" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var frm = try Frame.init(std.testing.allocator, 60, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -524,7 +524,7 @@ test "renderDown description at col 32 when wide" {
 
 test "renderDown no description when narrow" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var frm = try Frame.init(std.testing.allocator, 35, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -546,7 +546,7 @@ test "renderDown no description when narrow" {
 
 test "renderDown with limited height" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var frm = try Frame.init(std.testing.allocator, 50, 4);
     defer frm.deinit(std.testing.allocator);
 
@@ -568,7 +568,7 @@ test "renderDown with limited height" {
 
 test "renderDown scroll indicator shown" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -590,7 +590,7 @@ test "renderDown scroll indicator shown" {
 
 test "visRows accounts for scroll indicator" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const cp = Picker.update("").?; // 22 items
     const cp2 = Picker.update("ex").?;
     const Snap = struct {
@@ -609,7 +609,7 @@ test "visRows accounts for scroll indicator" {
 
 test "updateArgs filters by prefix" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const items = [_][]const u8{ "anthropic", "openai", "google" };
     const cp = Picker.updateArgs(&items, "an").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
@@ -623,7 +623,7 @@ test "updateArgs filters by prefix" {
 
 test "updateArgs empty prefix returns all" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const items = [_][]const u8{ "anthropic", "openai", "google" };
     const cp = Picker.updateArgs(&items, "").?;
     const Snap = struct {
@@ -647,7 +647,7 @@ test "updateArgs no match returns null" {
 
 test "updateArgs renders without slash" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const items = [_][]const u8{ "all", "none", "read" };
     const cp = Picker.updateArgs(&items, "").?;
 

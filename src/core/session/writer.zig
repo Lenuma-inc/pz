@@ -1,4 +1,5 @@
 //! JSONL session event writer with configurable flush policy.
+const sys = @import("pz_io");
 const std = @import("std");
 const posix = std.posix;
 const schema = @import("schema.zig");
@@ -7,6 +8,15 @@ const fs_secure = @import("../fs_secure.zig");
 const OhSnap = @import("ohsnap");
 
 pub const Event = schema.Event;
+const Dir = std.Io.Dir;
+
+fn seekEnd(file: std.Io.File) !void {
+    const rc = std.c.lseek(file.handle, 0, std.c.SEEK.END);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
 
 /// When to fsync: after every write or every N writes.
 pub const FlushPolicy = union(enum) {
@@ -20,11 +30,11 @@ pub const Opts = struct {
 
 pub const Writer = struct {
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: Dir,
     flush: FlushPolicy,
     pending: u32 = 0,
 
-    pub fn init(alloc: std.mem.Allocator, dir: std.fs.Dir, opts: Opts) !Writer {
+    pub fn init(alloc: std.mem.Allocator, dir: Dir, opts: Opts) !Writer {
         switch (opts.flush) {
             .always => {},
             .every_n => |n| {
@@ -51,23 +61,20 @@ pub const Writer = struct {
             .read = false,
             .truncate = false,
         });
-        defer file.close();
-        try file.seekFromEnd(0);
+        defer file.close(sys.io);
+        try seekEnd(file);
         const nl = "\n";
-        var iov = [_]posix.iovec_const{
-            .{ .base = raw.ptr, .len = raw.len },
-            .{ .base = nl.ptr, .len = nl.len },
-        };
-        try file.writevAll(&iov);
+        try file.writeStreamingAll(sys.io, raw);
+        try file.writeStreamingAll(sys.io, nl);
 
         switch (self.flush) {
             .always => {
-                try file.sync();
+                try file.sync(sys.io);
             },
             .every_n => |n| {
                 self.pending += 1;
                 if (self.pending >= n) {
-                    try file.sync();
+                    try file.sync(sys.io);
                     self.pending = 0;
                 }
             },
@@ -76,7 +83,7 @@ pub const Writer = struct {
 };
 
 test "jsonl append preserves event order" {
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -97,7 +104,7 @@ test "jsonl append preserves event order" {
         .data = .{ .err = .{ .text = "gamma" } },
     });
 
-    const raw = try tmp.dir.readFileAlloc(std.testing.allocator, "s1.jsonl", 4096);
+    const raw = try tmp.dir.readFileAlloc(std.testing.io, "s1.jsonl", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(raw);
 
     var rows = std.ArrayListUnmanaged(schema.Event).empty;
@@ -139,8 +146,8 @@ test "jsonl append preserves event order" {
         \\          "gamma"
     ).expectEqual(rows.items);
     if (@import("builtin").os.tag != .windows) {
-        const st = try tmp.dir.statFile("s1.jsonl");
-        try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
+        const st = try tmp.dir.statFile(std.testing.io, "s1.jsonl", .{});
+        try std.testing.expectEqual(fs_secure.file_mode.toMode() & 0o777, st.permissions.toMode() & 0o777);
     }
 }
 

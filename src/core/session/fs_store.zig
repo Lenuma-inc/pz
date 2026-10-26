@@ -1,19 +1,22 @@
 //! Filesystem-backed session store.
+const sys = @import("pz_io");
 const std = @import("std");
 const session = @import("../session.zig");
 const writer = @import("writer.zig");
 const reader = @import("reader.zig");
 
+const Dir = std.Io.Dir;
+
 pub const Store = struct {
     session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinitStore).vt },
     alloc: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: Dir,
     wr: writer.Writer,
     replay_opts: reader.Opts,
 
     pub const Init = struct {
         alloc: std.mem.Allocator,
-        dir: std.fs.Dir,
+        dir: Dir,
         flush: writer.FlushPolicy = .{ .always = {} },
         replay: reader.Opts = .{},
     };
@@ -55,7 +58,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
-        self.dir.close();
+        self.dir.close(sys.io);
         self.* = undefined;
     }
 };
@@ -80,7 +83,7 @@ test "fs store append and replay roundtrip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir = try tmp.dir.openDir(".", .{});
+    const dir = try tmp.dir.openDir(std.testing.io, ".", .{});
     var fs_store = try Store.init(.{
         .alloc = std.testing.allocator,
         .dir = dir,
@@ -119,7 +122,7 @@ test "fs store replay missing sid returns file-not-found error" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir = try tmp.dir.openDir(".", .{});
+    const dir = try tmp.dir.openDir(std.testing.io, ".", .{});
     var fs_store = try Store.init(.{
         .alloc = std.testing.allocator,
         .dir = dir,

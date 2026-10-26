@@ -207,7 +207,7 @@ pub fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
 
 test "frame write clips utf8 input at row width" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var f = try Frame.init(std.testing.allocator, 4, 2);
     defer f.deinit(std.testing.allocator);
 
@@ -275,7 +275,7 @@ test "frame copy requires matching size" {
 
 test "frame write wide CJK characters" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     // 6-col frame: write "A中B" → A(1) + 中(2) + B(1) = 4 cols used
     var f = try Frame.init(std.testing.allocator, 6, 1);
     defer f.deinit(std.testing.allocator);
@@ -306,7 +306,7 @@ test "frame write wide CJK characters" {
 
 test "frame write wide char clipped at boundary" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     // 3-col frame: write "A中" → A fills col 0, 中 needs cols 1-2 → fits
     var f = try Frame.init(std.testing.allocator, 3, 1);
     defer f.deinit(std.testing.allocator);

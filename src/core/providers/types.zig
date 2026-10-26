@@ -106,7 +106,7 @@ const MapCtx = struct {
 
 test "taxonomy class and retry classification" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}|{s}|{s}\n{}|{}|{}\n", .{
         @tagName(class(error.TransportTransient)),
         @tagName(class(error.TransportFatal)),
@@ -126,7 +126,7 @@ test "taxonomy class and retry classification" {
 
 test "adapter maps provider errors into canonical taxonomy" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var ctx = MapCtx{};
     const ad = Adapter(MapCtx).init(&ctx);
     const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}|{s}|{s}|{s}|{d}\n", .{

@@ -1,5 +1,11 @@
 //! Aggregated test imports for `zig build test`.
 comptime {
+    _ = @import("core/fs_secure.zig");
+    _ = @import("core/tools/read.zig");
+    _ = @import("core/tools/path_guard.zig");
+    _ = @import("core/net.zig");
+    _ = @import("core/session/reader.zig");
+    _ = @import("core/session/retry_state.zig");
     _ = @import("app/cli.zig");
     _ = @import("app/changelog.zig");
     _ = @import("app/tls.zig");

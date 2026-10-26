@@ -201,7 +201,7 @@ pub fn decodeSlice(alloc: std.mem.Allocator, raw: []const u8) DecodeError!std.js
 
 test "session event json roundtrip" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const ev = Event{
         .version = 99,
         .at_ms = 42,
@@ -264,7 +264,7 @@ test "session event json rejects wrong version" {
 
 test "Event.dupe deep-copies tool_call strings" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 42,
@@ -302,7 +302,7 @@ test "Event.dupe deep-copies tool_call strings" {
 
 test "Event.dupe deep-copies tool_result strings" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 10,
@@ -634,7 +634,9 @@ test "schema property: event encode/decode roundtrip across tags" {
 
 test "fuzz decodeSlice survives arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            var input_buf: [512]u8 = undefined;
+            const input = input_buf[0..smith.slice(&input_buf)];
             const alloc = std.testing.allocator;
             var parsed = decodeSlice(alloc, input) catch return;
             parsed.deinit();

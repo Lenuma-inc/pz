@@ -6,7 +6,7 @@ const types = @import("types.zig");
 pub const Err = types.Err;
 
 pub const Parser = struct {
-    buf: std.ArrayListUnmanaged(u8) = .{},
+    buf: std.ArrayListUnmanaged(u8) = .empty,
     saw_stop: bool = false,
 
     pub fn deinit(self: *Parser, alloc: std.mem.Allocator) void {
@@ -185,7 +185,7 @@ fn parseChunks(alloc: std.mem.Allocator, chunks: []const []const u8) Err!ParseRe
     var p = Parser{};
     defer p.deinit(ar);
 
-    var evs: std.ArrayListUnmanaged(providers.Event) = .{};
+    var evs: std.ArrayListUnmanaged(providers.Event) = .empty;
     errdefer evs.deinit(ar);
 
     for (chunks) |chunk| {
@@ -201,7 +201,7 @@ fn parseChunks(alloc: std.mem.Allocator, chunks: []const []const u8) Err!ParseRe
 
 test "parser normalizes chunked frames and preserves order" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const chunks = [_][]const u8{
         "text:he",
         "llo\r\nthinking:plan\n",
@@ -241,7 +241,7 @@ test "parser normalizes chunked frames and preserves order" {
 
 test "parser handles tool_result usage and err frames" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const chunks = [_][]const u8{
         "tool_result:call-7|1|stderr\nusage:3,5,8\nerr:oops\nstop:err",
     };

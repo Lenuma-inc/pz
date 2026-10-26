@@ -72,13 +72,15 @@ A security-first coding harness rewritten from the ground up in Zig for enterpri
 
 ## Build
 
-Requires [Zig](https://ziglang.org) 0.15+.
+Requires [Zig](https://ziglang.org) 0.16.0.
 
 ```
-zig build -Doptimize=ReleaseFast
+zig build
 ```
 
 The binary lands in `zig-out/bin/pz`.
+
+On Linux, bash execution returns `UnsupportedPlatform`; the command sandbox currently requires macOS.
 
 Release builds require `-Dgit-hash=<hash>` and embed `CHANGELOG.md`. Debug builds use VCS.
 

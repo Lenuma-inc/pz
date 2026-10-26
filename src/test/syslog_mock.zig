@@ -1,38 +1,46 @@
 //! Test mock: UDP syslog collector.
+const sys = @import("pz_io");
 const std = @import("std");
+const net = std.Io.net;
 const max_msgs: usize = 16;
 const max_msg_len: usize = 4096;
 
+fn connectLocal(port: u16) !net.Stream {
+    const addr = try net.IpAddress.parse("127.0.0.1", port);
+    return addr.connect(sys.io, .{ .mode = .stream });
+}
+
+fn fdWrite(fd: std.posix.fd_t, bytes: []const u8) !usize {
+    const rc = std.c.write(fd, bytes.ptr, bytes.len);
+    if (rc < 0) return std.posix.unexpectedErrno(std.posix.errno(rc));
+    return @intCast(rc);
+}
+
+fn fdWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) off += try fdWrite(fd, bytes[off..]);
+}
+
 pub const UdpCollector = struct {
-    fd: std.posix.socket_t,
-    addr: std.net.Address,
+    socket: net.Socket,
     goal: usize = 1,
     count: usize = 0,
     bufs: [max_msgs][max_msg_len]u8 = undefined,
     lens: [max_msgs]usize = [_]usize{0} ** max_msgs,
 
     pub fn init() !UdpCollector {
-        var addr = try std.net.Address.parseIp("127.0.0.1", 0);
-        const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
-        errdefer (std.net.Stream{ .handle = fd }).close();
-
-        var socklen = addr.getOsSockLen();
-        try std.posix.bind(fd, &addr.any, socklen);
-        try std.posix.getsockname(fd, &addr.any, &socklen);
-
-        return .{
-            .fd = fd,
-            .addr = addr,
-        };
+        const addr = try net.IpAddress.parse("127.0.0.1", 0);
+        const socket = try addr.bind(sys.io, .{ .mode = .dgram, .protocol = .udp });
+        return .{ .socket = socket };
     }
 
     pub fn deinit(self: *UdpCollector) void {
-        (std.net.Stream{ .handle = self.fd }).close();
+        self.socket.close(sys.io);
         self.* = undefined;
     }
 
     pub fn port(self: *const UdpCollector) u16 {
-        return self.addr.getPort();
+        return self.socket.address.getPort();
     }
 
     pub fn spawn(self: *UdpCollector) !std.Thread {
@@ -61,25 +69,25 @@ pub const UdpCollector = struct {
 };
 
 pub const TcpCollector = struct {
-    server: std.net.Server,
+    server: net.Server,
     goal: usize = 1,
     count: usize = 0,
     bufs: [max_msgs][max_msg_len]u8 = undefined,
     lens: [max_msgs]usize = [_]usize{0} ** max_msgs,
 
     pub fn init() !TcpCollector {
-        const addr = try std.net.Address.parseIp("127.0.0.1", 0);
-        const server = try addr.listen(.{ .reuse_address = true });
+        const addr = try net.IpAddress.parse("127.0.0.1", 0);
+        const server = try addr.listen(sys.io, .{ .reuse_address = true });
         return .{ .server = server };
     }
 
     pub fn deinit(self: *TcpCollector) void {
-        self.server.deinit();
+        self.server.deinit(sys.io);
         self.* = undefined;
     }
 
     pub fn port(self: *const TcpCollector) u16 {
-        return self.server.listen_address.getPort();
+        return self.server.socket.address.getPort();
     }
 
     pub fn spawn(self: *TcpCollector) !std.Thread {
@@ -109,35 +117,27 @@ pub const TcpCollector = struct {
 
 fn runUdp(self: *UdpCollector) void {
     while (self.count < self.goal) : (self.count += 1) {
-        self.lens[self.count] = recvUdp(self.fd, self.bufs[self.count][0..]) catch return;
+        self.lens[self.count] = recvUdp(&self.socket, self.bufs[self.count][0..]) catch return;
     }
 }
 
 fn runTcp(self: *TcpCollector) void {
     while (self.count < self.goal) {
-        var conn = self.server.accept() catch return;
+        const conn = self.server.accept(sys.io) catch return;
+        defer conn.close(sys.io);
         while (self.count < self.goal) {
-            self.lens[self.count] = readOctetFrame(conn.stream.handle, self.bufs[self.count][0..]) catch |err| switch (err) {
+            self.lens[self.count] = readOctetFrame(conn.socket.handle, self.bufs[self.count][0..]) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return,
             };
             self.count += 1;
         }
-        conn.stream.close();
     }
 }
 
-fn recvUdp(fd: std.posix.socket_t, buf: []u8) !usize {
-    while (true) {
-        const rc = std.posix.system.recvfrom(fd, buf.ptr, buf.len, 0, null, null);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .BADF => return error.FileDescriptorClosed,
-            .INTR => continue,
-            .AGAIN => return error.WouldBlock,
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
-    }
+fn recvUdp(socket: *const net.Socket, buf: []u8) !usize {
+    const msg = try socket.receive(sys.io, buf);
+    return msg.data.len;
 }
 
 fn readOctetFrame(fd: std.posix.socket_t, buf: []u8) !usize {
@@ -187,10 +187,11 @@ test "udp collector captures datagram" {
 
     const t = try collector.spawn();
 
-    var addr = try std.net.Address.parseIp("127.0.0.1", collector.port());
-    const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
-    defer (std.net.Stream{ .handle = fd }).close();
-    _ = try std.posix.sendto(fd, "udp-mock", 0, &addr.any, addr.getOsSockLen());
+    const bind_addr = try net.IpAddress.parse("127.0.0.1", 0);
+    const socket = try bind_addr.bind(sys.io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(sys.io);
+    var dest = try net.IpAddress.parse("127.0.0.1", collector.port());
+    try socket.send(sys.io, &dest, "udp-mock");
 
     t.join();
     try std.testing.expectEqualStrings("udp-mock", collector.message());
@@ -202,11 +203,12 @@ test "udp collector captures multiple datagrams" {
 
     const t = try collector.spawnCount(2);
 
-    var addr = try std.net.Address.parseIp("127.0.0.1", collector.port());
-    const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
-    defer (std.net.Stream{ .handle = fd }).close();
-    _ = try std.posix.sendto(fd, "udp-1", 0, &addr.any, addr.getOsSockLen());
-    _ = try std.posix.sendto(fd, "udp-2", 0, &addr.any, addr.getOsSockLen());
+    const bind_addr = try net.IpAddress.parse("127.0.0.1", 0);
+    const socket = try bind_addr.bind(sys.io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(sys.io);
+    var dest = try net.IpAddress.parse("127.0.0.1", collector.port());
+    try socket.send(sys.io, &dest, "udp-1");
+    try socket.send(sys.io, &dest, "udp-2");
 
     t.join();
     try std.testing.expectEqual(@as(usize, 2), collector.msgCount());
@@ -220,11 +222,9 @@ test "tcp collector captures octet-counted frame" {
 
     const t = try collector.spawn();
 
-    var addr = try std.net.Address.parseIp("127.0.0.1", collector.port());
-    const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP);
-    defer (std.net.Stream{ .handle = fd }).close();
-    try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
-    _ = try std.posix.write(fd, "8 tcp-mock");
+    const stream = try connectLocal(collector.port());
+    defer stream.close(sys.io);
+    try fdWriteAll(stream.socket.handle, "8 tcp-mock");
 
     t.join();
     try std.testing.expectEqualStrings("tcp-mock", collector.message());
@@ -236,12 +236,10 @@ test "tcp collector captures multiple octet-counted frames" {
 
     const t = try collector.spawnCount(2);
 
-    var addr = try std.net.Address.parseIp("127.0.0.1", collector.port());
-    const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP);
-    defer (std.net.Stream{ .handle = fd }).close();
-    try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
-    _ = try std.posix.write(fd, "5 tcp-1");
-    _ = try std.posix.write(fd, "5 tcp-2");
+    const stream = try connectLocal(collector.port());
+    defer stream.close(sys.io);
+    try fdWriteAll(stream.socket.handle, "5 tcp-1");
+    try fdWriteAll(stream.socket.handle, "5 tcp-2");
 
     t.join();
     try std.testing.expectEqual(@as(usize, 2), collector.msgCount());

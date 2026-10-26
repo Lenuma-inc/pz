@@ -197,7 +197,7 @@ fn snapState(lru: anytype, keys: []const u64) LruSnap {
 }
 
 test "snapshot: complex add/promote/evict sequence" {
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var c: Lru(u64, 4) = .{};
     c.add(10);
     c.add(20);
@@ -227,7 +227,7 @@ test "snapshot: complex add/promote/evict sequence" {
 }
 
 test "snapshot: eviction order with promotions" {
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     var c: Lru(u64, 3) = .{};
     // Fill: 1, 2, 3
     c.add(1);

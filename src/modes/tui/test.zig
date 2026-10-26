@@ -231,7 +231,7 @@ test "e2e word wrap in narrow terminal" {
 
 test "e2e markdown table draws aligned separators" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     var ui = try Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
@@ -357,7 +357,7 @@ test "e2e markdown table draws aligned separators" {
 
 test "golden snapshot deterministic frame text" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
     defer ui.deinit();
@@ -671,7 +671,7 @@ test "golden: wide CJK in editor clips correctly" {
 
 test "T7d settings toggle persistence across re-render" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     var ui = try Ui.init(std.testing.allocator, 40, 12, "m", "p");
     defer ui.deinit();
@@ -1081,7 +1081,7 @@ test "UX5 show_thinking toggle hides thinking in subsequent renders" {
 
 test "UX5 settings toggles persist across multiple render cycles" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
 
     var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
     defer ui.deinit();

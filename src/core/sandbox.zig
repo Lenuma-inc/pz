@@ -1,8 +1,10 @@
 //! Command sandbox: allowlist-based execution gating.
+const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
 
 pub const Err = error{
+    UnsupportedPlatform,
     Denied,
     NotFound,
     Io,
@@ -36,13 +38,13 @@ pub const BashPlan = struct {
 
 pub fn prepareBash(
     alloc: std.mem.Allocator,
-    env: *const std.process.EnvMap,
+    env: *const std.process.Environ.Map,
     raw_cwd: ?[]const u8,
     cmd: []const u8,
 ) Err!BashPlan {
-    if (builtin.os.tag != .macos) @compileError("bash sandbox requires macOS");
+    if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
 
-    const root = std.fs.cwd().realpathAlloc(alloc, ".") catch |err| return mapFsErr(err);
+    const root = std.Io.Dir.cwd().realPathFileAlloc(sys.io, ".", alloc) catch |err| return mapFsErr(err);
     defer alloc.free(root);
 
     var cwd: ?[]const u8 = try alloc.dupe(u8, root);
@@ -80,7 +82,7 @@ pub fn prepareBash(
 }
 
 fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8) Err![]const u8 {
-    const resolved = std.fs.cwd().realpathAlloc(alloc, path) catch |err| return mapFsErr(err);
+    const resolved = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| return mapFsErr(err);
     errdefer alloc.free(resolved);
     if (!isWithin(root, resolved)) return error.Denied;
     return resolved;
@@ -88,7 +90,7 @@ fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8) Err!
 
 fn collectExecRoots(
     alloc: std.mem.Allocator,
-    env: *const std.process.EnvMap,
+    env: *const std.process.Environ.Map,
     root: []const u8,
 ) Err![][]u8 {
     var roots = std.ArrayList([]u8).empty;
@@ -114,7 +116,7 @@ fn collectExecRoots(
 }
 
 fn pushPathRoot(alloc: std.mem.Allocator, roots: *std.ArrayList([]u8), path: []const u8) Err!void {
-    const abs = std.fs.cwd().realpathAlloc(alloc, path) catch |err| switch (err) {
+    const abs = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied => return,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Io,
@@ -126,7 +128,7 @@ fn pushPathRoot(alloc: std.mem.Allocator, roots: *std.ArrayList([]u8), path: []c
 }
 
 fn pushRealOrRawRoot(alloc: std.mem.Allocator, roots: *std.ArrayList([]u8), path: []const u8) Err!void {
-    const abs = std.fs.cwd().realpathAlloc(alloc, path) catch |err| switch (err) {
+    const abs = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied => {
             try pushRoot(alloc, roots, path);
             return;
@@ -272,9 +274,9 @@ pub const sensitive_env = [_][]const u8{
 };
 
 /// Remove sensitive keys from env map in-place.
-pub fn scrubEnv(env: *std.process.EnvMap) void {
+pub fn scrubEnv(env: *std.process.Environ.Map) void {
     for (sensitive_env) |key| {
-        env.remove(key);
+        _ = env.swapRemove(key);
     }
 }
 
@@ -287,25 +289,33 @@ fn mapFsErr(err: anyerror) Err {
     };
 }
 
+test "prepareBash rejects unsupported platforms" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expectError(error.UnsupportedPlatform, prepareBash(std.testing.allocator, &env, null, "true"));
+}
+
 test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("sub");
+    try tmp.dir.createDirPath(sys.io, "sub");
 
     const path_guard = @import("tools/path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "/opt/homebrew/bin:/usr/bin:/bin");
 
     var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok");
     defer plan.deinit(std.testing.allocator);
 
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(sys.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    const sub = try tmp.dir.realpathAlloc(std.testing.allocator, "sub");
+    const sub = try tmp.dir.realPathFileAlloc(sys.io, "sub", std.testing.allocator);
     defer std.testing.allocator.free(sub);
 
     try std.testing.expectEqual(@as(usize, 8), plan.argv.len);
@@ -323,6 +333,7 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
 }
 
 test "prepareBash denies cwd escapes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var outer = std.testing.tmpDir(.{});
@@ -332,11 +343,11 @@ test "prepareBash denies cwd escapes" {
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    const outer_root = try outer.dir.realpathAlloc(std.testing.allocator, ".");
+    const outer_root = try outer.dir.realPathFileAlloc(sys.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(outer_root);
-    try tmp.dir.symLink(outer_root, "escape", .{ .is_directory = true });
+    try tmp.dir.symLink(sys.io, outer_root, "escape", .{ .is_directory = true });
 
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "/usr/bin:/bin");
 
@@ -344,7 +355,7 @@ test "prepareBash denies cwd escapes" {
 }
 
 test "scrubEnv removes sensitive keys and preserves others" {
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "/usr/bin");
     try env.put("ANTHROPIC_API_KEY", "sk-secret");

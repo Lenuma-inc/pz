@@ -66,11 +66,11 @@ pub const Reader = struct {
                 .deinit = deinitFn,
             };
             fn nextFn(r: *Reader) anyerror!?Event {
-                const self: *T = @fieldParentPtr("reader", r);
+                const self: *T = @alignCast(@fieldParentPtr("reader", r));
                 return next_fn(self);
             }
             fn deinitFn(r: *Reader) void {
-                const self: *T = @fieldParentPtr("reader", r);
+                const self: *T = @alignCast(@fieldParentPtr("reader", r));
                 deinit_fn(self);
             }
         };
@@ -111,15 +111,15 @@ pub const SessionStore = struct {
                 .deinit = deinitFn,
             };
             fn appendFn(ss: *SessionStore, sid: []const u8, ev: Event) anyerror!void {
-                const self: *T = @fieldParentPtr("session_store", ss);
+                const self: *T = @alignCast(@fieldParentPtr("session_store", ss));
                 return append_fn(self, sid, ev);
             }
             fn replayFn(ss: *SessionStore, sid: []const u8) anyerror!*Reader {
-                const self: *T = @fieldParentPtr("session_store", ss);
+                const self: *T = @alignCast(@fieldParentPtr("session_store", ss));
                 return replay_fn(self, sid);
             }
             fn deinitFn(ss: *SessionStore) void {
-                const self: *T = @fieldParentPtr("session_store", ss);
+                const self: *T = @alignCast(@fieldParentPtr("session_store", ss));
                 deinit_fn(self);
             }
         };
@@ -130,7 +130,7 @@ pub const Store = SessionStore;
 
 test "session store contract dispatches through vtable" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const Snap = struct {
         first: bool,
         second_null: bool,

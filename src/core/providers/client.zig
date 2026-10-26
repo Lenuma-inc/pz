@@ -220,7 +220,7 @@ fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: provide
     var p = stream_parse.Parser{};
     defer p.deinit(alloc);
 
-    var evs: std.ArrayListUnmanaged(providers.Event) = .{};
+    var evs: std.ArrayListUnmanaged(providers.Event) = .empty;
     errdefer evs.deinit(alloc);
 
     while (try stream.next()) |chunk| {
@@ -292,7 +292,7 @@ const MockRawTr = struct {
     atts: []const Attempt,
     start_ct: usize = 0,
     stream: MockRawChunk = .{},
-    reqs: std.ArrayListUnmanaged([]u8) = .{},
+    reqs: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn init(alloc: std.mem.Allocator, atts: []const Attempt) MockRawTr {
         return .{
@@ -423,7 +423,7 @@ fn reqStub() providers.Request {
 
 test "stream run retries transient transport and parses frames" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]StreamAttempt{
         .{
             .start_err = error.TransportTransient,
@@ -491,7 +491,7 @@ test "stream run retries transient transport and parses frames" {
 
 test "stream run drops partial events from failed retry attempt" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]StreamAttempt{
         .{
             .chunks = &.{"text:bad\n"},
@@ -547,7 +547,7 @@ test "stream run drops partial events from failed retry attempt" {
 
 test "stream run does not retry parser failures" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]StreamAttempt{
         .{
             .chunks = &.{"bad\n"},
@@ -586,7 +586,7 @@ test "stream run does not retry parser failures" {
 
 test "stream run stops at max tries for transient failures" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]StreamAttempt{
         .{
             .start_err = error.TransportTransient,
@@ -631,7 +631,7 @@ test "stream run stops at max tries for transient failures" {
 
 test "first provider retries transient start and streams parsed events" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]Attempt{
         .{ .start_err = error.Timeout },
         .{ .chunks = &.{"text:hello\nstop:done\n"} },
@@ -698,7 +698,7 @@ test "first provider retries transient start and streams parsed events" {
 
 test "first provider maps fatal transport errors without retry" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]Attempt{
         .{ .start_err = error.BadGateway },
     };
@@ -742,7 +742,7 @@ test "first provider maps fatal transport errors without retry" {
 
 test "first provider retries on transient chunk read failures" {
     const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
+    const oh = OhSnap.default;
     const atts = [_]Attempt{
         .{
             .chunks = &.{"text:bad\n"},
