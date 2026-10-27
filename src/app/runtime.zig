@@ -5447,7 +5447,7 @@ fn listUserMessages(alloc: std.mem.Allocator, session_dir: []const u8, sid: []co
 }
 
 fn applySettingsToggle(ui: *tui_harness.Ui, idx: usize, val: bool, auto_compact_on: *bool) void {
-    const si: SettingIdx = @fromBackingInt(@intCast(idx));
+    const si: SettingIdx = @enumFromInt(@as(u8, @intCast(idx)));
     switch (si) {
         .show_tools => ui.tr.show_tools = val,
         .show_thinking => ui.tr.show_thinking = val,
@@ -5468,9 +5468,9 @@ const setting_labels = [_][]const u8{
 
 fn buildSettingsOverlay(alloc: std.mem.Allocator, ui: *const tui_harness.Ui, auto_compact_on: bool) !tui_overlay.Overlay {
     const toggles = try alloc.alloc(bool, setting_labels.len);
-    toggles[@backingInt(SettingIdx.show_tools)] = ui.tr.show_tools;
-    toggles[@backingInt(SettingIdx.show_thinking)] = ui.tr.show_thinking;
-    toggles[@backingInt(SettingIdx.auto_compact)] = auto_compact_on;
+    toggles[@intFromEnum(SettingIdx.show_tools)] = ui.tr.show_tools;
+    toggles[@intFromEnum(SettingIdx.show_thinking)] = ui.tr.show_thinking;
+    toggles[@intFromEnum(SettingIdx.auto_compact)] = auto_compact_on;
     return .{
         .items = &setting_labels,
         .title = "Settings",

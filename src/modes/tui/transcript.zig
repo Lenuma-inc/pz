@@ -635,10 +635,14 @@ pub const Transcript = struct {
             self.alloc.free(txt);
             return error.InvalidUtf8;
         };
-        var buf: std.ArrayListUnmanaged(u8) = .{
+        const List = std.ArrayListUnmanaged(u8);
+        var buf: List = if (@hasField(List, "pointer_stability")) .{
             .items = txt,
             .capacity = txt.len,
             .pointer_stability = .{},
+        } else .{
+            .items = txt,
+            .capacity = txt.len,
         };
         errdefer buf.deinit(self.alloc);
         return self.insertBlock(.{

@@ -219,7 +219,7 @@ pub fn retryLoop(
         try stream.req.connection.?.flush();
 
         stream.response = try stream.req.receiveHead(&stream.redir_buf);
-        const status_int: u16 = @backingInt(stream.response.head.status);
+        const status_int: u16 = @intFromEnum(stream.response.head.status);
 
         // On 401 without OAuth: no refresh possible, propagate immediately
         if (status_int == 401 and auth.auth != .oauth) break;
@@ -279,7 +279,7 @@ pub fn formatErrBody(
     );
     const err_body = rdr.allocRemaining(ar, .limited(16384)) catch
         try ar.dupe(u8, "unknown error");
-    const status_int: u16 = @backingInt(stream.response.head.status);
+    const status_int: u16 = @intFromEnum(stream.response.head.status);
     const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
     const msg = if (extractMsg) |f| (f(safe_body) orelse safe_body) else safe_body;
     const redacted = audit.redactTextAlloc(ar, msg, .@"pub") catch "unknown error";

@@ -50,9 +50,18 @@ pub const Env = struct {
     }
 
     pub fn deinit(self: *Env, alloc: std.mem.Allocator) void {
-        inline for (@typeInfo(Env).@"struct".field_names, @typeInfo(Env).@"struct".field_types) |name, T| {
-            if (T == ?[]const u8) {
-                if (@field(self, name)) |v| alloc.free(v);
+        const info = @typeInfo(Env).@"struct";
+        if (@hasField(@TypeOf(info), "fields")) {
+            inline for (info.fields) |field| {
+                if (field.type == ?[]const u8) {
+                    if (@field(self, field.name)) |v| alloc.free(v);
+                }
+            }
+        } else {
+            inline for (info.field_names, info.field_types) |name, T| {
+                if (T == ?[]const u8) {
+                    if (@field(self, name)) |v| alloc.free(v);
+                }
             }
         }
         self.* = undefined;
@@ -87,15 +96,31 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         if (self.syslog_fwd) |*fwd| fwd.deinit(alloc);
-        inline for (@typeInfo(Config).@"struct".field_names, @typeInfo(Config).@"struct".field_types) |name, T| {
-            if (T == []u8) {
-                alloc.free(@field(self, name));
-            } else if (T == ?[]u8) {
-                if (@field(self, name)) |v| alloc.free(v);
-            } else if (T == ?[][]u8) {
-                if (@field(self, name)) |models| {
-                    for (models) |m| alloc.free(m);
-                    alloc.free(models);
+        const info = @typeInfo(Config).@"struct";
+        if (@hasField(@TypeOf(info), "fields")) {
+            inline for (info.fields) |field| {
+                if (field.type == []u8) {
+                    alloc.free(@field(self, field.name));
+                } else if (field.type == ?[]u8) {
+                    if (@field(self, field.name)) |v| alloc.free(v);
+                } else if (field.type == ?[][]u8) {
+                    if (@field(self, field.name)) |models| {
+                        for (models) |m| alloc.free(m);
+                        alloc.free(models);
+                    }
+                }
+            }
+        } else {
+            inline for (info.field_names, info.field_types) |name, T| {
+                if (T == []u8) {
+                    alloc.free(@field(self, name));
+                } else if (T == ?[]u8) {
+                    if (@field(self, name)) |v| alloc.free(v);
+                } else if (T == ?[][]u8) {
+                    if (@field(self, name)) |models| {
+                        for (models) |m| alloc.free(m);
+                        alloc.free(models);
+                    }
                 }
             }
         }

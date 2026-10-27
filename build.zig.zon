@@ -5,8 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .ohsnap = .{
-            .url = "https://github.com/mnemnion/ohsnap/archive/b5008f5664ddff81c903b7f8cc9645c77c1b20b5.tar.gz",
-            .hash = "ohsnap-0.5.1-iWxzykCqAACOZm_M12yHTooq6IC4YrtKGoXzpcw629ct",
+            .path = "vendor/ohsnap",
         },
         .zcheck = .{
             .url = "https://github.com/joelreymont/zcheck/archive/4b3b885864b30fd09ecf7ca397aedce4da7c39be.tar.gz",
@@ -17,5 +16,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
     },
 }

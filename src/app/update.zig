@@ -631,7 +631,10 @@ fn trustedUpdateRing() !core.signing.KeyRing {
 }
 
 fn checkDefaultKeyRelease() bool {
-    if (builtin.mode == .debug) return false;
+    const Mode = @TypeOf(builtin.mode);
+    const debug_mode = std.meta.stringToEnum(Mode, "Debug") orelse
+        std.meta.stringToEnum(Mode, "debug").?;
+    if (builtin.mode == debug_mode) return false;
     return isDefaultDevKey();
 }
 

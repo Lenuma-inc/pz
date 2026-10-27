@@ -72,7 +72,7 @@ A security-first coding harness rewritten from the ground up in Zig for enterpri
 
 ## Build
 
-Requires [Zig](https://ziglang.org) 0.17.0.
+Supports [Zig](https://ziglang.org) 0.16.0 and 0.17.0.
 
 ```
 zig build

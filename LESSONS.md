@@ -27,6 +27,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Don't skip plan review validation against actual code — line numbers drift as the file changes, function names get wrong, items get silently dropped.
 - Don't claim `catch return` in `RealSleeper.sleep` is a bug — immediate retry on poll failure is correct backoff behavior.
 - Don't assume `config.zig Err = anyerror` — it uses `@typeInfo` reflection to compute a concrete error set.
+- For Zig 0.16/0.17 shared build code, branch on `@hasField` for struct reflection metadata and `ArrayListUnmanaged` fields; both APIs changed between releases.
 
 ### Did Not Work
 - Fixed-sleep `runPzPtySteps` approach for PTY tests — inherently unreliable, can't be fixed with longer sleeps.
