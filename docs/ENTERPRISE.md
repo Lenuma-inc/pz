@@ -101,11 +101,11 @@ Shutdown path sends `SIGKILL` immediately (no grace period).
 
 Shell commands are tokenized and checked against protected path patterns before execution. Applied in both the bash tool and background job `start()`.
 
-### macOS Sandbox Profile
+### Command Sandbox
 
-On macOS, bash tool execution is wrapped with `sandbox-exec` using a generated profile that:
-- Restricts filesystem access to the workspace root and approved exec roots
-- Limits executable paths to system directories and workspace
+On macOS, bash runs under `sandbox-exec` with a generated profile that restricts filesystem access and executable paths to the workspace and approved system roots.
+
+On Linux, bash runs under `bwrap` with a temporary root, selected system directories mounted read-only, the workspace mounted read-write, and a separate network namespace. Linux requires `bwrap` on `PATH` and kernel permission to create user and network namespaces; setup errors stop the command.
 
 ## Egress Policy
 

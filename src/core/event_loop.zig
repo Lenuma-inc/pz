@@ -359,8 +359,8 @@ pub const EventLoop = struct {
                 }
                 buf[n] = .{
                     .fd = fd,
-                    .readable = (ev.events & std.os.linux.EPOLL.IN) != 0,
-                    .writable = (ev.events & std.os.linux.EPOLL.OUT) != 0,
+                    .readable = (ev.events & (std.os.linux.EPOLL.IN | std.os.linux.EPOLL.HUP | std.os.linux.EPOLL.ERR)) != 0,
+                    .writable = (ev.events & (std.os.linux.EPOLL.OUT | std.os.linux.EPOLL.HUP | std.os.linux.EPOLL.ERR)) != 0,
                 };
                 n += 1;
             }
@@ -555,6 +555,22 @@ test "register pipe, write, wait returns ready" {
 
     // Write to pipe so read end becomes ready.
     _ = try fdWrite(pipe[1], "x");
+
+    var buf: [max_events]Event = undefined;
+    const events = try el.wait(1000, &buf);
+    try std.testing.expect(events.len >= 1);
+    try std.testing.expectEqual(pipe[0], events[0].fd);
+    try std.testing.expect(events[0].readable);
+}
+
+test "closed pipe reports readable so callers can drain EOF" {
+    var el = try EventLoop.init();
+    defer el.deinit();
+
+    const pipe = try makePipe();
+    defer _ = std.c.close(pipe[0]);
+    try el.register(pipe[0], .read);
+    _ = std.c.close(pipe[1]);
 
     var buf: [max_events]Event = undefined;
     const events = try el.wait(1000, &buf);

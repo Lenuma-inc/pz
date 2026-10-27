@@ -26,11 +26,17 @@ const system_exec_roots = [_][]const u8{
 pub const BashPlan = struct {
     argv: []const []const u8,
     cwd: ?[]const u8,
-    profile: []u8,
+    profile: ?[]u8 = null,
+    workspace: ?[]u8 = null,
+    bwrap: ?[]u8 = null,
+    exec_roots: ?[][]u8 = null,
 
     pub fn deinit(self: *BashPlan, alloc: std.mem.Allocator) void {
         alloc.free(self.argv);
-        alloc.free(self.profile);
+        if (self.profile) |profile| alloc.free(profile);
+        if (self.workspace) |workspace| alloc.free(workspace);
+        if (self.bwrap) |bwrap| alloc.free(bwrap);
+        if (self.exec_roots) |roots| freeRoots(alloc, roots);
         if (self.cwd) |cwd| alloc.free(cwd);
         self.* = undefined;
     }
@@ -42,8 +48,6 @@ pub fn prepareBash(
     raw_cwd: ?[]const u8,
     cmd: []const u8,
 ) Err!BashPlan {
-    if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
-
     const root = std.Io.Dir.cwd().realPathFileAlloc(sys.io, ".", alloc) catch |err| return mapFsErr(err);
     defer alloc.free(root);
 
@@ -55,6 +59,9 @@ pub fn prepareBash(
         alloc.free(base);
         cwd = try resolveCwd(alloc, root, path);
     }
+
+    if (builtin.os.tag == .linux) return prepareLinuxBash(alloc, env, root, cwd.?, cmd);
+    if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
 
     const exec_roots = try collectExecRoots(alloc, env, root);
     defer freeRoots(alloc, exec_roots);
@@ -81,11 +88,100 @@ pub fn prepareBash(
     };
 }
 
+fn prepareLinuxBash(
+    alloc: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    root: []const u8,
+    cwd: []const u8,
+    cmd: []const u8,
+) Err!BashPlan {
+    const bwrap = try resolveBwrap(alloc, env);
+    errdefer alloc.free(bwrap);
+    const workspace = try alloc.dupe(u8, root);
+    errdefer alloc.free(workspace);
+    var args: std.ArrayList([]const u8) = .empty;
+    errdefer args.deinit(alloc);
+    try args.appendSlice(alloc, &.{ bwrap, "--tmpfs", "/" });
+    const system_dirs = [_][]const u8{ "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc" };
+    for (system_dirs) |path| {
+        const source = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Io,
+        };
+        alloc.free(source);
+        try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
+    }
+    try args.appendSlice(alloc, &.{ "--tmpfs", "/tmp", "--dev", "/dev", "--proc", "/proc" });
+
+    const exec_roots = try collectLinuxPathRoots(alloc, env);
+    errdefer freeRoots(alloc, exec_roots);
+    for (exec_roots) |path| {
+        if (isWithin(root, path) or isWithin("/usr", path) or isWithin("/bin", path) or
+            isWithin("/sbin", path) or isWithin("/lib", path) or isWithin("/lib64", path) or isWithin("/etc", path)) continue;
+        try appendParents(alloc, &args, path);
+        try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
+    }
+    try appendParents(alloc, &args, root);
+    try args.appendSlice(alloc, &.{ "--bind", workspace, workspace, "--unshare-net", "--chdir", cwd, "--", "/bin/bash", "--noprofile", "--norc", "-lc", cmd });
+    const argv = try args.toOwnedSlice(alloc);
+    errdefer alloc.free(argv);
+
+    return .{
+        .argv = argv,
+        .cwd = cwd,
+        .workspace = workspace,
+        .bwrap = bwrap,
+        .exec_roots = exec_roots,
+    };
+}
+
+fn collectLinuxPathRoots(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) Err![][]u8 {
+    var roots = std.ArrayList([]u8).empty;
+    errdefer {
+        for (roots.items) |path| alloc.free(path);
+        roots.deinit(alloc);
+    }
+    if (env.get("PATH")) |path_env| {
+        var it = std.mem.splitScalar(u8, path_env, ':');
+        while (it.next()) |path| {
+            if (path.len != 0) try pushPathRoot(alloc, &roots, path);
+        }
+    }
+    return try roots.toOwnedSlice(alloc);
+}
+
+fn appendParents(alloc: std.mem.Allocator, args: *std.ArrayList([]const u8), path: []const u8) Err!void {
+    var start: usize = 1;
+    while (std.mem.indexOfScalarPos(u8, path, start, '/')) |slash| {
+        try args.appendSlice(alloc, &.{ "--dir", path[0..slash] });
+        start = slash + 1;
+    }
+}
+
+fn resolveBwrap(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) Err![]u8 {
+    const path_env = env.get("PATH") orelse return error.NotFound;
+    var paths = std.mem.splitScalar(u8, path_env, ':');
+    while (paths.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = std.fs.path.join(alloc, &.{ dir, "bwrap" }) catch return error.OutOfMemory;
+        defer alloc.free(candidate);
+        const path_z = std.Io.Dir.cwd().realPathFileAlloc(sys.io, candidate, alloc) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Io,
+        };
+        defer alloc.free(path_z);
+        return alloc.dupe(u8, path_z) catch return error.OutOfMemory;
+    }
+    return error.NotFound;
+}
+
 fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8) Err![]const u8 {
-    const resolved = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| return mapFsErr(err);
-    errdefer alloc.free(resolved);
-    if (!isWithin(root, resolved)) return error.Denied;
-    return resolved;
+    const resolved_z = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| return mapFsErr(err);
+    defer alloc.free(resolved_z);
+    if (!isWithin(root, resolved_z)) return error.Denied;
+    return alloc.dupe(u8, resolved_z) catch return error.OutOfMemory;
 }
 
 fn collectExecRoots(
@@ -290,7 +386,7 @@ fn mapFsErr(err: anyerror) Err {
 }
 
 test "prepareBash rejects unsupported platforms" {
-    if (builtin.os.tag == .macos) return error.SkipZigTest;
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) return error.SkipZigTest;
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try std.testing.expectError(error.UnsupportedPlatform, prepareBash(std.testing.allocator, &env, null, "true"));
@@ -321,19 +417,72 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
     try std.testing.expectEqual(@as(usize, 8), plan.argv.len);
     try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", plan.argv[0]);
     try std.testing.expectEqualStrings("-p", plan.argv[1]);
-    try std.testing.expectEqualStrings(plan.profile, plan.argv[2]);
+    try std.testing.expectEqualStrings(plan.profile.?, plan.argv[2]);
     try std.testing.expectEqualStrings("/bin/bash", plan.argv[3]);
     try std.testing.expectEqualStrings("--noprofile", plan.argv[4]);
     try std.testing.expectEqualStrings("--norc", plan.argv[5]);
     try std.testing.expectEqualStrings("-lc", plan.argv[6]);
     try std.testing.expectEqualStrings("printf ok", plan.argv[7]);
     try std.testing.expectEqualStrings(sub, plan.cwd.?);
-    try std.testing.expect(std.mem.indexOf(u8, plan.profile, root) != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan.profile, "/opt/homebrew") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.profile.?, root) != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.profile.?, "/opt/homebrew") != null);
+}
+
+test "prepareBash builds a Linux bubblewrap workspace sandbox" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(sys.io, "sub");
+    try tmp.dir.createDirPath(sys.io, "bin");
+    var fake_bwrap = try tmp.dir.createFile(sys.io, "bin/bwrap", .{});
+    fake_bwrap.close(sys.io);
+    const bin = try tmp.dir.realPathFileAlloc(sys.io, "bin", std.testing.allocator);
+    defer std.testing.allocator.free(bin);
+
+    const path_guard = @import("tools/path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", bin);
+    const root = try tmp.dir.realPathFileAlloc(sys.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try env.put("HOME", root);
+
+    var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok");
+    defer plan.deinit(std.testing.allocator);
+
+    const sub = try tmp.dir.realPathFileAlloc(sys.io, "sub", std.testing.allocator);
+    defer std.testing.allocator.free(sub);
+
+    try std.testing.expect(std.mem.startsWith(u8, plan.argv[0], bin));
+    try std.testing.expect(hasArg(plan.argv, "--ro-bind"));
+    try std.testing.expect(hasArg(plan.argv, "--tmpfs"));
+    try std.testing.expectEqualStrings("/", plan.argv[2]);
+    try std.testing.expect(!hasArg(plan.argv, "/run/pz/workspace"));
+    for (0..plan.argv.len - 2) |i| {
+        if (std.mem.eql(u8, plan.argv[i], "--ro-bind")) {
+            try std.testing.expect(!std.mem.eql(u8, plan.argv[i + 1], "/"));
+            try std.testing.expect(!std.mem.eql(u8, plan.argv[i + 2], "/"));
+        }
+    }
+    try std.testing.expect(hasArg(plan.argv, root));
+    try std.testing.expect(hasArg(plan.argv, "--unshare-net"));
+    try std.testing.expectEqualStrings(sub, plan.argv[plan.argv.len - 7]);
+    try std.testing.expectEqualStrings("/bin/bash", plan.argv[plan.argv.len - 5]);
+    try std.testing.expectEqualStrings("printf ok", plan.argv[plan.argv.len - 1]);
+    try std.testing.expectEqualStrings(sub, plan.cwd.?);
+    try std.testing.expect(plan.profile == null);
+}
+
+fn hasArg(argv: []const []const u8, wanted: []const u8) bool {
+    for (argv) |arg| if (std.mem.eql(u8, arg, wanted)) return true;
+    return false;
 }
 
 test "prepareBash denies cwd escapes" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var outer = std.testing.tmpDir(.{});

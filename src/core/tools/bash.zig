@@ -787,36 +787,61 @@ test "bash handler installs sandbox before bash exec" {
     defer std.testing.allocator.free(sub);
 
     const argv = runner_ctx.argv orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 8), argv.len);
-    try oh.snap(@src(),
-        \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
-        \\  .arg0: []const u8
-        \\    "/usr/bin/sandbox-exec"
-        \\  .arg1: []const u8
-        \\    "-p"
-        \\  .profile_has_root: bool = true
-        \\  .arg3: []const u8
-        \\    "/bin/bash"
-        \\  .arg4: []const u8
-        \\    "--noprofile"
-        \\  .arg5: []const u8
-        \\    "--norc"
-        \\  .arg6: []const u8
-        \\    "-lc"
-        \\  .arg7: []const u8
-        \\    "printf ok"
-        \\  .cwd_matches_sub: bool = true
-    ).expectEqual(Snap{
-        .arg0 = argv[0],
-        .arg1 = argv[1],
-        .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
-        .arg3 = argv[3],
-        .arg4 = argv[4],
-        .arg5 = argv[5],
-        .arg6 = argv[6],
-        .arg7 = argv[7],
-        .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
-    });
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqual(@as(usize, 8), argv.len);
+        try oh.snap(@src(),
+            \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
+            \\  .arg0: []const u8
+            \\    "/usr/bin/sandbox-exec"
+            \\  .arg1: []const u8
+            \\    "-p"
+            \\  .profile_has_root: bool = true
+            \\  .arg3: []const u8
+            \\    "/bin/bash"
+            \\  .arg4: []const u8
+            \\    "--noprofile"
+            \\  .arg5: []const u8
+            \\    "--norc"
+            \\  .arg6: []const u8
+            \\    "-lc"
+            \\  .arg7: []const u8
+            \\    "printf ok"
+            \\  .cwd_matches_sub: bool = true
+        ).expectEqual(Snap{
+            .arg0 = argv[0],
+            .arg1 = argv[1],
+            .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
+            .arg3 = argv[3],
+            .arg4 = argv[4],
+            .arg5 = argv[5],
+            .arg6 = argv[6],
+            .arg7 = argv[7],
+            .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
+        });
+    } else if (builtin.os.tag == .linux) {
+        try std.testing.expect(std.mem.endsWith(u8, argv[0], "/bwrap"));
+        try std.testing.expect(hasArg(argv, "--ro-bind"));
+        try std.testing.expect(hasArg(argv, "--tmpfs"));
+        try std.testing.expect(hasArg(argv, "/"));
+        try std.testing.expect(hasArg(argv, root));
+        for (0..argv.len - 2) |i| {
+            if (std.mem.eql(u8, argv[i], "--ro-bind")) {
+                try std.testing.expect(!std.mem.eql(u8, argv[i + 1], "/"));
+                try std.testing.expect(!std.mem.eql(u8, argv[i + 2], "/"));
+            }
+        }
+        try std.testing.expect(hasArg(argv, "--unshare-net"));
+        try std.testing.expect(hasArg(argv, root));
+        try std.testing.expectEqualStrings(sub, argv[argv.len - 7]);
+        try std.testing.expectEqualStrings("/bin/bash", argv[argv.len - 5]);
+        try std.testing.expectEqualStrings("printf ok", argv[argv.len - 1]);
+        try std.testing.expectEqualStrings(sub, runner_ctx.cwd.?);
+    } else return error.SkipZigTest;
+}
+
+fn hasArg(argv: []const []const u8, wanted: []const u8) bool {
+    for (argv) |arg| if (std.mem.eql(u8, arg, wanted)) return true;
+    return false;
 }
 
 test "bash handler returns failed final on non-zero exit" {
@@ -1042,19 +1067,18 @@ test "bash handler denies file reads outside workspace inside sandbox" {
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
     });
-    const cmd = try std.fmt.allocPrint(std.testing.allocator, "cat '{s}'", .{secret});
-    defer std.testing.allocator.free(cmd);
     const call: tools.Call = .{
         .id = "b-file-deny",
         .kind = .bash,
         .args = .{
             .bash = .{
-                .cmd = cmd,
+                .cmd = try std.fmt.allocPrint(std.testing.allocator, "if cat '{s}' >/dev/null 2>&1; then printf leaked; else printf denied; fi", .{secret}),
             },
         },
         .src = .model,
         .at_ms = 0,
     };
+    defer std.testing.allocator.free(call.args.bash.cmd);
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
@@ -1068,9 +1092,9 @@ test "bash handler denies file reads outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-file-deny|0|stderr|false|cat: <repo>/README.md: Operation not permitted
+        \\0=b-file-deny|0|stdout|false|denied
         \\
-        \\final=failed|exec|bash exited non-zero|.{ 1 }
+        \\final=ok|0
         \\"
     ).expectEqual(snap);
 }
@@ -1099,19 +1123,18 @@ test "bash handler denies process exec outside workspace inside sandbox" {
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
     });
-    const cmd = try std.fmt.allocPrint(std.testing.allocator, "'{s}'", .{script});
-    defer std.testing.allocator.free(cmd);
     const call: tools.Call = .{
         .id = "b-proc-deny",
         .kind = .bash,
         .args = .{
             .bash = .{
-                .cmd = cmd,
+                .cmd = try std.fmt.allocPrint(std.testing.allocator, "if '{s}'; then printf ran; else printf denied; fi", .{script}),
             },
         },
         .src = .model,
         .at_ms = 0,
     };
+    defer std.testing.allocator.free(call.args.bash.cmd);
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
@@ -1125,9 +1148,9 @@ test "bash handler denies process exec outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-proc-deny|0|stderr|false|/bin/bash: <repo>/.zig-cache/p30a-run.sh: Operation not permitted
+        \\0=b-proc-deny|0|stdout|false|denied
         \\
-        \\final=failed|exec|bash exited non-zero|.{ 126 }
+        \\final=ok|0
         \\"
     ).expectEqual(snap);
 }

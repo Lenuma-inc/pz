@@ -80,7 +80,7 @@ zig build
 
 The binary lands in `zig-out/bin/pz`.
 
-On Linux, bash execution returns `UnsupportedPlatform`; the command sandbox currently requires macOS.
+On Linux, bash execution requires `bubblewrap` (`bwrap`) on `PATH` and permission to create user and network namespaces. A temporary root exposes system directories read-only, mounts the workspace writable, and blocks shell network access.
 
 Release builds require `-Dgit-hash=<hash>` and embed `CHANGELOG.md`. Debug builds use VCS.
 
