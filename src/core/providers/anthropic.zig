@@ -477,6 +477,23 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
                     try js.objectField("text");
                     try writeJsonLossy(alloc, js, text);
                 },
+                .image => |image| {
+                    if (msg.role != .user) return error.UnsupportedPartType;
+                    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(image.data.len));
+                    defer alloc.free(encoded);
+                    const data = std.base64.standard.Encoder.encode(encoded, image.data);
+                    try js.objectField("type");
+                    try js.write("image");
+                    try js.objectField("source");
+                    try js.beginObject();
+                    try js.objectField("type");
+                    try js.write("base64");
+                    try js.objectField("media_type");
+                    try js.write(image.media_type);
+                    try js.objectField("data");
+                    try js.write(data);
+                    try js.endObject();
+                },
                 .tool_call => |tc| {
                     try js.objectField("type");
                     try js.write("tool_use");
@@ -859,6 +876,21 @@ test "buildBody minimal request" {
         \\[]u8
         \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"
     );
+}
+
+test "buildBody sends user image blocks as base64" {
+    const pixels = [_]u8{ 0xff, 0xd8, 0xff };
+    const msgs = [_]providers.Msg{.{ .role = .user, .parts = &.{
+        .{ .text = "describe this video" },
+        .{ .image = .{ .media_type = "image/jpeg", .data = &pixels } },
+    } }};
+    const body = try testBuildBody(testing.allocator, .{
+        .model = "claude-sonnet-4-20250514",
+        .msgs = &msgs,
+        .opts = .{ .thinking = .off },
+    });
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"/9j/\"}") != null);
 }
 
 test "buildBody includes temp top_p and stop sequences" {

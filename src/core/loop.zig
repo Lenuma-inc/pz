@@ -10,6 +10,7 @@ const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
 const core_time = @import("time.zig");
+const video = @import("video.zig");
 
 pub const Err = error{
     EmptySessionId,
@@ -492,6 +493,17 @@ const Hist = struct {
             .role = role,
             .part = .{ .text = owned },
         } });
+
+        if (role == .user) {
+            if (video.findPath(text)) |path| {
+                const image = try video.contactSheetAlloc(self.alloc, path);
+                errdefer self.alloc.free(image);
+                try self.items.append(self.alloc, .{ .item = .{
+                    .role = .user,
+                    .part = .{ .image = .{ .media_type = "image/jpeg", .data = image } },
+                } });
+            }
+        }
     }
 
     fn pushToolCallDup(
@@ -906,6 +918,7 @@ fn nowMs(opts: Opts) i64 {
 fn freePart(alloc: std.mem.Allocator, part: providers.Part) void {
     switch (part) {
         .text => |text| alloc.free(text),
+        .image => |image| alloc.free(image.data),
         .tool_call => |tc| {
             alloc.free(tc.id);
             alloc.free(tc.name);
@@ -985,6 +998,10 @@ fn cloneReqPart(
 ) !providers.Part {
     return switch (part) {
         .text => |text| .{ .text = try cloneReqText(alloc, role, text, skip_guard) },
+        .image => |image| .{ .image = .{
+            .media_type = image.media_type,
+            .data = try alloc.dupe(u8, image.data),
+        } },
         .tool_call => |tc| .{
             .tool_call = .{
                 .id = try alloc.dupe(u8, tc.id),
@@ -1508,6 +1525,11 @@ fn fmtReqMsgs(alloc: std.mem.Allocator, msgs: []const providers.Msg) ![]u8 {
                 .text => |text| try buf.print(alloc, "{s}|text|{s}\n", .{
                     @tagName(msg.role),
                     text,
+                }),
+                .image => |image| try buf.print(alloc, "{s}|image|{s}|{d} bytes\n", .{
+                    @tagName(msg.role),
+                    image.media_type,
+                    image.data.len,
                 }),
                 .tool_call => |tc| try buf.print(alloc, "{s}|tool_call|{s}|{s}|{s}\n", .{
                     @tagName(msg.role),

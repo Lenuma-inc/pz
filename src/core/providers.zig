@@ -17,6 +17,7 @@ pub const Role = c.Role;
 pub const Request = c.Request;
 pub const Msg = c.Msg;
 pub const Part = c.Part;
+pub const Image = c.Image;
 pub const Tool = c.Tool;
 pub const ToolCall = c.ToolCall;
 pub const ToolResult = c.ToolResult;

@@ -4618,6 +4618,20 @@ fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8, home: ?[]const u8)
     return classifySlashSkill(skills, name);
 }
 
+fn isAbsoluteMp4Prompt(line: []const u8) bool {
+    const end = std.mem.indexOfAny(u8, line, " \t\r\n") orelse line.len;
+    const path = std.mem.trimEnd(u8, line[0..end], ".,;:!?)]}");
+    return std.fs.path.isAbsolute(path) and path.len >= 4 and std.ascii.eqlIgnoreCase(path[path.len - 4 ..], ".mp4");
+}
+
+test "absolute MP4 paths are treated as prompts, not slash commands" {
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/Video_2026-10-23_01-29-25.mp4"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.MP4"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.mp4 summarize this"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.mp4, inspect it"));
+    try std.testing.expect(!isAbsoluteMp4Prompt("/help"));
+}
+
 fn handleSlashCommand(
     alloc: std.mem.Allocator,
     line: []const u8,
@@ -4637,7 +4651,7 @@ fn handleSlashCommand(
     ctl_audit: *RuntimeCtlAudit,
     home: ?[]const u8,
 ) !CmdRes {
-    if (line.len == 0 or line[0] != '/') return .unhandled;
+    if (line.len == 0 or line[0] != '/' or isAbsoluteMp4Prompt(line)) return .unhandled;
 
     const body = std.mem.trim(u8, line[1..], " \t");
     if (body.len == 0) return .handled;

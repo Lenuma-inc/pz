@@ -24,8 +24,14 @@ pub const Msg = struct {
 
 pub const Part = union(enum) {
     text: []const u8,
+    image: Image,
     tool_call: ToolCall,
     tool_result: ToolResult,
+};
+
+pub const Image = struct {
+    media_type: []const u8,
+    data: []const u8,
 };
 
 pub const Tool = struct {

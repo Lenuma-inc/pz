@@ -486,11 +486,11 @@ fn writeInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const p
 }
 
 fn writeTextInput(alloc: std.mem.Allocator, js: *std.json.Stringify, role: []const u8, parts: []const providers.Part) !void {
-    var text_count: usize = 0;
+    var content_count: usize = 0;
     for (parts) |part| {
-        if (part == .text) text_count += 1;
+        if (part == .text or part == .image) content_count += 1;
     }
-    if (text_count == 0) return;
+    if (content_count == 0) return;
 
     try js.beginObject();
     try js.objectField("role");
@@ -506,9 +506,25 @@ fn writeTextInput(alloc: std.mem.Allocator, js: *std.json.Stringify, role: []con
             try writeJsonLossy(alloc, js, text);
             try js.endObject();
         },
+        .image => |image| try writeInputImage(alloc, js, image),
         else => return error.UnsupportedPartType,
     };
     try js.endArray();
+    try js.endObject();
+}
+
+fn writeInputImage(alloc: std.mem.Allocator, js: *std.json.Stringify, image: providers.Image) !void {
+    const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(image.data.len));
+    defer alloc.free(encoded);
+    const data = std.base64.standard.Encoder.encode(encoded, image.data);
+    const data_url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ image.media_type, data });
+    defer alloc.free(data_url);
+
+    try js.beginObject();
+    try js.objectField("type");
+    try js.write("input_image");
+    try js.objectField("image_url");
+    try js.write(data_url);
     try js.endObject();
 }
 
@@ -852,6 +868,19 @@ test "ChatGPT OAuth body uses instructions without API token limits" {
         \\[]u8
         \\  "{"model":"gpt-6.1-sol","stream":true,"store":false,"instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
+}
+
+test "buildBody sends user image input as a data URL" {
+    const pixels = [_]u8{ 0xff, 0xd8, 0xff };
+    const body = try Cfg.buildBody(testing.allocator, .{
+        .model = "gpt-4o",
+        .msgs = &.{.{ .role = .user, .parts = &.{
+            .{ .text = "describe this video" },
+            .{ .image = .{ .media_type = "image/jpeg", .data = &pixels } },
+        } }},
+    }, false);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,/9j/\"") != null);
 }
 
 test "ChatGPT OAuth requires an account claim" {

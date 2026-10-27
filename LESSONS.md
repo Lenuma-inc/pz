@@ -7,6 +7,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ### Do Not Do
 - Do not assume every terminal sends bare CSI arrow sequences; accept parameterized CSI arrows such as `1;1A` alongside standard CSI and SS3 forms.
 - Never continue after `Reader.takeDelimiter` returns `StreamTooLong`: it leaves the reader unchanged, so drain long SSE lines with `streamDelimiter`.
+- Absolute `.mp4` input starts with `/`, so route it as a prompt before slash-command dispatch. Extract a bounded contact sheet and pass it as provider image parts; keep file/protocol limits at the extraction boundary.
 
 ---
 

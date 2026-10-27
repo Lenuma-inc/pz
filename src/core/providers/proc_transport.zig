@@ -210,12 +210,12 @@ pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
         .options = .{},
     };
 
-    writeReq(&js, req) catch return error.OutOfMemory;
+    writeReq(alloc, &js, req) catch return error.OutOfMemory;
 
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeReq(js: *std.json.Stringify, req: providers.Request) std.Io.Writer.Error!void {
+fn writeReq(alloc: std.mem.Allocator, js: *std.json.Stringify, req: providers.Request) anyerror!void {
     try js.beginObject();
 
     try js.objectField("model");
@@ -237,7 +237,7 @@ fn writeReq(js: *std.json.Stringify, req: providers.Request) std.Io.Writer.Error
         try js.objectField("parts");
         try js.beginArray();
         for (msg.parts) |part| {
-            try writePart(js, part);
+            try writePart(alloc, js, part);
         }
         try js.endArray();
 
@@ -296,7 +296,7 @@ fn writeReq(js: *std.json.Stringify, req: providers.Request) std.Io.Writer.Error
     try js.endObject();
 }
 
-fn writePart(js: *std.json.Stringify, part: providers.Part) std.Io.Writer.Error!void {
+fn writePart(alloc: std.mem.Allocator, js: *std.json.Stringify, part: providers.Part) anyerror!void {
     try js.beginObject();
 
     switch (part) {
@@ -305,6 +305,17 @@ fn writePart(js: *std.json.Stringify, part: providers.Part) std.Io.Writer.Error!
             try js.write("text");
             try js.objectField("text");
             try js.write(txt);
+        },
+        .image => |image| {
+            const encoded = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(image.data.len));
+            defer alloc.free(encoded);
+            const data = std.base64.standard.Encoder.encode(encoded, image.data);
+            try js.objectField("type");
+            try js.write("image");
+            try js.objectField("media_type");
+            try js.write(image.media_type);
+            try js.objectField("data");
+            try js.write(data);
         },
         .tool_call => |tc| {
             try js.objectField("type");
@@ -424,6 +435,20 @@ test "buildReq emits request fixture JSON" {
         \\[]u8
         \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"]}}"
     );
+}
+
+test "buildReq encodes image parts as base64" {
+    const pixels = [_]u8{ 0xff, 0xd8, 0xff };
+    const req: providers.Request = .{
+        .model = "m",
+        .msgs = &.{.{ .role = .user, .parts = &.{.{ .image = .{
+            .media_type = "image/jpeg",
+            .data = &pixels,
+        } }} }},
+    };
+    const wire = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(wire);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"type\":\"image\",\"media_type\":\"image/jpeg\",\"data\":\"/9j/\"") != null);
 }
 
 test "buildReq includes provider field when set" {
