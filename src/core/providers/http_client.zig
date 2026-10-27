@@ -8,6 +8,7 @@ const std = @import("std");
 const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
+
 const core_time = @import("../time.zig");
 const utf8 = @import("../utf8.zig");
 const el_mod = @import("../event_loop.zig");
@@ -324,7 +325,19 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
                 self.done = true;
                 return null;
             },
-            error.StreamTooLong => continue,
+            error.StreamTooLong => long_line_result: {
+                var long_line = std.Io.Writer.Allocating.init(self.arena.allocator());
+                _ = rdr.streamDelimiter(&long_line.writer, '\n') catch |stream_err| switch (stream_err) {
+                    error.EndOfStream => {},
+                    error.ReadFailed, error.WriteFailed => {
+                        self.done = true;
+                        return null;
+                    },
+                };
+                const owned_line = try long_line.toOwnedSlice();
+                if (rdr.seek != rdr.end) rdr.toss(1);
+                break :long_line_result @as(?[]const u8, owned_line);
+            },
         };
 
         const raw_line = line orelse {
