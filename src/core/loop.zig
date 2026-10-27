@@ -1170,7 +1170,7 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
             error.PolicyDenied => {
                 return .{
                     .id = try opts.alloc.dupe(u8, tc.id),
-                    .output = try opts.alloc.dupe(u8, "blocked by policy"),
+                    .output = try opts.alloc.dupe(u8, "blocked by policy; do not retry. Explain which permission blocked this tool and use ask to request that the user update the policy or grant access."),
                     .is_err = true,
                 };
             },
@@ -1235,7 +1235,10 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
 
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
-            .output = try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}", .{@errorName(run_err)}),
+            .output = if (run_err == error.TooLarge)
+                try opts.alloc.dupe(u8, "tool-failed:TooLarge (input exceeds the tool limit; read a smaller range or split the operation)")
+            else
+                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. If this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim the command succeeded.", .{@errorName(run_err)}),
             .is_err = true,
         };
     };
@@ -1338,7 +1341,7 @@ const ToolModeSink = struct {
 fn resultOut(alloc: std.mem.Allocator, res: tools.Result) ![]const u8 {
     return switch (res.final) {
         .ok => joinChunks(alloc, res.out),
-        .failed => |failed| try alloc.dupe(u8, failed.msg),
+        .failed => |failed| try joinFailedChunks(alloc, res.out, failed.msg),
         .cancelled => |cancelled| try std.fmt.allocPrint(alloc, "cancelled:{s}", .{
             @tagName(cancelled.reason),
         }),
@@ -1346,6 +1349,31 @@ fn resultOut(alloc: std.mem.Allocator, res: tools.Result) ![]const u8 {
             timed_out.limit_ms,
         }),
     };
+}
+
+fn joinFailedChunks(alloc: std.mem.Allocator, out: []const tools.Output, msg: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    for (out) |chunk| {
+        try buf.appendSlice(alloc, @tagName(chunk.stream));
+        try buf.appendSlice(alloc, ":\n");
+        try buf.appendSlice(alloc, chunk.chunk);
+        if (chunk.chunk.len == 0 or chunk.chunk[chunk.chunk.len - 1] != '\n') try buf.append(alloc, '\n');
+    }
+    try buf.appendSlice(alloc, "error: ");
+    try buf.appendSlice(alloc, msg);
+    try buf.appendSlice(alloc, "\nIf this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim success.");
+    return buf.toOwnedSlice(alloc);
+}
+
+test "failed tool output keeps stdout stderr and error message" {
+    const out = [_]tools.Output{
+        .{ .call_id = "c", .seq = 0, .at_ms = 0, .stream = .stdout, .chunk = "partial result" },
+        .{ .call_id = "c", .seq = 1, .at_ms = 0, .stream = .stderr, .chunk = "command detail\n" },
+    };
+    const joined = try joinFailedChunks(std.testing.allocator, &out, "bash exited non-zero");
+    defer std.testing.allocator.free(joined);
+    try std.testing.expectEqualStrings("stdout:\npartial result\nstderr:\ncommand detail\nerror: bash exited non-zero\nIf this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim success.", joined);
 }
 
 fn freeToolOut(alloc: std.mem.Allocator, res: tools.Result) void {

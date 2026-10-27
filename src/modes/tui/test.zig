@@ -422,7 +422,7 @@ test "golden snapshot deterministic frame text" {
         \\  .row1: []const u8
         \\    ""
         \\  .row8: []const u8
-        \\    "shift+drag: select"
+        \\    "drag: select"
         \\  .row9: []const u8
         \\    "1 turn m"
     ).expectEqual(snap);
@@ -1155,7 +1155,7 @@ test "UX5 settings toggles persist across multiple render cycles" {
 
 // ── UX1: Startup walkthrough ──
 
-test "UX1 startup frame has shift+drag hint in footer" {
+test "UX1 startup frame has drag-selection hint in footer" {
     var ui = try Ui.initFull(std.testing.allocator, 60, 10, "gpt-4o", "openai", "/tmp/proj", "main", null);
     defer ui.deinit();
 
@@ -1163,13 +1163,13 @@ test "UX1 startup frame has shift+drag hint in footer" {
     defer vs.deinit();
     try renderToVs(&ui, &vs);
 
-    // Footer line 1 (row 8 for h=10): shift+drag hint right-aligned
+    // Footer line 1 (row 8 for h=10): drag-selection hint right-aligned
     var found_hint = false;
     var r: usize = 7;
     while (r < 10) : (r += 1) {
         const row = try vs.rowText(std.testing.allocator, r);
         defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, "shift+drag: select") != null) {
+        if (std.mem.indexOf(u8, row, "drag: select") != null) {
             found_hint = true;
             break;
         }

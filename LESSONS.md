@@ -9,6 +9,8 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Never continue after `Reader.takeDelimiter` returns `StreamTooLong`: it leaves the reader unchanged, so drain long SSE lines with `streamDelimiter`.
 - Absolute `.mp4` input starts with `/`, so route it as a prompt before slash-command dispatch. Extract a bounded contact sheet and pass it as provider image parts; keep file/protocol limits at the extraction boundary.
 - A Linux filesystem read-only bind still exposes readable secrets; build the sandbox from an empty root and bind only system directories plus the workspace.
+- Handle drag selection inside the TUI when mouse reporting is required for wheel scrolling.
+- Tool failures caused by policy or sandbox limits must tell the model to stop and ask the user for access; opaque error names invite blind retries.
 
 ---
 

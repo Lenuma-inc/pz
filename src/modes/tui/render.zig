@@ -58,14 +58,14 @@ pub const Renderer = struct {
 
     pub fn setup(out: anytype) !void {
         try out.writeAll(decSet(.alt_screen) ++ decRst(.cursor) ++
-            decSet(.bracketed_paste) ++ "\x1b[?1000h\x1b[?1006h" ++
+            decSet(.bracketed_paste) ++ "\x1b[?1002h\x1b[?1006h" ++
             "\x1b[>1u"); // Kitty keyboard protocol: push with disambiguate flag
     }
 
     pub fn cleanup(out: anytype) !void {
         try out.writeAll("\x1b[<u" ++ // Kitty keyboard protocol: pop
             decRst(.bracketed_paste) ++
-            "\x1b[?1006l\x1b[?1000l" ++
+            "\x1b[?1006l\x1b[?1002l" ++
             decSet(.cursor) ++ decRst(.alt_screen));
     }
 
@@ -243,7 +243,7 @@ test "renderer rejects size mismatch" {
     try std.testing.expectError(error.SizeMismatch, rnd.render(&frm, &out));
 }
 
-test "renderer setup captures mouse for TUI scrolling" {
+test "renderer setup enables wheel scrolling and drag reporting" {
     var raw: [128]u8 = undefined;
     var out = TestBuf.init(raw[0..]);
 
@@ -251,10 +251,10 @@ test "renderer setup captures mouse for TUI scrolling" {
 
     const seq = out.view();
     try std.testing.expectEqualStrings(
-        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[?1000h\x1b[?1006h" ++ "\x1b[>1u",
+        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[?1002h\x1b[?1006h" ++ "\x1b[>1u",
         seq,
     );
-    try std.testing.expect(std.mem.indexOf(u8, seq, "?1000h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seq, "?1002h") != null);
     try std.testing.expect(std.mem.indexOf(u8, seq, "?1006h") != null);
 }
 
@@ -265,7 +265,7 @@ test "renderer cleanup restores terminal and disables mouse modes" {
     try Renderer.cleanup(&out);
 
     try std.testing.expectEqualStrings(
-        "\x1b[<u" ++ decRst(.bracketed_paste) ++ "\x1b[?1006l\x1b[?1000l" ++ decSet(.cursor) ++ decRst(.alt_screen),
+        "\x1b[<u" ++ decRst(.bracketed_paste) ++ "\x1b[?1006l\x1b[?1002l" ++ decSet(.cursor) ++ decRst(.alt_screen),
         out.view(),
     );
 }

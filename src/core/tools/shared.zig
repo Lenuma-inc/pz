@@ -2,6 +2,55 @@
 const std = @import("std");
 const tools = @import("../tools.zig");
 
+pub fn formatDiffAlloc(alloc: std.mem.Allocator, path: []const u8, full: []const u8, old: []const u8, new: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    const line = if (old.len == 0)
+        std.mem.count(u8, full, "\n") + 1
+    else if (std.mem.indexOf(u8, full, old)) |pos|
+        std.mem.count(u8, full[0..pos], "\n") + 1
+    else
+        1;
+    const old_lines = lineCount(old);
+    const new_lines = lineCount(new);
+    const header = try std.fmt.allocPrint(alloc, "• Edited {s} (+{d} -{d})\n@@ -{d},{d} +{d},{d} @@\n", .{
+        std.fs.path.basename(path), new_lines, old_lines, line, old_lines, line, new_lines,
+    });
+    defer alloc.free(header);
+    try out.appendSlice(alloc, header);
+    try appendDiffLines(alloc, &out, '-', old);
+    try appendDiffLines(alloc, &out, '+', new);
+    return try out.toOwnedSlice(alloc);
+}
+
+pub fn formatAppendDiffAlloc(alloc: std.mem.Allocator, path: []const u8, text: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    const header = try std.fmt.allocPrint(alloc, "• Edited {s} (+{d} -0)\n@@ append @@\n", .{
+        std.fs.path.basename(path), lineCount(text),
+    });
+    defer alloc.free(header);
+    try out.appendSlice(alloc, header);
+    try appendDiffLines(alloc, &out, '+', text);
+    return try out.toOwnedSlice(alloc);
+}
+
+fn lineCount(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    return std.mem.count(u8, text, "\n") + @intFromBool(text[text.len - 1] != '\n');
+}
+
+fn appendDiffLines(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), prefix: u8, text: []const u8) !void {
+    var start: usize = 0;
+    while (start < text.len) {
+        try out.append(alloc, prefix);
+        const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+        try out.appendSlice(alloc, text[start..end]);
+        if (end < text.len) try out.append(alloc, '\n');
+        start = end + @intFromBool(end < text.len);
+    }
+}
+
 // ── Saturating arithmetic ──────────────────────────────────────────
 
 pub fn satAdd(comptime T: type, a: T, b: anytype) T {

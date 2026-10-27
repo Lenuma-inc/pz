@@ -3431,6 +3431,10 @@ fn runTui(
                 },
                 .mouse => |mev| {
                     ui.onMouse(mev);
+                    switch (mev) {
+                        .release => try copyMouseSelection(alloc, &ui, pol),
+                        else => {},
+                    }
                     try ui.draw(out);
                 },
                 .notify => {
@@ -5082,8 +5086,7 @@ fn handleSlashCommand(
                 \\  Alt+Enter      Queue follow-up message
                 \\  Alt+Up         Restore queued messages to editor
                 \\  Page Up/Down   Scroll transcript (half page)
-                \\  Scroll Up/Down Scroll transcript
-                \\  Shift+Drag     Select text
+                \\  Drag           Select and copy text
                 \\  !cmd           Run bash (include)
                 \\  !!cmd          Run bash (exclude)
                 \\  /              Commands
@@ -6697,7 +6700,7 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
         .{ "alt+enter", "to queue follow-up" },
         .{ "alt+up", "to restore queued messages" },
         .{ "ctrl+v", "to paste image" },
-        .{ "shift+drag", "to select text" },
+        .{ "drag", "to select and copy text" },
         .{ "drop files", "to attach" },
     };
     for (keys) |kv| {
@@ -6835,7 +6838,7 @@ fn showCost(_: std.mem.Allocator, ui: *tui_harness.Ui) !void {
 const clip_paths = if (builtin.target.os.tag == .macos)
     &[_][]const u8{"/usr/bin/pbcopy"}
 else
-    &[_][]const u8{ "/usr/bin/xclip", "/usr/bin/xsel", "/usr/bin/wl-copy" };
+    &[_][]const u8{ "/usr/bin/wl-copy", "/usr/bin/xclip", "/usr/bin/xsel" };
 
 fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimePolicy) !void {
     const text = ui.lastResponseText() orelse {
@@ -6849,6 +6852,17 @@ fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const R
         }
     }
     try ui.tr.infoText("[copy failed: no clipboard tool found]");
+}
+
+fn copyMouseSelection(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimePolicy) !void {
+    const text = (try ui.takeSelectedText()) orelse return;
+    defer alloc.free(text);
+    if (text.len == 0) return;
+    for (clip_paths) |cmd| {
+        if (try pipeToCmd(alloc, cmd, text, pol)) return;
+    }
+    ui.clearSelection();
+    try ui.tr.infoText("[selection copy failed: clipboard tool unavailable or blocked]");
 }
 
 fn pipeToCmd(alloc: std.mem.Allocator, cmd: []const u8, text: []const u8, pol: *const RuntimePolicy) !bool {
@@ -9045,7 +9059,7 @@ test "runtime blocks tool dispatch under verified policy" {
     defer std.testing.allocator.free(sid);
 
     const written = out_fbs.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "blocked by policy; do not retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
 
     // P29c: headless print mode uses NullStore by default -- no session
@@ -9115,7 +9129,7 @@ fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
     defer std.testing.allocator.free(sid);
 
     const written = out_fbs.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "blocked by policy; do not retry") != null);
     try std.testing.expect(rows.rows.items.len != 0);
 
     switch (transport) {

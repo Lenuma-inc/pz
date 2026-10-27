@@ -84,8 +84,8 @@ pub const dark = Theme{
     // Tools
     .tool_title = .{ .default = {} },
     .tool_output = .{ .default = {} },
-    .tool_diff_add = .{ .rgb = 0xb5bd68 },
-    .tool_diff_rm = .{ .rgb = 0xcc6666 },
+    .tool_diff_add = .{ .rgb = 0xb8e342 },
+    .tool_diff_rm = .{ .rgb = 0xff6666 },
     .tool_diff_ctx = .{ .rgb = 0x808080 },
     // Markdown
     .md_heading = .{ .rgb = 0xf0c674 },
@@ -143,8 +143,8 @@ pub const light = Theme{
     // Tools
     .tool_title = .{ .default = {} },
     .tool_output = .{ .default = {} },
-    .tool_diff_add = .{ .rgb = 0x859900 },
-    .tool_diff_rm = .{ .rgb = 0xdc322f },
+    .tool_diff_add = .{ .rgb = 0x008000 },
+    .tool_diff_rm = .{ .rgb = 0xd00000 },
     .tool_diff_ctx = .{ .rgb = 0x93a1a1 },
     // Markdown
     .md_heading = .{ .rgb = 0xb58900 },

@@ -470,8 +470,10 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runWrite(_: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
+    fn runWrite(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = write.Handler.init(.{
+            .alloc = self.alloc,
+            .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);

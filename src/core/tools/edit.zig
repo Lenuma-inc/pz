@@ -57,6 +57,27 @@ pub const Handler = struct {
             try replaceFirstAlloc(self.alloc, full, args.old, args.new);
         defer self.alloc.free(updated);
 
+        const diff = try shared.formatDiffAlloc(self.alloc, args.path, full, args.old, args.new);
+        errdefer self.alloc.free(diff);
+        const out = try self.alloc.alloc(tools.Output, 1);
+        errdefer self.alloc.free(out);
+        out[0] = .{
+            .call_id = call.id,
+            .seq = 0,
+            .at_ms = self.now_ms,
+            .stream = .stdout,
+            .chunk = diff,
+            .owned = true,
+        };
+        const result: tools.Result = .{
+            .call_id = call.id,
+            .started_at_ms = self.now_ms,
+            .ended_at_ms = self.now_ms,
+            .out = out,
+            .out_owned = true,
+            .final = .{ .ok = .{ .code = 0 } },
+        };
+
         var file = path_guard.openFile(args.path, .{ .mode = .write_only }) catch |open_err| {
             return shared.mapFsErr(open_err);
         };
@@ -67,16 +88,7 @@ pub const Handler = struct {
         file.writeStreamingAll(sys.io, updated) catch |write_err| {
             return shared.mapFsErr(write_err);
         };
-
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = &.{},
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return result;
     }
 };
 
@@ -173,6 +185,7 @@ test "edit handler replaces first match with deterministic timestamps" {
     };
 
     const res = try handler.run(call, sink);
+    defer shared.deinitResult(std.testing.allocator, res);
     const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -180,7 +193,11 @@ test "edit handler replaces first match with deterministic timestamps" {
         \\  "call=e1
         \\start=123
         \\end=123
-        \\out=0
+        \\out=1
+        \\0=e1|123|stdout|false|• Edited in.txt (+1 -1)
+        \\@@ -1,1 +1,1 @@
+        \\-x
+        \\+y
         \\final=ok|0
         \\"
     ).expectEqual(snap);
@@ -221,7 +238,8 @@ test "edit handler replaces all matches when all is true" {
         .at_ms = 0,
     };
 
-    _ = try handler.run(call, sink);
+    const res = try handler.run(call, sink);
+    defer shared.deinitResult(std.testing.allocator, res);
 
     const got = try tmp.dir.readFileAlloc(std.testing.io, "in.txt", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(got);

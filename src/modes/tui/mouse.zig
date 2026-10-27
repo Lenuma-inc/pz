@@ -5,6 +5,7 @@ pub const Event = union(enum) {
     scroll_up,
     scroll_down,
     press: Pos,
+    motion: Pos,
     release: Pos,
 
     pub const Pos = struct {
@@ -47,20 +48,16 @@ pub fn parse(buf: []const u8) ?Result {
     i += 1;
 
     const is_press = final == 'M';
-    const ev: Event = switch (btn) {
-        64 => .scroll_up,
-        65 => .scroll_down,
-        else => if (is_press) .{ .press = .{
-            .x = if (x > 0) x - 1 else 0,
-            .y = if (y > 0) y - 1 else 0,
-            .btn = @intCast(btn & 0xff),
-        } } else .{
-            .release = .{
-                .x = if (x > 0) x - 1 else 0,
-                .y = if (y > 0) y - 1 else 0,
-                .btn = @intCast(btn & 0xff),
-            },
-        },
+    const pos = Event.Pos{
+        .x = if (x > 0) x - 1 else 0,
+        .y = if (y > 0) y - 1 else 0,
+        .btn = @intCast(btn & 3),
+    };
+    const ev: Event = if (btn & 64 != 0) switch (btn & 1) {
+        0 => .scroll_up,
+        else => .scroll_down,
+    } else if (btn & 32 != 0) .{ .motion = pos } else if (is_press) .{ .press = pos } else .{
+        .release = pos,
     };
 
     return .{ .ev = ev, .len = i };
@@ -137,6 +134,18 @@ test "parse returns null on bad prefix" {
 
 test "parse returns null on missing final" {
     try std.testing.expect(parse("\x1b[<0;1;1") == null);
+}
+
+test "parse reports drag motion separately from wheel events" {
+    const got = parse("\x1b[<32;5;10M").?.ev;
+    switch (got) {
+        .motion => |pos| {
+            try std.testing.expectEqual(@as(usize, 4), pos.x);
+            try std.testing.expectEqual(@as(usize, 9), pos.y);
+            try std.testing.expectEqual(@as(u8, 0), pos.btn);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "parse returns null on bad final char" {

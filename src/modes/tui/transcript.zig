@@ -703,9 +703,14 @@ pub const Transcript = struct {
     fn pushToolResult(self: *Transcript, seq: u64, out: []const u8) AppendError!usize {
         var shown = out;
         var shown_owned: ?[]u8 = null;
+        var is_diff = false;
         defer if (shown_owned) |buf| self.alloc.free(buf);
 
-        if (try formatAskResultAlloc(self.alloc, out)) |pretty| {
+        if (try colorDiffAlloc(self.alloc, out)) |colored| {
+            shown_owned = colored;
+            shown = colored;
+            is_diff = true;
+        } else if (try formatAskResultAlloc(self.alloc, out)) |pretty| {
             shown_owned = pretty;
             shown = pretty;
         }
@@ -717,7 +722,7 @@ pub const Transcript = struct {
         }
         if (shown.len > 0 and shown[shown.len - 1] != '\n') lines += 1;
 
-        if (lines <= max_tail + 1) {
+        if (is_diff or lines <= max_tail + 1) {
             // Short enough: show all
             return self.pushAnsi(seq, .tool, "", .{}, shown, .{
                 .fg = theme.get().tool_output,
@@ -745,6 +750,34 @@ pub const Transcript = struct {
         });
     }
 
+    fn colorDiffAlloc(alloc: std.mem.Allocator, text: []const u8) !?[]u8 {
+        if ((std.mem.indexOf(u8, text, "diff --git ") == null and !std.mem.startsWith(u8, text, "• Edited ")) or std.mem.indexOf(u8, text, "\n@@") == null) return null;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(alloc);
+        var start: usize = 0;
+        var in_hunk = false;
+        while (start < text.len) {
+            const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+            const line = text[start..end];
+            if (std.mem.startsWith(u8, line, "diff --git ")) in_hunk = false;
+            if (std.mem.startsWith(u8, line, "@@")) in_hunk = true;
+            const color = if (in_hunk and std.mem.startsWith(u8, line, "+")) theme.get().tool_diff_add else if (in_hunk and std.mem.startsWith(u8, line, "-")) theme.get().tool_diff_rm else if (in_hunk and std.mem.startsWith(u8, line, " ")) theme.get().tool_diff_ctx else null;
+            if (color) |c| switch (c) {
+                .rgb => |rgb| {
+                    var seq_buf: [32]u8 = undefined;
+                    const seq = std.fmt.bufPrint(&seq_buf, "\x1b[1;38;2;{d};{d};{d}m", .{ (rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff }) catch return error.OutOfMemory;
+                    try out.appendSlice(alloc, seq);
+                },
+                else => {},
+            };
+            try out.appendSlice(alloc, line);
+            if (color != null) try out.appendSlice(alloc, "\x1b[0m");
+            if (end < text.len) try out.append(alloc, '\n');
+            start = end + @intFromBool(end < text.len);
+        }
+        return try out.toOwnedSlice(alloc);
+    }
+
     fn setToolCallStatus(self: *Transcript, gid: u64, is_err: bool) void {
         if (gid == 0) return;
         var i = self.blocks.items.len;
@@ -764,6 +797,27 @@ pub const Transcript = struct {
         b.tool_phase = phase;
     }
 };
+
+test "tool diff output uses theme colors for added and removed lines" {
+    const diff = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n";
+    const colored = (try Transcript.colorDiffAlloc(std.testing.allocator, diff)).?;
+    defer std.testing.allocator.free(colored);
+    try std.testing.expect(std.mem.indexOf(u8, colored, "\x1b[1;38;2;255;102;102m-old\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, colored, "\x1b[1;38;2;184;227;66m+new\x1b[0m") != null);
+}
+
+test "tool diff coloring leaves ordinary output unchanged" {
+    try std.testing.expect((try Transcript.colorDiffAlloc(std.testing.allocator, "plain output")) == null);
+}
+
+test "edit summary colors changed lines" {
+    const diff = "• Edited loop.zig (+1 -1)\n@@ -4,1 +4,1 @@\n-old\n+new\n";
+    const colored = (try Transcript.colorDiffAlloc(std.testing.allocator, diff)).?;
+    defer std.testing.allocator.free(colored);
+    try std.testing.expect(std.mem.indexOf(u8, colored, "• Edited loop.zig (+1 -1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, colored, "\x1b[1;38;2;255;102;102m-old\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, colored, "\x1b[1;38;2;184;227;66m+new\x1b[0m") != null);
+}
 
 fn toolGroup(id: []const u8) u64 {
     if (id.len == 0) return 0;

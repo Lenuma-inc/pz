@@ -1,17 +1,19 @@
 # pz
 
-A security-first coding harness rewritten from the ground up in Zig for enterprise environments. `pz` is not a generic extensible agent platform, for now: the goal is peace of mind through built-in security, policy, auditability, and a single static binary.
+A security-first coding harness rewritten from the ground up in Zig for enterprise environments. `pz` is not a generic extensible agent platform, for now: the goal is peace of mind through built-in security, policy, and auditability.
 
-## Why pz?
+## Measured footprint
 
-| | pi (TypeScript) | pz (Zig) |
-|---|---|---|
-| Binary size | ~10 MB + 589 MB node_modules | **1.7 MB** |
-| Startup time | ~430 ms | **3 ms** |
-| Memory at idle | ~153 MB | **1.4 MB** |
-| Source lines | ~139k | **~29k** |
-| Runtime deps | Node.js / Bun | **None** |
-| Install | `bun install -g` | Copy one binary |
+Local Linux x86_64 measurements with Zig 0.16.0 and the default `zig build` Debug configuration:
+
+| Measurement | Result |
+|---|---:|
+| Binary size (`zig-out/bin/pz`, unstripped) | 65.4 MiB |
+| `pz --version` startup (25 runs, median) | 23.33 ms |
+| `pz --version` peak RSS | 9.3 MiB |
+| TUI idle RSS (empty temporary profile, 3 seconds) | 11.9–13.2 MiB |
+
+Startup timing includes process creation. RSS is resident memory reported by Linux; TUI samples were taken after launch with version checks disabled. These are local Debug-build measurements, not release-build or provider-response benchmarks. The Linux binary is dynamically linked to glibc and libm; bash sandboxing also requires `bwrap`.
 
 ## Features
 

@@ -30,6 +30,11 @@ pub const Ui = struct {
     path_prefix: ?[]u8 = null, // cached prefix for path_items
     img_cap: image_mod.Protocol = .none,
     spin: u8 = 0,
+    transcript_h: usize = 0,
+    selection_start: ?mouse.Event.Pos = null,
+    selection_end: ?mouse.Event.Pos = null,
+    selection_active: bool = false,
+    selection_ready: bool = false,
 
     const BorderStatus = struct {
         label: []const u8,
@@ -69,6 +74,7 @@ pub const Ui = struct {
 
     pub fn resize(self: *Ui, w: usize, h: usize) !void {
         if (w == self.frm.w and h == self.frm.h) return;
+        self.clearSelection();
         const new_frm = try frame.Frame.init(self.alloc, w, h);
         const new_rnd = try render.Renderer.init(self.alloc, w, h);
         self.renderer.deinit();
@@ -105,6 +111,7 @@ pub const Ui = struct {
         // internal counter may be much higher. Use the transcript's own
         // seq counter to ensure new blocks append at the end.
         _ = seq;
+        self.clearSelection();
         try self.tr.append(ev);
         try self.panels.append(ev);
         if (ev == .stop and ev.stop.reason == .max_out) {
@@ -121,6 +128,7 @@ pub const Ui = struct {
     }
 
     pub fn onKey(self: *Ui, key: editor.Key) !editor.Action {
+        self.clearSelection();
         // Intercept up/down for wrapped-line navigation
         switch (key) {
             .up => if (self.wrapUp()) return .none,
@@ -142,10 +150,84 @@ pub const Ui = struct {
 
     pub fn onMouse(self: *Ui, ev: mouse.Event) void {
         switch (ev) {
-            .scroll_up => self.tr.scrollUp(3),
-            .scroll_down => self.tr.scrollDown(3),
-            else => {}, // .press, .release not handled in TUI
+            .scroll_up => {
+                self.clearSelection();
+                self.tr.scrollUp(3);
+            },
+            .scroll_down => {
+                self.clearSelection();
+                self.tr.scrollDown(3);
+            },
+            .press => |pos| {
+                if (pos.btn != 0 or pos.x >= self.frm.w or pos.y >= self.transcript_h) return;
+                self.selection_start = pos;
+                self.selection_end = pos;
+                self.selection_active = true;
+                self.selection_ready = false;
+            },
+            .motion => |pos| if (self.selection_active) {
+                if (self.transcript_h == 0) return;
+                self.selection_end = .{
+                    .x = @min(pos.x, self.frm.w - 1),
+                    .y = @min(pos.y, self.transcript_h - 1),
+                    .btn = pos.btn,
+                };
+            },
+            .release => |pos| if (self.selection_active) {
+                if (self.transcript_h == 0) {
+                    self.clearSelection();
+                    return;
+                }
+                const end = mouse.Event.Pos{
+                    .x = @min(pos.x, self.frm.w - 1),
+                    .y = @min(pos.y, self.transcript_h - 1),
+                    .btn = pos.btn,
+                };
+                self.selection_active = false;
+                self.selection_end = end;
+                const start = self.selection_start.?;
+                self.selection_ready = start.x != end.x or start.y != end.y;
+                if (!self.selection_ready) self.clearSelection();
+            },
         }
+    }
+
+    pub fn clearSelection(self: *Ui) void {
+        self.selection_start = null;
+        self.selection_end = null;
+        self.selection_active = false;
+        self.selection_ready = false;
+    }
+
+    pub fn takeSelectedText(self: *Ui) !?[]u8 {
+        if (!self.selection_ready) return null;
+        self.selection_ready = false;
+        const a = self.selection_start orelse return null;
+        const b = self.selection_end orelse return null;
+        const a_idx = a.y * self.frm.w + a.x;
+        const b_idx = b.y * self.frm.w + b.x;
+        const first = if (a_idx <= b_idx) a else b;
+        const last = if (a_idx <= b_idx) b else a;
+
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(self.alloc);
+        var y = first.y;
+        while (y <= last.y) : (y += 1) {
+            const x0 = if (y == first.y) first.x else 0;
+            const x1 = if (y == last.y) last.x else self.frm.w - 1;
+            const row_start = buf.items.len;
+            var x = x0;
+            while (x <= x1) : (x += 1) {
+                const cp = self.frm.cells[y * self.frm.w + x].cp;
+                if (cp == frame.Frame.wide_pad) continue;
+                var enc: [4]u8 = undefined;
+                const n = try std.unicode.utf8Encode(cp, &enc);
+                try buf.appendSlice(self.alloc, enc[0..n]);
+            }
+            while (buf.items.len > row_start and buf.items[buf.items.len - 1] == ' ') buf.items.len -= 1;
+            if (y < last.y) try buf.append(self.alloc, '\n');
+        }
+        return try buf.toOwnedSlice(self.alloc);
     }
 
     pub fn draw(self: *Ui, out: anytype) !void {
@@ -165,6 +247,7 @@ pub const Ui = struct {
         const editor_h: usize = @min(@min(want_ed, max_ed), avail_ed);
         const reserved = footer_h + border_h + editor_h;
         const tx_h = if (h > reserved) h - reserved else 0;
+        self.transcript_h = tx_h;
 
         if (tx_h > 0 and w > 0) {
             try self.tr.render(&self.frm, .{
@@ -211,6 +294,8 @@ pub const Ui = struct {
             try ov.render(&self.frm);
         }
 
+        self.applySelection(tx_h);
+
         try self.renderer.render(&self.frm, out);
 
         // Render inline images after frame (they overlay frame cells)
@@ -235,6 +320,20 @@ pub const Ui = struct {
             try out.writeAll("\x1b[?25h"); // show cursor
         } else {
             try out.writeAll("\x1b[?25l"); // hide cursor
+        }
+    }
+
+    fn applySelection(self: *Ui, transcript_h: usize) void {
+        const a = self.selection_start orelse return;
+        const b = self.selection_end orelse return;
+        const a_idx = a.y * self.frm.w + a.x;
+        const b_idx = b.y * self.frm.w + b.x;
+        const lo = @min(a_idx, b_idx);
+        const hi = @max(a_idx, b_idx);
+        var idx = lo;
+        while (idx <= hi) : (idx += 1) {
+            if (idx / self.frm.w >= transcript_h) break;
+            self.frm.cells[idx].style.bg = theme.get().sel_bg;
         }
     }
 
@@ -408,6 +507,7 @@ pub const Ui = struct {
     }
 
     pub fn clearTranscript(self: *Ui) void {
+        self.clearSelection();
         for (self.tr.blocks.items) |*b| b.deinit(self.alloc);
         self.tr.blocks.items.len = 0;
         self.tr.scroll_off = 0;
@@ -809,6 +909,27 @@ test "harness onMouse scrolls transcript" {
     ui.onMouse(.scroll_down);
     try got.print(std.testing.allocator, "down2={d}", .{ui.tr.scroll_off});
     try expectSnapText(@src(), "init=0\nup=3\ndown=0\ndown2=0", got.items);
+}
+
+test "harness drag selects and extracts visible transcript text" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+    try ui.onProvider(.{ .text = "hello world" });
+
+    var raw: [4096]u8 = undefined;
+    var out = TestBuf.init(raw[0..]);
+    try ui.draw(&out);
+    const pos = findAsciiSeqInFrame(&ui.frm, "hello").?;
+    ui.onMouse(.{ .press = .{ .x = pos.x, .y = pos.y, .btn = 0 } });
+    ui.onMouse(.{ .motion = .{ .x = pos.x + 4, .y = pos.y, .btn = 0 } });
+    ui.onMouse(.{ .release = .{ .x = pos.x + 4, .y = pos.y, .btn = 0 } });
+
+    const selected = (try ui.takeSelectedText()).?;
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("hello", selected);
+    try ui.draw(&out);
+    const selected_cell = try ui.frm.cell(pos.x, pos.y);
+    try std.testing.expect(frame.Color.eql(selected_cell.style.bg, theme.get().sel_bg));
 }
 
 test "harness submit resets scroll" {

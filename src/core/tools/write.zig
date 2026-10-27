@@ -17,14 +17,20 @@ pub const Err = error{
 };
 
 pub const Opts = struct {
+    alloc: std.mem.Allocator,
+    max_bytes: usize,
     now_ms: i64 = 0,
 };
 
 pub const Handler = struct {
+    alloc: std.mem.Allocator,
+    max_bytes: usize,
     now_ms: i64,
 
     pub fn init(opts: Opts) Handler {
         return .{
+            .alloc = opts.alloc,
+            .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
         };
     }
@@ -35,6 +41,34 @@ pub const Handler = struct {
 
         const args = call.args.write;
         if (args.path.len == 0) return error.InvalidArgs;
+
+        const old = if (args.append) null else try readExistingAlloc(self.alloc, args.path, self.max_bytes);
+        defer if (old) |data| self.alloc.free(data);
+        const diff = if (args.append)
+            try shared.formatAppendDiffAlloc(self.alloc, args.path, args.text)
+        else if (old) |data|
+            try shared.formatDiffAlloc(self.alloc, args.path, data, data, args.text)
+        else
+            try std.fmt.allocPrint(self.alloc, "• Edited {s} (diff omitted: existing file exceeds {d} bytes)\n", .{ std.fs.path.basename(args.path), self.max_bytes });
+        errdefer self.alloc.free(diff);
+        const out = try self.alloc.alloc(tools.Output, 1);
+        errdefer self.alloc.free(out);
+        out[0] = .{
+            .call_id = call.id,
+            .seq = 0,
+            .at_ms = self.now_ms,
+            .stream = .stdout,
+            .chunk = diff,
+            .owned = true,
+        };
+        const result: tools.Result = .{
+            .call_id = call.id,
+            .started_at_ms = self.now_ms,
+            .ended_at_ms = self.now_ms,
+            .out = out,
+            .out_owned = true,
+            .final = .{ .ok = .{ .code = 0 } },
+        };
 
         var file = path_guard.createFile(args.path, .{
             .truncate = !args.append,
@@ -51,17 +85,24 @@ pub const Handler = struct {
             return shared.mapFsErr(write_err);
         };
 
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = &.{},
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return result;
     }
 };
+
+fn readExistingAlloc(alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) Err!?[]u8 {
+    var file = path_guard.openFile(path, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => return try alloc.dupe(u8, ""),
+        else => return shared.mapFsErr(err),
+    };
+    defer file.close(sys.io);
+    var buf: [4096]u8 = undefined;
+    var reader = file.readerStreaming(sys.io, &buf);
+    return reader.interface.allocRemaining(alloc, .limited(max_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => null,
+        error.OutOfMemory => error.OutOfMemory,
+        else => shared.mapFsErr(err),
+    };
+}
 
 fn seekEnd(file: std.Io.File) Err!void {
     const rc = std.c.lseek(file.handle, 0, std.c.SEEK.END);
@@ -89,7 +130,7 @@ test "write handler overwrites file with deterministic timestamps" {
 
     const sink = noop.sink();
 
-    const handler = Handler.init(.{ .now_ms = 77 });
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024, .now_ms = 77 });
     const call: tools.Call = .{
         .id = "w1",
         .kind = .write,
@@ -105,6 +146,7 @@ test "write handler overwrites file with deterministic timestamps" {
     };
 
     const res = try handler.run(call, sink);
+    defer shared.deinitResult(std.testing.allocator, res);
 
     const got = try tmp.dir.readFileAlloc(std.testing.io, "out.txt", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(got);
@@ -120,8 +162,18 @@ test "write handler overwrites file with deterministic timestamps" {
         \\    .started_at_ms: i64 = 77
         \\    .ended_at_ms: i64 = 77
         \\    .out: []const core.tools.Output
-        \\      (empty)
-        \\    .out_owned: bool = false
+        \\      [0]: core.tools.Output
+        \\        .call_id: []const u8
+        \\          "w1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 77
+        \\        .stream: core.tools.Output.Stream
+        \\          .stdout
+        \\        .chunk: []const u8
+        \\          "• Edited out.txt (+1 -1)\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        \\        .owned: bool = true
+        \\        .truncated: bool = false
+        \\    .out_owned: bool = true
         \\    .out_streamed: bool = false
         \\    .final: core.tools.Result.Final
         \\      .ok: core.tools.Result.Ok
@@ -143,7 +195,7 @@ test "write handler appends when append is true" {
 
     const sink = noop.sink();
 
-    const handler = Handler.init(.{});
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
     const call: tools.Call = .{
         .id = "w2",
         .kind = .write,
@@ -158,7 +210,9 @@ test "write handler appends when append is true" {
         .at_ms = 0,
     };
 
-    _ = try handler.run(call, sink);
+    const res = try handler.run(call, sink);
+    defer shared.deinitResult(std.testing.allocator, res);
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "Edited out.txt (+1 -0)\n@@ append @@\n+b") != null);
 
     const got = try tmp.dir.readFileAlloc(std.testing.io, "out.txt", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(got);
@@ -168,7 +222,7 @@ test "write handler appends when append is true" {
 test "write handler returns invalid args for empty path" {
     const sink = noop.sink();
 
-    const handler = Handler.init(.{});
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
     const call: tools.Call = .{
         .id = "w3",
         .kind = .write,
@@ -203,7 +257,7 @@ test "write handler returns not found for missing parent" {
 
     const sink = noop.sink();
 
-    const handler = Handler.init(.{});
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
     const call: tools.Call = .{
         .id = "w4",
         .kind = .write,
@@ -223,7 +277,7 @@ test "write handler returns not found for missing parent" {
 test "write handler returns kind mismatch for wrong call kind" {
     const sink = noop.sink();
 
-    const handler = Handler.init(.{});
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
     const call: tools.Call = .{
         .id = "w5",
         .kind = .read,
@@ -265,7 +319,7 @@ test "write handler denies replaced target before truncation" {
     var hook = path_guard.installRaceHook(&hook_ctx.race_hook);
     defer hook.deinit();
 
-    const handler = Handler.init(.{});
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
     try std.testing.expectError(error.Denied, handler.run(.{
         .id = "w-race",
         .kind = .write,
