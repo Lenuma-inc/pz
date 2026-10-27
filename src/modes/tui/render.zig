@@ -58,7 +58,7 @@ pub const Renderer = struct {
 
     pub fn setup(out: anytype) !void {
         try out.writeAll(decSet(.alt_screen) ++ decRst(.cursor) ++
-            decSet(.bracketed_paste) ++
+            decSet(.bracketed_paste) ++ "\x1b[?1000h\x1b[?1006h" ++
             "\x1b[>1u"); // Kitty keyboard protocol: push with disambiguate flag
     }
 
@@ -243,7 +243,7 @@ test "renderer rejects size mismatch" {
     try std.testing.expectError(error.SizeMismatch, rnd.render(&frm, &out));
 }
 
-test "renderer setup leaves mouse selection enabled" {
+test "renderer setup captures mouse for TUI scrolling" {
     var raw: [128]u8 = undefined;
     var out = TestBuf.init(raw[0..]);
 
@@ -251,11 +251,11 @@ test "renderer setup leaves mouse selection enabled" {
 
     const seq = out.view();
     try std.testing.expectEqualStrings(
-        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[>1u",
+        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[?1000h\x1b[?1006h" ++ "\x1b[>1u",
         seq,
     );
-    try std.testing.expect(std.mem.indexOf(u8, seq, "?1000h") == null);
-    try std.testing.expect(std.mem.indexOf(u8, seq, "?1006h") == null);
+    try std.testing.expect(std.mem.indexOf(u8, seq, "?1000h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seq, "?1006h") != null);
 }
 
 test "renderer cleanup restores terminal and disables mouse modes" {
