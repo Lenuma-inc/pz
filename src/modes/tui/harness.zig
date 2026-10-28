@@ -1114,6 +1114,8 @@ test "basic tools UI renders patch todo and github calls" {
         .{ .id = "p", .name = "patch", .args = "{\"path\":\"probe.txt\",\"patch\":\"@@ -0,0 +1 @@\\n+ok\\n\"}" },
         .{ .id = "t", .name = "todo", .args = "{\"items\":[{\"content\":\"verify\",\"status\":\"in_progress\"}]}" },
         .{ .id = "g", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"list\"}" },
+        .{ .id = "gh", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"history\",\"path\":\"src\",\"page\":2}" },
+        .{ .id = "gc", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"compare\",\"base\":\"v1\",\"ref\":\"main\"}" },
     };
     for (calls, 0..) |call, idx| {
         try ui.onProvider(.{ .tool_call = call });

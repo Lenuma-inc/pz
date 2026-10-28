@@ -196,11 +196,14 @@ pub const Call = struct {
 
     pub const GithubArgs = struct {
         repo: []const u8,
-        op: enum { list, read } = .list,
+        op: enum { list, read, tree, history, commit, compare, branches, tags, info } = .list,
         path: []const u8 = "",
         ref: ?[]const u8 = null,
         from_line: u32 = 1,
         to_line: ?u32 = null,
+        base: ?[]const u8 = null,
+        page: u32 = 1,
+        per_page: u32 = 30,
     };
 
     pub const PatchArgs = struct {

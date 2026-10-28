@@ -202,3 +202,68 @@ test "basic tools: web bounds status and body together" {
     joined = true;
     try server.join(thread);
 }
+
+test "github inspector encodes history and comparison revisions and paginates refs" {
+    const cases = [_]struct { args: tools.Call.GithubArgs, url: []const u8 }{
+        .{ .args = .{ .repo = "x/y", .op = .tree }, .url = "https://api.github.com/repos/x/y/git/trees/HEAD?recursive=1" },
+        .{ .args = .{ .repo = "x/y", .op = .history, .path = "src/a b", .ref = "topic/a&b", .page = 2, .per_page = 10 }, .url = "https://api.github.com/repos/x/y/commits?per_page=10&page=2&sha=topic%2Fa%26b&path=src%2Fa%20b" },
+        .{ .args = .{ .repo = "x/y", .op = .commit, .ref = "topic/a" }, .url = "https://api.github.com/repos/x/y/commits/topic%2Fa?per_page=30&page=1" },
+        .{ .args = .{ .repo = "x/y", .op = .compare, .base = "v1", .ref = "topic/a" }, .url = "https://api.github.com/repos/x/y/compare/v1...topic%2Fa?per_page=30&page=1" },
+        .{ .args = .{ .repo = "x/y", .op = .branches, .page = 3 }, .url = "https://api.github.com/repos/x/y/branches?per_page=30&page=3" },
+        .{ .args = .{ .repo = "x/y", .op = .tags }, .url = "https://api.github.com/repos/x/y/tags?per_page=30&page=1" },
+        .{ .args = .{ .repo = "x/y", .op = .info }, .url = "https://api.github.com/repos/x/y" },
+    };
+    inline for (cases) |case| {
+        const url = try github.apiUrlAlloc(alloc, case.args);
+        defer alloc.free(url);
+        try snap(@src(), case.url, url);
+    }
+    const invalid = [_]tools.Call.GithubArgs{
+        .{ .repo = "x/y", .op = .commit },
+        .{ .repo = "x/y", .op = .compare, .ref = "main" },
+        .{ .repo = "x/y", .page = 0 },
+        .{ .repo = "x/y", .per_page = 101 },
+        .{ .repo = "x/y", .ref = "" },
+        .{ .repo = "x/y", .op = .read },
+        .{ .repo = "x/y", .from_line = 2, .to_line = 1 },
+    };
+    for (invalid) |args| try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, args));
+}
+
+test "github tree refuses incomplete trees and filters at path boundaries" {
+    const body =
+        \\{"sha":"root","truncated":false,"tree":[{"path":"src/a.zig","type":"blob","mode":"100644","sha":"a","size":7},{"path":"src2/b.zig","type":"blob","mode":"100644","sha":"b"},{"path":"src/link","type":"blob","mode":"120000","sha":"c","size":3}]}
+    ;
+    const tree = try github.treeAlloc(alloc, body, "src/");
+    defer alloc.free(tree);
+    try snap(@src(), "tree root\n100644\tblob\ta\tsrc/a.zig\t7 bytes\n120000\tblob\tc\tsrc/link\t3 bytes\n", tree);
+    try std.testing.expectError(error.GitHubTreeTruncated, github.treeAlloc(alloc, "{\"sha\":\"a\",\"truncated\":true,\"tree\":[]}", ""));
+    try std.testing.expectError(error.MissingField, github.treeAlloc(alloc, "{\"sha\":\"a\",\"tree\":[]}", ""));
+}
+
+test "github history preserves metadata and makes pagination explicit" {
+    const text = try github.metadataAlloc(alloc, "[]", .{ .repo = "x/y", .op = .history, .page = 2, .per_page = 10 });
+    defer alloc.free(text);
+    try snap(@src(), "page 2, per_page 10; request page 3 for more; array listings end on an empty page, commit/compare pages paginate files/commits respectively.\n[]", text);
+    try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "{}", .{ .repo = "x/y", .op = .history }));
+    try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "[]", .{ .repo = "x/y", .op = .commit, .ref = "main" }));
+    const commit = try github.metadataAlloc(alloc, "{\"files\":[{\"filename\":\"a\",\"patch\":\"+hello\"}]}", .{ .repo = "x/y", .op = .commit, .ref = "main" });
+    defer alloc.free(commit);
+    try std.testing.expect(std.mem.indexOf(u8, commit, "\"patch\":\"+hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, commit, "missing patch is not proof") != null);
+}
+
+test "github history query keeps arbitrary printable refs inside one parameter" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { bytes: [24]u8 }) bool {
+            var ref: [24]u8 = undefined;
+            for (args.bytes, 0..) |byte, i| ref[i] = 32 + byte % 95;
+            const url = github.apiUrlAlloc(alloc, .{ .repo = "x/y", .op = .history, .ref = &ref }) catch return false;
+            defer alloc.free(url);
+            const value = url[(std.mem.indexOf(u8, url, "&sha=") orelse return false) + 5 ..];
+            for (value) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "-._~%", ch) == null) return false;
+            return true;
+        }
+    }.prop, .{ .iterations = 100 });
+}

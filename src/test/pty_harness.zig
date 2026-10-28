@@ -3334,6 +3334,7 @@ test "basic tools PTY keyboard chain uses tools and receives github guidance" {
     const provider =
         \\req=$(cat)
         \\printf '%s' "$req" | grep -q 'use github before cloning' || { printf 'text:GUIDE_MISSING\nstop:done\n'; exit; }
+        \\printf '%s' "$req" | grep -q 'compare with base and ref' || { printf 'text:INSPECTOR_GUIDE_MISSING\nstop:done\n'; exit; }
         \\n=$(cat provider-step 2>/dev/null || printf 0)
         \\printf '%s' "$((n + 1))" > provider-step
         \\case "$n" in
@@ -3342,7 +3343,7 @@ test "basic tools PTY keyboard chain uses tools and receives github guidance" {
         \\2) printf '%s\n' 'tool_call:c2|grep|{"path":"probe.txt","pattern":"^ALPHA [0-9]+$"}' 'stop:tool';;
         \\3) printf '%s\n' 'tool_call:c3|find|{"pattern":"*.txt"}' 'stop:tool';;
         \\4) printf '%s\n' 'tool_call:c4|skill|{}' 'stop:tool';;
-        \\5) printf '%s\n' 'tool_call:c5|github|{"repo":"invalid"}' 'stop:tool';;
+        \\5) printf '%s\n' 'tool_call:c5|github|{"repo":"invalid","op":"history","path":"src","ref":"main","page":2,"per_page":10}' 'stop:tool';;
         \\*) if printf '%s' "$req" | grep -q 'probe.txt:1:ALPHA 42'; then printf 'text:BASICTOOLSCOMPLETE\nstop:done\n'; else printf 'text:TOOLS_FAILED\nstop:done\n'; fi;;
         \\esac
     ;

@@ -5,12 +5,15 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-29)
 
 ### Do More
+- For GitHub inspection, expose recursive tree completeness and explicit pagination; retain file modes/SHAs and disclose commit/compare patch limits.
+- Use an explicitly named temporary test-import root for direct filtered Zig checks, and ensure PTY build options reference the newly built binary.
 - Reproduce long SSE failures with valid raw chunked HTTP; test lines larger than the transfer buffer across multiple chunk sizes.
 - Clear `AbortSlot` before destroying its stream on every exit path; test a stream error followed by cancellation/quit.
 - Unwrap SSE `ReadFailed` through HTTP `bodyErr()` and connection `getReadError()` before reporting it to users.
 - Preserve message phase and boundaries through session replay and both OpenAI authentication modes; test fragmented text and explicit `end_turn: false`.
 
 ### Do Not Do
+- Present truncated GitHub trees or omitted binary/large patches as complete repository evidence.
 - Use Zig 0.16 `Reader.takeDelimiter` on chunked HTTP bodies: its full-buffer failing-writer probe can consume the next chunk header without updating decoder state. Use buffered scanning plus `streamDelimiter` from the outset.
 - Treat echoed AGENTS text in Responses metadata as proof of memory corruption; validate the raw HTTP framing independently.
 - Leave an abort callback pointing at a destroyed stream after `next()` fails; TUI shutdown will call it again.
