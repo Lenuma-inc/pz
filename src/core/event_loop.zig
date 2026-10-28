@@ -533,8 +533,27 @@ test "libc signal mask works with signalfd" {
     defer _ = std.c.close(fd);
 }
 
+test "drain consumes pending signalfd records" {
+    if (!is_epoll) return error.SkipZigTest;
+    var mask = std.mem.zeroes(posix.sigset_t);
+    sigaddset(&mask, posix.SIG.CHLD);
+    var old_mask: posix.sigset_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.sigprocmask(posix.SIG.BLOCK, &mask, &old_mask));
+    defer _ = std.c.sigprocmask(posix.SIG.SETMASK, &old_mask, null);
+
+    const fd = std.c.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.raise(posix.SIG.CHLD));
+
+    drain(fd);
+
+    var buf: [128]u8 = undefined;
+    try std.testing.expectError(error.WouldBlock, posix.read(fd, &buf));
+}
+
 fn drain(fd: posix.fd_t) void {
-    var buf: [64]u8 = undefined;
+    var buf: [128]u8 = undefined; // signalfd reads require a complete 128-byte record.
     while (true) {
         _ = posix.read(fd, &buf) catch return; // cleanup: propagation impossible
     }

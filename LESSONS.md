@@ -2,6 +2,14 @@
 
 Hard-won patterns and anti-patterns from building pz. **Update this file at the end of every session** with new discoveries.
 
+## Session Notes (2026-10-28)
+
+### Do More
+- Exercise signal draining with a real pending, thread-directed signal and verify the next read returns `WouldBlock`.
+
+### Do Not Do
+- Do not read Linux `signalfd` into fewer than 128 bytes: `EINVAL` triggers an `unreachable` panic in `std.posix.read`.
+
 ## Session Notes (2026-10-27)
 
 ### Do Not Do
