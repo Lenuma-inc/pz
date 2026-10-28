@@ -46,7 +46,7 @@ fn appendDiffLines(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), p
         try out.append(alloc, prefix);
         const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
         try out.appendSlice(alloc, text[start..end]);
-        if (end < text.len) try out.append(alloc, '\n');
+        try out.append(alloc, '\n');
         start = end + @intFromBool(end < text.len);
     }
 }
@@ -127,7 +127,7 @@ pub fn mapFsErr(err: anyerror) FsErr {
         error.LockViolation,
         error.SymLinkLoop,
         => error.Denied,
-        error.FileTooBig => error.TooLarge,
+        error.FileTooBig, error.StreamTooLong, error.TooLarge => error.TooLarge,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
@@ -359,6 +359,30 @@ test "mapFsErr maps known errors" {
     try std.testing.expectEqual(FsErr.Denied, mapFsErr(error.AccessDenied));
     try std.testing.expectEqual(FsErr.Denied, mapFsErr(error.SymLinkLoop));
     try std.testing.expectEqual(FsErr.TooLarge, mapFsErr(error.FileTooBig));
+    try std.testing.expectEqual(FsErr.TooLarge, mapFsErr(error.StreamTooLong));
+    try std.testing.expectEqual(FsErr.TooLarge, mapFsErr(error.TooLarge));
     try std.testing.expectEqual(FsErr.OutOfMemory, mapFsErr(error.OutOfMemory));
     try std.testing.expectEqual(FsErr.Io, mapFsErr(error.Unexpected));
+}
+
+/// Run a search process against an already guarded file, without reopening its path.
+pub fn runFile(alloc: std.mem.Allocator, file: std.Io.File, argv: []const []const u8, limit: usize) !std.process.RunResult {
+    const sys = @import("pz_io");
+    var child = try std.process.spawn(sys.io, .{ .argv = argv, .expand_arg0 = .expand, .stdin = .{ .file = file }, .stdout = .pipe, .stderr = .pipe });
+    defer child.kill(sys.io);
+    var buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var reader: std.Io.File.MultiReader = undefined;
+    reader.init(alloc, sys.io, buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer reader.deinit();
+    while (reader.fill(1024, .none)) |_| {
+        if (reader.reader(0).buffered().len > limit or reader.reader(1).buffered().len > 4096) return error.TooLarge;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => return err,
+    }
+    try reader.checkAnyError();
+    const term = try child.wait(sys.io);
+    const out = try reader.toOwnedSlice(0);
+    errdefer alloc.free(out);
+    return .{ .term = term, .stdout = out, .stderr = try reader.toOwnedSlice(1) };
 }

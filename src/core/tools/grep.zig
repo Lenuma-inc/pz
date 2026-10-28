@@ -1,4 +1,4 @@
-//! Grep tool: regex search across files with path guarding.
+//! Grep tool: regular expression search across files with path guarding.
 const sys = @import("pz_io");
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
@@ -74,18 +74,50 @@ pub const Handler = struct {
         if (args.pattern.len == 0) return error.InvalidArgs;
         if (args.max_results == 0) return error.InvalidArgs;
 
-        var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
-            return shared.mapFsErr(open_err);
-        };
-        defer root.close(sys.io);
-
         var acc = Acc.init(self.alloc, self.max_bytes);
         defer acc.deinit();
 
         var hit_ct: u32 = 0;
         var path = std.ArrayList(u8).empty;
         defer path.deinit(self.alloc);
-        try grepDir(self, root, &path, args, &hit_ct, &acc);
+        if (path_guard.openDir(args.path, .{ .iterate = true })) |opened| {
+            var root = opened;
+            defer root.close(sys.io);
+            const found = std.process.run(self.alloc, sys.io, .{
+                .argv = &.{ "fd", "--type", "f", "--print0", "--strip-cwd-prefix", if (std.mem.indexOfScalar(u8, args.glob, '/') != null) "--full-path" else "--case-sensitive", "--glob", args.glob },
+                .expand_arg0 = .expand,
+                .cwd = .{ .dir = root },
+                .stdout_limit = .limited(8 * 1024 * 1024),
+                .stderr_limit = .limited(4096),
+            }) catch |err| return shared.mapFsErr(err);
+            defer self.alloc.free(found.stdout);
+            defer self.alloc.free(found.stderr);
+            switch (found.term) {
+                .exited => |code| if (code != 0) return error.InvalidArgs,
+                else => return error.Io,
+            }
+            var selected: std.StringHashMapUnmanaged(void) = .empty;
+            defer selected.deinit(self.alloc);
+            var names = std.mem.splitScalar(u8, found.stdout, 0);
+            while (names.next()) |name| {
+                if (name.len == 0) continue;
+                try selected.put(self.alloc, name, {});
+                var end: usize = 0;
+                while (std.mem.indexOfScalarPos(u8, name, end, '/')) |slash| {
+                    try selected.put(self.alloc, name[0..slash], {});
+                    end = slash + 1;
+                }
+            }
+            try grepDir(self, root, &path, args, &hit_ct, &acc, &selected);
+        } else |err| switch (err) {
+            error.NotDir => {
+                var parent = path_guard.openDir(std.fs.path.dirname(args.path) orelse ".", .{}) catch |open_err|
+                    return shared.mapFsErr(open_err);
+                defer parent.close(sys.io);
+                try grepFile(self, parent, std.fs.path.basename(args.path), args.path, args, &hit_ct, &acc);
+            },
+            else => return shared.mapFsErr(err),
+        }
 
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
@@ -105,29 +137,45 @@ fn grepDir(
     args: tools.Call.GrepArgs,
     hit_ct: *u32,
     acc: *Acc,
+    selected: *const std.StringHashMapUnmanaged(void),
 ) Err!void {
+    const Child = struct { name: []u8, dir: Dir };
+    var children: std.ArrayList(Child) = .empty;
+    defer {
+        for (children.items) |*child| {
+            child.dir.close(sys.io);
+            self.alloc.free(child.name);
+        }
+        children.deinit(self.alloc);
+    }
     var it = dir.iterate();
-    while (try nextEnt(&it)) |ent| {
+    while (it.next(sys.io) catch |err| return shared.mapFsErr(err)) |ent| {
         if (hit_ct.* >= args.max_results) break;
-
         const base_len = path.items.len;
         if (base_len != 0) try path.append(self.alloc, '/');
         defer path.shrinkRetainingCapacity(base_len);
         try path.appendSlice(self.alloc, ent.name);
-
+        if (!selected.contains(path.items)) continue;
         switch (ent.kind) {
             .directory => {
-                var child = dir.openDir(sys.io, ent.name, .{
-                    .iterate = true,
-                    .access_sub_paths = true,
-                    .follow_symlinks = false,
-                }) catch |open_err| return shared.mapFsErr(open_err);
-                defer child.close(sys.io);
-                try grepDir(self, child, path, args, hit_ct, acc);
+                const name = try self.alloc.dupe(u8, ent.name);
+                errdefer self.alloc.free(name);
+                var child = dir.openDir(sys.io, ent.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return shared.mapFsErr(err);
+                errdefer child.close(sys.io);
+                try children.append(self.alloc, .{ .name = name, .dir = child });
             },
             .file => try grepFile(self, dir, ent.name, path.items, args, hit_ct, acc),
-            else => {}, // .sym_link, .named_pipe, .unix_domain_socket, .block_device, .character_device, .whiteout, .door skipped
+            else => {},
         }
+    }
+    // Keep sibling directory handles stable when a search hook renames ancestors.
+    for (children.items) |child| {
+        if (hit_ct.* >= args.max_results) break;
+        const base_len = path.items.len;
+        if (base_len != 0) try path.append(self.alloc, '/');
+        defer path.shrinkRetainingCapacity(base_len);
+        try path.appendSlice(self.alloc, child.name);
+        try grepDir(self, child.dir, path, args, hit_ct, acc, selected);
     }
 }
 
@@ -149,75 +197,32 @@ fn grepFile(
     };
     defer file.close(sys.io);
 
-    const full = try readAllAlloc(file, self.alloc, self.max_bytes);
-    defer self.alloc.free(full);
-
-    var line_no: u32 = 0;
-    var it = std.mem.splitScalar(u8, full, '\n');
-    while (hit_ct.* < args.max_results) {
-        const raw_line = it.next() orelse break;
-        line_no += 1;
-        const line = trimLine(raw_line);
-        if (!lineMatches(line, args.pattern, args.ignore_case)) continue;
-
-        const row = std.fmt.allocPrint(self.alloc, "{s}:{d}:{s}\n", .{
-            rel_path,
-            line_no,
-            line,
-        }) catch return error.OutOfMemory;
-        defer self.alloc.free(row);
-        try acc.append(row);
+    const count = std.fmt.allocPrint(self.alloc, "{d}", .{args.max_results - hit_ct.*}) catch return error.OutOfMemory;
+    defer self.alloc.free(count);
+    const result = shared.runFile(self.alloc, file, &.{
+        "rg",                                                          "--no-config", "--line-number", "--no-heading", "--color", "never", "--max-count", count,
+        if (args.ignore_case) "--ignore-case" else "--case-sensitive", "--regexp",    args.pattern,
+    }, self.max_bytes + 4096) catch |err| return shared.mapFsErr(err);
+    defer self.alloc.free(result.stdout);
+    defer self.alloc.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| switch (code) {
+            0 => {},
+            1 => return,
+            2 => return error.InvalidArgs,
+            else => return error.Io,
+        },
+        else => return error.Io,
+    }
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try acc.append(rel_path);
+        try acc.append(":");
+        try acc.append(line);
+        try acc.append("\n");
         hit_ct.* += 1;
     }
-}
-
-fn readAllAlloc(file: std.Io.File, alloc: std.mem.Allocator, max_bytes: usize) Err![]u8 {
-    var file_buf: [4096]u8 = undefined;
-    var reader = file.readerStreaming(sys.io, &file_buf);
-    return reader.interface.allocRemaining(alloc, .limited(max_bytes)) catch |read_err| switch (read_err) {
-        error.StreamTooLong => error.TooLarge,
-        error.OutOfMemory => error.OutOfMemory,
-        else => shared.mapFsErr(read_err),
-    };
-}
-
-fn nextEnt(it: *Dir.Iterator) Err!?Dir.Entry {
-    return it.next(sys.io) catch |next_err| shared.mapFsErr(next_err);
-}
-
-fn trimLine(raw: []const u8) []const u8 {
-    if (raw.len == 0) return raw;
-    if (raw[raw.len - 1] == '\r') return raw[0 .. raw.len - 1];
-    return raw;
-}
-
-fn lineMatches(line: []const u8, pattern: []const u8, ignore_case: bool) bool {
-    if (!ignore_case) return std.mem.indexOf(u8, line, pattern) != null;
-    return containsAsciiFold(line, pattern);
-}
-
-fn containsAsciiFold(hay: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > hay.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= hay.len) : (i += 1) {
-        if (eqlAsciiFold(hay[i .. i + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-fn eqlAsciiFold(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (asciiLower(x) != asciiLower(y)) return false;
-    }
-    return true;
-}
-
-fn asciiLower(ch: u8) u8 {
-    if (ch >= 'A' and ch <= 'Z') return ch + ('a' - 'A');
-    return ch;
 }
 
 test "grep handler finds matching lines with file and line numbers" {

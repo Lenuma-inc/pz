@@ -7,8 +7,18 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ### Do More
 - Exercise signal draining with a real pending, thread-directed signal and verify the next read returns `WouldBlock`.
 
+- Terminate displayed diff lines even when source snippets have no final newline; keep removed and added markers on separate lines.
+- Give the model registry-derived tool guidance; explicitly prefer selective GitHub reads over cloning for source exploration.
+- Exercise the production child entry point, not only the echo harness; a working RPC mock cannot detect a missing --child handler.
+- Keep trusted sibling directory handles before callbacks can rename ancestors; fd discovery paths are only a selection snapshot.
+
 ### Do Not Do
 - Do not read Linux `signalfd` into fewer than 128 bytes: `EINVAL` triggers an `unreachable` panic in `std.posix.read`.
+
+- Do not assume fd accepts a path alongside --strip-cwd-prefix, or slash globs without --full-path; test the installed CLI.
+- Do not rely on discarded comptime imports to register Zig 0.16 tests; import the suite from a test block.
+- Treat a port or scheme change as a new HTTP origin when stripping credentials.
+- Do not return a successful readiness message from an execution tool; return its actual result or a propagated error.
 
 ## Session Notes (2026-10-27)
 

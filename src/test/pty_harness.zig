@@ -3319,3 +3319,82 @@ test "pty: unknown slash command shows error in transcript" {
     try std.testing.expect(out.snapshots.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "unknown command: /frobnicate") != null);
 }
+
+test "basic tools PTY keyboard chain uses tools and receives github guidance" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const provider =
+        \\req=$(cat)
+        \\printf '%s' "$req" | grep -q 'use github before cloning' || { printf 'text:GUIDE_MISSING\nstop:done\n'; exit; }
+        \\n=$(cat provider-step 2>/dev/null || printf 0)
+        \\printf '%s' "$((n + 1))" > provider-step
+        \\case "$n" in
+        \\0) printf '%s\n' 'tool_call:c0|todo|{"items":[{"content":"verify tools","status":"in_progress"}]}' 'stop:tool';;
+        \\1) printf '%s\n' 'tool_call:c1|patch|{"path":"probe.txt","patch":"@@ -0,0 +1 @@\n+ALPHA 42\n"}' 'stop:tool';;
+        \\2) printf '%s\n' 'tool_call:c2|grep|{"path":"probe.txt","pattern":"^ALPHA [0-9]+$"}' 'stop:tool';;
+        \\3) printf '%s\n' 'tool_call:c3|find|{"pattern":"*.txt"}' 'stop:tool';;
+        \\4) printf '%s\n' 'tool_call:c4|skill|{}' 'stop:tool';;
+        \\5) printf '%s\n' 'tool_call:c5|github|{"repo":"invalid"}' 'stop:tool';;
+        \\*) if printf '%s' "$req" | grep -q 'probe.txt:1:ALPHA 42'; then printf 'text:BASICTOOLSCOMPLETE\nstop:done\n'; else printf 'text:TOOLS_FAILED\nstop:done\n'; fi;;
+        \\esac
+    ;
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "verify the basic tools\n" },
+        .{ .wait_for = .{ .text = "BASICTOOLSCOMPLETE", .timeout_ms = 15000 } },
+        .{ .snapshot = "basic-tools" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session", "--provider-cmd", provider }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "BASICTOOLSCOMPLETE") != null);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "probe.txt", alloc, .limited(64));
+    defer alloc.free(data);
+    try @import("helpers.zig").expectSnapText(@src(), "ALPHA 42\n", data);
+}
+
+test "basic tools agent delegates through the real child entry point" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const provider =
+        \\req=$(cat)
+        \\if printf '%s' "$req" | grep -q tool_result; then
+        \\ if printf '%s' "$req" | grep -q CHILD_OK; then printf 'text:PARENT_OK\nstop:done\n'; else printf 'text:CHILD_FAILED\nstop:done\n'; fi
+        \\elif printf '%s' "$req" | grep -q CHILD_REQUEST; then
+        \\ printf 'text:CHILD_OK\nstop:done\n'
+        \\else
+        \\ printf '%s\n' 'tool_call:c1|agent|{"agent_id":"worker","prompt":"CHILD_REQUEST"}' 'stop:tool'
+        \\fi
+    ;
+    try env.put("PZ_PROVIDER_CMD", provider);
+    const pz = try pzBinAlloc(alloc);
+    defer alloc.free(pz);
+    const result = try std.process.run(alloc, std.testing.io, .{
+        .argv = &.{ pz, "print", "--no-config", "--no-session", "--model", "test-model", "--prompt", "PARENT_REQUEST" },
+        .cwd = .{ .path = cwd },
+        .environ_map = &env,
+        .stdout_limit = .limited(65536),
+        .stderr_limit = .limited(4096),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expect(result.term == .exited and result.term.exited == 0);
+    try @import("helpers.zig").expectSnapText(@src(), "PARENT_OK\n", result.stdout);
+}

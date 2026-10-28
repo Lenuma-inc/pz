@@ -45,7 +45,8 @@ pub const Handler = struct {
 
         const args = call.args.find;
         if (args.path.len == 0) return error.InvalidArgs;
-        if (args.name.len == 0) return error.InvalidArgs;
+        if (args.name.len == 0 and args.pattern == null) return error.InvalidArgs;
+        if (args.name.len != 0 and args.pattern != null) return error.InvalidArgs;
         if (args.max_results == 0) return error.InvalidArgs;
 
         var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
@@ -59,10 +60,27 @@ pub const Handler = struct {
             matches.deinit(self.alloc);
         }
 
-        const collect_limit = shared.satMul(usize, @as(usize, args.max_results), 8);
-        var path = std.ArrayList(u8).empty;
-        defer path.deinit(self.alloc);
-        try collectMatches(self, root, &path, args.name, collect_limit, &matches);
+        const result = std.process.run(self.alloc, sys.io, .{
+            .argv = &.{ "fd", "--color", "never", "--print0", "--strip-cwd-prefix", if (std.mem.indexOfScalar(u8, args.pattern orelse "", '/') != null) "--full-path" else "--case-sensitive", if (args.pattern != null) "--glob" else "--fixed-strings", "--", args.pattern orelse args.name },
+            .expand_arg0 = .expand,
+            .cwd = .{ .dir = root },
+            .stdout_limit = .limited(8 * 1024 * 1024),
+            .stderr_limit = .limited(4096),
+        }) catch |err| return shared.mapFsErr(err);
+        defer self.alloc.free(result.stdout);
+        defer self.alloc.free(result.stderr);
+        switch (result.term) {
+            .exited => |code| if (code != 0) return error.InvalidArgs,
+            else => return error.Io,
+        }
+        var paths = std.mem.splitScalar(u8, result.stdout, 0);
+        while (paths.next()) |path| {
+            if (path.len == 0) continue;
+            const clean = std.mem.trimEnd(u8, path, "/");
+            const dup = try self.alloc.dupe(u8, clean);
+            errdefer self.alloc.free(dup);
+            try matches.append(self.alloc, dup);
+        }
 
         std.sort.pdq([]u8, matches.items, {}, lessPath);
 
@@ -88,46 +106,6 @@ pub const Handler = struct {
 
 fn lessPath(_: void, a: []u8, b: []u8) bool {
     return std.mem.order(u8, a, b) == .lt;
-}
-
-fn collectMatches(
-    self: Handler,
-    dir: Dir,
-    path: *std.ArrayList(u8),
-    needle: []const u8,
-    limit: usize,
-    matches: *std.ArrayList([]u8),
-) Err!void {
-    var it = dir.iterate();
-    while (try nextEnt(&it)) |ent| {
-        if (matches.items.len >= limit) break;
-
-        const base_len = path.items.len;
-        if (base_len != 0) try path.append(self.alloc, '/');
-        defer path.shrinkRetainingCapacity(base_len);
-        try path.appendSlice(self.alloc, ent.name);
-
-        if (std.mem.indexOf(u8, ent.name, needle) != null) {
-            const dup = self.alloc.dupe(u8, path.items) catch return error.OutOfMemory;
-            errdefer self.alloc.free(dup);
-            matches.append(self.alloc, dup) catch return error.OutOfMemory;
-            if (matches.items.len >= limit) break;
-        }
-
-        if (ent.kind != .directory) continue;
-
-        var child = dir.openDir(sys.io, ent.name, .{
-            .iterate = true,
-            .access_sub_paths = true,
-            .follow_symlinks = false,
-        }) catch |open_err| return shared.mapFsErr(open_err);
-        defer child.close(sys.io);
-        try collectMatches(self, child, path, needle, limit, matches);
-    }
-}
-
-fn nextEnt(it: *Dir.Iterator) Err!?Dir.Entry {
-    return it.next(sys.io) catch |next_err| shared.mapFsErr(next_err);
 }
 
 test "find handler lists matching paths in sorted order" {

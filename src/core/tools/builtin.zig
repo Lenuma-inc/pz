@@ -1,5 +1,6 @@
 //! Built-in tool specs: parameter schemas and metadata.
 const std = @import("std");
+const shared = @import("shared.zig");
 const audit = @import("../audit.zig");
 const tools = @import("../tools.zig");
 
@@ -14,6 +15,9 @@ const agent_tool = @import("agent.zig");
 const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
 const web = @import("web.zig");
+const patch = @import("patch.zig");
+const todo = @import("todo.zig");
+const github = @import("github.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
 
@@ -29,6 +33,9 @@ pub const mask_agent: u16 = 1 << 7;
 pub const mask_ask: u16 = 1 << 8;
 pub const mask_skill: u16 = 1 << 9;
 pub const mask_web: u16 = 1 << 10;
+pub const mask_patch: u16 = 1 << 11;
+pub const mask_todo: u16 = 1 << 12;
+pub const mask_github: u16 = 1 << 13;
 pub const mask_all: u16 =
     mask_read |
     mask_write |
@@ -40,7 +47,7 @@ pub const mask_all: u16 =
     mask_agent |
     mask_ask |
     mask_skill |
-    mask_web;
+    mask_web | mask_patch | mask_todo | mask_github;
 
 const read_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File path" },
@@ -70,14 +77,16 @@ const edit_params = [_]tools.Tool.Param{
 };
 
 const grep_params = [_]tools.Tool.Param{
-    .{ .name = "pattern", .ty = .string, .required = true, .desc = "Substring to match in file lines" },
-    .{ .name = "path", .ty = .string, .required = false, .desc = "Root directory to search" },
+    .{ .name = "glob", .ty = .string, .required = false, .desc = "File glob filter (default *)" },
+    .{ .name = "pattern", .ty = .string, .required = true, .desc = "Regular expression to match in file lines" },
+    .{ .name = "path", .ty = .string, .required = false, .desc = "File or root directory to search" },
     .{ .name = "ignore_case", .ty = .bool, .required = false, .desc = "Case-insensitive matching" },
     .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum matches to return" },
 };
 
 const find_params = [_]tools.Tool.Param{
-    .{ .name = "name", .ty = .string, .required = true, .desc = "Substring to match in entry names" },
+    .{ .name = "pattern", .ty = .string, .required = false, .desc = "File glob, e.g. **/*.zig; use either pattern or name" },
+    .{ .name = "name", .ty = .string, .required = false, .desc = "Literal name substring; use either name or pattern" },
     .{ .name = "path", .ty = .string, .required = false, .desc = "Root directory to walk" },
     .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum paths to return" },
 };
@@ -93,12 +102,29 @@ const agent_params = [_]tools.Tool.Param{
 };
 
 const skill_params = [_]tools.Tool.Param{
-    .{ .name = "name", .ty = .string, .required = true, .desc = "Skill directory name" },
+    .{ .name = "name", .ty = .string, .required = false, .desc = "Skill directory name; omit to list available skills" },
     .{ .name = "args", .ty = .string, .required = false, .desc = "Optional user arguments appended to the skill body" },
 };
 
+const github_params = [_]tools.Tool.Param{
+    .{ .name = "repo", .ty = .string, .required = true, .desc = "Public GitHub owner/repo or repository URL" },
+    .{ .name = "op", .ty = .string, .required = false, .desc = "list (default) or read; no cloning" },
+    .{ .name = "path", .ty = .string, .required = false, .desc = "Repository-relative directory or file" },
+    .{ .name = "ref", .ty = .string, .required = false, .desc = "Branch, tag or commit; omitted uses default branch" },
+    .{ .name = "from_line", .ty = .int, .required = false, .desc = "First file line, inclusive, default 1" },
+    .{ .name = "to_line", .ty = .int, .required = false, .desc = "Last file line, inclusive" },
+};
+
+const patch_params = [_]tools.Tool.Param{
+    .{ .name = "path", .ty = .string, .required = true, .desc = "File to update or create" },
+    .{ .name = "patch", .ty = .string, .required = true, .desc = "Unified diff with @@ line ranges; one explicit file per call" },
+};
+const todo_schema =
+    \\{"type":"object","properties":{"items":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]}},"required":["content","status"],"additionalProperties":false}}},"additionalProperties":false}
+;
+
 const web_params = [_]tools.Tool.Param{
-    .{ .name = "url", .ty = .string, .required = true, .desc = "Target URL (https only)" },
+    .{ .name = "url", .ty = .string, .required = true, .desc = "Target URL (HTTP or HTTPS)" },
     .{ .name = "method", .ty = .string, .required = false, .desc = "HTTP method (default GET)" },
     .{ .name = "body", .ty = .string, .required = false, .desc = "Request body" },
 };
@@ -170,6 +196,7 @@ pub const Opts = struct {
     policy_hash: ?[]const u8 = null,
     sandbox_locked: bool = false,
     home: ?[]const u8 = null,
+    egress: web.RedirectPolicy = .{},
 };
 
 pub const Runtime = struct {
@@ -182,8 +209,10 @@ pub const Runtime = struct {
     policy_hash: ?[]const u8,
     sandbox_locked: bool,
     skill_cache: skill.Cache,
-    entries: [11]tools.Entry = undefined,
-    selected: [11]tools.Entry = undefined,
+    egress: web.RedirectPolicy,
+    tasks: todo.State = .{},
+    entries: [14]tools.Entry = undefined,
+    selected: [14]tools.Entry = undefined,
 
     const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
@@ -197,6 +226,7 @@ pub const Runtime = struct {
             .policy_hash = opts.policy_hash,
             .sandbox_locked = opts.sandbox_locked,
             .skill_cache = .{ .home = opts.home },
+            .egress = opts.egress,
         };
     }
 
@@ -207,6 +237,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.skill_cache.deinit(self.alloc);
+        self.tasks.deinit(self.alloc);
     }
 
     pub fn deinitResult(self: Runtime, res: tools.Result) void {
@@ -385,7 +416,7 @@ pub const Runtime = struct {
                 .kind = .web,
                 .spec = .{
                     .kind = .web,
-                    .desc = "Fetch a URL over HTTPS",
+                    .desc = "Fetch a URL over HTTP or HTTPS",
                     .params = web_params[0..],
                     .out = .{
                         .max_bytes = @intCast(self.max_bytes),
@@ -394,6 +425,24 @@ pub const Runtime = struct {
                     .timeout_ms = 30000,
                     .destructive = false,
                 },
+                .dispatch = &self.dispatch,
+            },
+            .{
+                .name = "patch",
+                .kind = .patch,
+                .spec = .{ .kind = .patch, .desc = "Apply a unified diff to one explicit file", .params = &patch_params, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 2000, .destructive = true },
+                .dispatch = &self.dispatch,
+            },
+            .{
+                .name = "todo",
+                .kind = .todo,
+                .spec = .{ .kind = .todo, .desc = "Read or replace the session task list; at most one task in progress", .params = &.{}, .schema_json = todo_schema, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 2000, .destructive = false },
+                .dispatch = &self.dispatch,
+            },
+            .{
+                .name = "github",
+                .kind = .github,
+                .spec = .{ .kind = .github, .desc = "Browse a public GitHub directory or read a single file without cloning; files capped at 2 MiB", .params = &github_params, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 30000, .destructive = false },
                 .dispatch = &self.dispatch,
             },
         };
@@ -447,6 +496,18 @@ pub const Runtime = struct {
             self.selected[len] = self.entries[10];
             len += 1;
         }
+        if ((self.tool_mask & mask_patch) != 0) {
+            self.selected[len] = self.entries[11];
+            len += 1;
+        }
+        if ((self.tool_mask & mask_todo) != 0) {
+            self.selected[len] = self.entries[12];
+            len += 1;
+        }
+        if ((self.tool_mask & mask_github) != 0) {
+            self.selected[len] = self.entries[13];
+            len += 1;
+        }
         return self.selected[0..len];
     }
 
@@ -463,6 +524,9 @@ pub const Runtime = struct {
             .ask => self.runAsk(call, sink),
             .skill => self.runSkill(call, sink),
             .web => self.runWeb(call, sink),
+            .patch => patch.run(self.alloc, self.max_bytes, call, sink),
+            .todo => self.tasks.run(self.alloc, self.max_bytes, call),
+            .github => github.run(self.alloc, self.max_bytes, self.egress, call),
         };
     }
 
@@ -668,37 +732,15 @@ pub const Runtime = struct {
         if (call.kind != .web or std.meta.activeTag(call.args) != .web) return error.InvalidArgs;
         const req = call.args.web;
 
-        const needs_approval = web.requiresEscalationApproval(req);
-        const summary = try web.approvalSummaryAlloc(self.alloc, req);
-        defer self.alloc.free(summary);
-
-        const raw_msg = if (needs_approval)
-            try std.fmt.allocPrint(self.alloc, "approval_required: {s}", .{summary})
-        else
-            try std.fmt.allocPrint(self.alloc, "ready: {s}", .{summary});
-        // Redact secrets (tokens in URLs) before returning to model.
-        const msg = audit.redactTextAlloc(self.alloc, raw_msg, .@"pub") catch return error.OutOfMemory;
-        self.alloc.free(raw_msg);
+        const response = try web.fetchAlloc(self.alloc, req, self.egress, self.max_bytes);
+        defer self.alloc.free(response.body);
+        const text = try std.fmt.allocPrint(self.alloc, "HTTP {d}\n{s}", .{ response.status, response.body });
+        defer self.alloc.free(text);
+        var msg = try audit.redactTextAlloc(self.alloc, text, .@"pub");
         errdefer self.alloc.free(msg);
-
-        const out = try self.alloc.alloc(tools.Output, 1);
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = call.at_ms,
-            .stream = .stdout,
-            .chunk = msg,
-            .owned = true,
-            .truncated = false,
-        };
-        return .{
-            .call_id = call.id,
-            .started_at_ms = call.at_ms,
-            .ended_at_ms = call.at_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
-        };
+        const full_len = msg.len;
+        if (msg.len > self.max_bytes) msg = try self.alloc.realloc(msg, self.max_bytes);
+        return shared.buildResult(self.alloc, call.id, call.at_ms, msg, self.max_bytes, full_len);
     }
 
     fn runSkill(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
@@ -725,6 +767,30 @@ fn askResultCancelled(raw: []const u8) bool {
     return parsed.value.cancelled;
 }
 
+pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]const u8) !?[]u8 {
+    if (reg.entries.len == 0) return if (base) |text| try alloc.dupe(u8, text) else null;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    if (base) |text| try out.writer.print("{s}\n\n", .{text});
+    try out.writer.writeAll("Available tools:");
+    for (reg.entries) |entry| try out.writer.print(" {s}", .{entry.name});
+    try out.writer.writeByte('\n');
+    const guides = .{
+        .{ "github", "For GitHub repository exploration, use github before cloning: list a directory with {repo,op:\"list\",path}, then read selected files with {repo,op:\"read\",path,from_line,to_line}. Omit ref for the default branch, or set a branch/tag/commit explicitly. Do not clone a repository just to inspect source; clone only when local builds, execution, or history require it. Public repositories only; report access/rate-limit failures." },
+        .{ "grep", "Use grep for regex content searches in a file or directory; glob filters files. It uses rg and honors ignore files." },
+        .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },
+        .{ "skill", "Call skill with no name to list available skills, then load an existing name." },
+        .{ "patch", "Use patch with an explicit path and unified diff to update or create one file. Context must match; no renames or file deletion." },
+        .{ "todo", "Use todo to read or replace the session task list; keep at most one task in_progress." },
+        .{ "web", "Use web to fetch a known URL; it returns the actual HTTP status and body, not a readiness message." },
+        .{ "agent", "Use agent for delegated work; child failures are tool errors, never successful results." },
+    };
+    inline for (guides) |guide| {
+        if (reg.byName(guide[0]) != null) try out.writer.print("{s}\n", .{guide[1]});
+    }
+    return try out.toOwnedSlice();
+}
+
 pub fn maskForName(name: []const u8) ?u16 {
     const map = std.StaticStringMap(u16).initComptime(.{
         .{ "read", mask_read },
@@ -738,6 +804,9 @@ pub fn maskForName(name: []const u8) ?u16 {
         .{ "ask", mask_ask },
         .{ "skill", mask_skill },
         .{ "web", mask_web },
+        .{ "patch", mask_patch },
+        .{ "todo", mask_todo },
+        .{ "github", mask_github },
     });
     return map.get(name);
 }

@@ -64,7 +64,7 @@ fn stripCredentialHeaders(alloc: std.mem.Allocator, headers: []const Header) err
 /// True when redirect target differs in host or downgrades from HTTPS to HTTP.
 fn isCrossOrigin(orig: ParsedUrl, next: ParsedUrl) bool {
     if (!std.ascii.eqlIgnoreCase(orig.host, next.host)) return true;
-    if (orig.scheme == .https and next.scheme == .http) return true;
+    if (orig.scheme != next.scheme or orig.port != next.port) return true;
     return false;
 }
 
@@ -457,6 +457,78 @@ fn fetchRedirectChainAlloc(
         const next_parsed = try parseUrl(next.text);
         if (isCrossOrigin(parsed, next_parsed)) {
             cur.headers = try stripCredentialHeaders(ar, cur.headers);
+        }
+        cur.url = next.text;
+        hops += 1;
+    }
+}
+
+pub const Fetch = struct { status: u16, body: []u8 };
+
+pub fn fetchAlloc(alloc: std.mem.Allocator, req: Request, policy: RedirectPolicy, max_bytes: usize) !Fetch {
+    if (policy.egress.proxy_url != null) return error.ProxyUnsupported;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    var cur = req;
+    var hops: u8 = 0;
+    const deadline = Deadline.init(policy.egress);
+    while (true) {
+        const parsed = try parseUrl(cur.url);
+        const addr = try resolveConnectAddrAlloc(ar, cur.url, policy);
+        const target = try std.fmt.allocPrint(ar, "{s}:{d}:{f}", .{ parsed.host, parsed.port, addr });
+        const connect_ms = try deadline.connectRemaining();
+        const total_ms = try deadline.readRemaining();
+        const connect_s = try std.fmt.allocPrint(ar, "{d}.{d:0>3}", .{ connect_ms / 1000, connect_ms % 1000 });
+        const total_s = try std.fmt.allocPrint(ar, "{d}.{d:0>3}", .{ total_ms / 1000, total_ms % 1000 });
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(ar, &.{
+            "curl",      "--disable",          "--silent", "--show-error", "--include",
+            "--noproxy", "*",                  "--proto",  "=http,https",  "--connect-to",
+            target,      "--connect-timeout",  connect_s,  "--max-time",   total_s,
+            "--request", @tagName(cur.method),
+        });
+        if (cur.method == .HEAD) try argv.append(ar, "--head");
+        for (cur.headers) |hdr| {
+            if (hdr.name.len == 0 or std.mem.indexOfAny(u8, hdr.value, "\r\n") != null) return error.InvalidHeader;
+            for (hdr.name) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return error.InvalidHeader;
+            try argv.appendSlice(ar, &.{ "--header", try std.fmt.allocPrint(ar, "{s}: {s}", .{ hdr.name, hdr.value }) });
+        }
+        if (cur.body) |body| try argv.appendSlice(ar, &.{ "--data-raw", body });
+        try argv.appendSlice(ar, &.{ "--url", cur.url });
+        const result = try std.process.run(ar, sys.io, .{
+            .argv = argv.items,
+            .expand_arg0 = .expand,
+            .stdout_limit = .limited(max_bytes + 65536),
+            .stderr_limit = .limited(4096),
+        });
+        switch (result.term) {
+            .exited => |code| switch (code) {
+                0 => {},
+                6 => return error.ResolveFailed,
+                28 => return error.DeadlineExceeded,
+                60 => return error.TlsVerificationFailed,
+                else => return error.HttpTransportFailed,
+            },
+            else => return error.HttpTransportFailed,
+        }
+        var raw = result.stdout;
+        var res = try parseHttpResponseAlloc(ar, raw);
+        while (res.status >= 100 and res.status < 200) {
+            raw = @constCast(res.body);
+            res = try parseHttpResponseAlloc(ar, raw);
+        }
+        if (!cur.follow_redirects or !res.isRedirect()) {
+            if (res.body.len > max_bytes) return error.TooLarge;
+            return .{ .status = res.status, .body = try alloc.dupe(u8, res.body) };
+        }
+        if (hops >= cur.max_redirects) return error.TooManyRedirects;
+        const next = (try nextRedirectTargetAlloc(ar, cur, res, policy)) orelse return error.MissingRedirectTarget;
+        const next_parsed = try parseUrl(next.text);
+        if (isCrossOrigin(parsed, next_parsed)) cur.headers = try stripCredentialHeaders(ar, cur.headers);
+        if (res.status == 303 and cur.method != .HEAD or ((res.status == 301 or res.status == 302) and cur.method == .POST)) {
+            cur.method = .GET;
+            cur.body = null;
         }
         cur.url = next.text;
         hops += 1;
@@ -1457,4 +1529,11 @@ fn fdWrite(fd: std.posix.fd_t, bytes: []const u8) !usize {
 fn fdWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) off += try fdWrite(fd, bytes[off..]);
+}
+
+test "cross-origin redirects include scheme and port changes" {
+    const base = try parseUrl("https://example.com/a");
+    try std.testing.expect(isCrossOrigin(base, try parseUrl("https://example.com:8443/b")));
+    try std.testing.expect(isCrossOrigin(try parseUrl("http://example.com/a"), base));
+    try std.testing.expect(!isCrossOrigin(base, try parseUrl("https://example.com/b")));
 }

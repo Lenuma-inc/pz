@@ -117,6 +117,7 @@ test "tool contract handlers emit deterministic envelopes" {
         .at_ms = 0,
     };
     const wr_res = try wr.run(wr_call, sink);
+    defer @import("shared.zig").deinitResult(std.testing.allocator, wr_res);
 
     const ed = @import("edit.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -138,6 +139,7 @@ test "tool contract handlers emit deterministic envelopes" {
         .at_ms = 0,
     };
     const ed_res = try ed.run(ed_call, sink);
+    defer @import("shared.zig").deinitResult(std.testing.allocator, ed_res);
 
     const sh = @import("bash.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -295,7 +297,14 @@ test "tool contract handlers emit deterministic envelopes" {
         \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.test.OutSnap
-        \\      (empty)
+        \\      [0]: core.tools.test.OutSnap
+        \\        .call_id: []const u8
+        \\          "w1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 22
+        \\        .stream: core.tools.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
         \\  [2]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "e1"
@@ -304,7 +313,14 @@ test "tool contract handlers emit deterministic envelopes" {
         \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.test.OutSnap
-        \\      (empty)
+        \\      [0]: core.tools.test.OutSnap
+        \\        .call_id: []const u8
+        \\          "e1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 33
+        \\        .stream: core.tools.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
         \\  [3]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "b1"

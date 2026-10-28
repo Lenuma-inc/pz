@@ -28,6 +28,9 @@ pub const Kind = enum {
     web,
     ask,
     skill,
+    patch,
+    todo,
+    github,
 };
 
 pub const Tool = struct {
@@ -114,6 +117,9 @@ pub const Call = struct {
         web: WebArgs,
         ask: AskArgs,
         skill: SkillArgs,
+        patch: PatchArgs,
+        todo: TodoArgs,
+        github: GithubArgs,
     };
 
     pub const ReadArgs = struct {
@@ -147,11 +153,13 @@ pub const Call = struct {
         pattern: []const u8,
         path: []const u8 = ".",
         ignore_case: bool = false,
+        glob: []const u8 = "*",
         max_results: u32 = 200,
     };
 
     pub const FindArgs = struct {
-        name: []const u8,
+        name: []const u8 = "",
+        pattern: ?[]const u8 = null,
         path: []const u8 = ".",
         max_results: u32 = 200,
     };
@@ -186,8 +194,31 @@ pub const Call = struct {
         };
     };
 
+    pub const GithubArgs = struct {
+        repo: []const u8,
+        op: enum { list, read } = .list,
+        path: []const u8 = "",
+        ref: ?[]const u8 = null,
+        from_line: u32 = 1,
+        to_line: ?u32 = null,
+    };
+
+    pub const PatchArgs = struct {
+        path: []const u8,
+        patch: []const u8,
+    };
+
+    pub const TodoArgs = struct {
+        items: ?[]const TodoItem = null,
+    };
+
+    pub const TodoItem = struct {
+        content: []const u8,
+        status: enum { pending, in_progress, completed, cancelled } = .pending,
+    };
+
     pub const SkillArgs = struct {
-        name: []const u8,
+        name: []const u8 = "",
         args: []const u8 = "",
     };
 

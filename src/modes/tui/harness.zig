@@ -1106,3 +1106,20 @@ test "lastWordStart finds word boundary" {
     try std.testing.expectEqual(@as(usize, 0), lastWordStart("@src/", 5));
     try std.testing.expectEqual(@as(usize, 4), lastWordStart("foo @", 5));
 }
+
+test "basic tools UI renders patch todo and github calls" {
+    var ui = try Ui.init(std.testing.allocator, 80, 20, "model", "provider");
+    defer ui.deinit();
+    const calls = [_]core.providers.ToolCall{
+        .{ .id = "p", .name = "patch", .args = "{\"path\":\"probe.txt\",\"patch\":\"@@ -0,0 +1 @@\\n+ok\\n\"}" },
+        .{ .id = "t", .name = "todo", .args = "{\"items\":[{\"content\":\"verify\",\"status\":\"in_progress\"}]}" },
+        .{ .id = "g", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"list\"}" },
+    };
+    for (calls, 0..) |call, idx| {
+        try ui.onProvider(.{ .tool_call = call });
+        const row = ui.panels.tool(idx);
+        try std.testing.expectEqualStrings(call.name, row.name);
+        try ui.onProvider(.{ .tool_result = .{ .id = call.id, .output = "ok", .is_err = false } });
+    }
+    try std.testing.expectEqual(@as(usize, 0), ui.panels.runningCount());
+}

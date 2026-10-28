@@ -11,6 +11,10 @@ pub const update = @import("app/update.zig");
 pub fn run(init: std.process.Init) !u8 {
     const alloc = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(alloc);
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "--child")) {
+        try runtime.execChild(init, argv[2..]);
+        return 0;
+    }
     var env = try config.Env.fromMap(alloc, init.environ_map);
     defer env.deinit(alloc);
     var out_buf: [4096]u8 = undefined;

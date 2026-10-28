@@ -680,6 +680,7 @@ pub const ChildProc = struct {
     }
 
     fn send(self: *ChildProc, frame: Frame) !void {
+        self.stdin_writer.interface.buffer = &self.in_buf;
         const raw = try encodeLineAlloc(self.alloc, frame);
         defer self.alloc.free(raw);
         try self.stdin_writer.interface.writeAll(raw);
@@ -693,6 +694,7 @@ pub const ChildProc = struct {
     /// Receive a frame with an absolute deadline (ms since epoch).
     /// Returns error.Timeout if deadline passes before a full line arrives.
     fn recvDeadline(self: *ChildProc, deadline: i64) !Frame {
+        self.rpc_reader.interface.buffer = &self.rpc_buf;
         if (self.rpc_reader.interface.bufferedLen() == 0) {
             const remain = deadline - core_time.milliTimestamp();
             if (remain <= 0) return error.Timeout;

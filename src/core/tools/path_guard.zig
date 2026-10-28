@@ -98,7 +98,11 @@ pub fn openDir(path: []const u8, opts: Dir.OpenOptions) !Dir {
     var parent = try openParentDir(rel);
     errdefer parent.dir.close(active_io);
 
-    const leaf = parent.leaf orelse return error.FileNotFound;
+    const leaf = parent.leaf orelse {
+        const dir = try parent.dir.openDir(active_io, ".", opts);
+        parent.dir.close(active_io);
+        return dir;
+    };
     const dir = parent.dir.openDir(active_io, leaf, noFollowDirOpts(opts)) catch |err|
         return mapParentDirErr(parent.dir, leaf, err);
     parent.dir.close(active_io);
@@ -193,7 +197,7 @@ fn mapParentDirErr(dir: Dir, name: []const u8, err: anyerror) anyerror {
         else => return err,
     };
     if (st.kind == .sym_link) return error.AccessDenied;
-    return error.FileNotFound;
+    return err;
 }
 
 fn fstatatNoFollow(dir_fd: posix.fd_t, name: []const u8) !File.Stat {

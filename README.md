@@ -23,7 +23,7 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 - **Image rendering** — Kitty graphics protocol support in terminal
 - **24 slash commands** — `/model`, `/fork`, `/export`, `/compact`, `/share`, `/tree`, and more
 - **Autocomplete dropdown** — fuzzy-filtered command and file path completion
-- **9 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`
+- **14 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
@@ -128,3 +128,32 @@ Canonical `pz` state lives under `.pz/`:
 ## License
 
 MIT
+
+## Repository tools
+
+`grep` uses installed `rg` for regular expressions, including single-file searches;
+`find` uses installed `fd` for literal names or glob patterns. Both honor ignore
+files. Missing executables fail explicitly. HTTP tools require installed `curl`.
+
+`patch` applies a unified diff to one explicit file, validating all hunks before
+writing. It updates or creates files; file deletion and renaming are separate
+operations. `todo` keeps a task list for the current runtime session. `skill`
+without a name lists the available model-invocable skills.
+
+`github` browses public repositories one directory or file at a time using the
+GitHub Contents API, following the approach in
+[ghgrab](https://github.com/abhixdd/ghgrab/blob/main/src/github.rs).
+It never clones repositories. Examples of model tool arguments:
+
+```json
+{"repo":"abhixdd/ghgrab","op":"list","path":"src"}
+{"repo":"abhixdd/ghgrab","op":"read","path":"src/github.rs","from_line":190,"to_line":210}
+```
+
+Omit `ref` for the repository's default branch, or specify a branch, tag, or commit.
+Files are capped at 2 MiB and returned output at the normal tool limit. Large
+files need a line range; directories hitting GitHub's 1,000-entry limit fail
+explicitly. Private repositories and authenticated API access are not implemented.
+The model receives tool guidance on each request, including instructions to use
+`github` for source exploration before considering a clone. LSP and external web
+search are outside this tool set.

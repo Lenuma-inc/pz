@@ -198,6 +198,7 @@ test "edit handler replaces first match with deterministic timestamps" {
         \\@@ -1,1 +1,1 @@
         \\-x
         \\+y
+        \\
         \\final=ok|0
         \\"
     ).expectEqual(snap);

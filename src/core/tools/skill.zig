@@ -60,7 +60,19 @@ pub const Handler = struct {
         if (std.meta.activeTag(call.args) != .skill) return error.KindMismatch;
 
         const args = call.args.skill;
-        if (args.name.len == 0) return error.InvalidArgs;
+        if (args.name.len == 0) {
+            const skills = self.cache.load(self.alloc) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return fail(call, .io, @errorName(err)),
+            };
+            var list = std.Io.Writer.Allocating.init(self.alloc);
+            defer list.deinit();
+            for (skills) |item| {
+                if (item.meta.disable_model_invocation) continue;
+                list.writer.print("{s}: {s}\n", .{ item.dir_name, item.meta.description }) catch return error.OutOfMemory;
+            }
+            return okWithResult(self, call, if (list.written().len == 0) "No model-invocable skills found in .pz/skills or ~/.pz/skills." else list.written());
+        }
 
         const info = self.cache.find(self.alloc, args.name) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

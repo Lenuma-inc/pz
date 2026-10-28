@@ -1,5 +1,6 @@
 //! Aggregated test imports for `zig build test`.
-comptime {
+test {
+    _ = @import("test/basic_tools.zig");
     _ = @import("core/fs_secure.zig");
     _ = @import("core/tools/read.zig");
     _ = @import("core/tools/bash.zig");

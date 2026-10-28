@@ -383,6 +383,9 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
         .write => |args| args.path,
         .bash => |args| args.cwd orelse try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
         .edit => |args| args.path,
+        .patch => |args| args.path,
+        .todo => "runtime/tool/todo",
+        .github => "runtime/tool/github",
         .grep => |args| args.path,
         .find => |args| args.path,
         .ls => |args| args.path,
@@ -523,6 +526,9 @@ fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolA
         .web => .{ .res_kind = .net, .op = "request", .target = parsed_args.web.url, .argv = parsed_args.web.url },
         .ask => .{ .res_kind = .cfg, .op = "ask", .target = "ask", .argv = "ask" },
         .skill => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.skill.name, .argv = parsed_args.skill.name },
+        .patch => .{ .res_kind = .file, .op = "write", .target = parsed_args.patch.path, .argv = parsed_args.patch.path },
+        .todo => .{ .res_kind = .cmd, .op = "run", .target = "todo", .argv = "todo" },
+        .github => .{ .res_kind = .net, .op = "request", .target = parsed_args.github.repo, .argv = parsed_args.github.path },
     };
 }
 
@@ -1644,6 +1650,9 @@ fn auditResMap(kind: core.tools.Kind) AuditResMap {
         .agent => .{ .kind = .cmd, .op = "spawn" },
         .bash => .{ .kind = .cmd, .op = "run" },
         .skill => .{ .kind = .cmd, .op = "run" },
+        .patch => .{ .kind = .file, .op = "write" },
+        .todo => .{ .kind = .cmd, .op = "run" },
+        .github => .{ .kind = .net, .op = "request" },
         .ask => .{ .kind = .cfg, .op = "prompt" },
     };
 }
@@ -1787,6 +1796,77 @@ fn reloadContextWithAudit(
     };
     try runtimeCtlAudit(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, .ok, null, &attrs);
     return .empty;
+}
+
+pub fn execChild(init: std.process.Init, argv: []const []const u8) !void {
+    if (argv.len != 3) return error.InvalidArgs;
+    const alloc = init.arena.allocator();
+    const agent_id = argv[0];
+    const hash = argv[1];
+    _ = try core.agent.Stub.init(agent_id, hash);
+    const fd = try std.fmt.parseInt(std.posix.fd_t, argv[2], 10);
+    if (fd < 3) return error.InvalidArgs;
+    var env = try config.Env.fromMap(alloc, init.environ_map);
+    defer env.deinit(alloc);
+    var pol = try RuntimePolicy.load(alloc, init.io, env.home);
+    defer pol.deinit();
+    if (!core.signing.ctEql(hash, pol.hash())) return error.PolicyMismatch;
+    if (!pol.allowsSubagent(agent_id)) return error.PolicyDenied;
+    try core.agent.closeInheritedFds(fd);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    var out_buf: [4096]u8 = undefined;
+    var out = file.writerStreaming(init.io, &out_buf);
+    var in_buf: [4096]u8 = undefined;
+    var input = std.Io.File.stdin().readerStreaming(init.io, &in_buf);
+    var seq: u32 = 1;
+    var recv_seq: u32 = 0;
+    var connected = false;
+    while (try input.interface.takeDelimiter('\n')) |line| {
+        if (line.len > core.agent.max_frame_len) return error.FrameTooLarge;
+        const parsed = try core.agent.decodeSlice(alloc, line);
+        defer parsed.deinit();
+        const frame = parsed.value;
+        if (frame.seq <= recv_seq) return error.SeqOrder;
+        recv_seq = frame.seq;
+        switch (frame.msg) {
+            .hello => |hello| {
+                if (connected or hello.role != .parent) return error.UnexpectedMsg;
+                if (!std.mem.eql(u8, hello.agent_id, agent_id)) return error.UnexpectedId;
+                if (!core.signing.ctEql(hello.policy_hash, hash)) return error.PolicyMismatch;
+                try writeChildFrame(alloc, &out.interface, &seq, .{ .hello = .{ .role = .child, .agent_id = agent_id, .policy_hash = hash } });
+                connected = true;
+            },
+            .run => |req| {
+                if (!connected) return error.UnexpectedMsg;
+                var cmd = try cli.parse(alloc, init.io, std.Io.Dir.cwd(), &.{ "print", "--no-session", "--prompt", req.prompt }, env);
+                defer cmd.deinit(alloc);
+                cmd.run.prompt = req.prompt;
+                var text = std.Io.Writer.Allocating.init(alloc);
+                defer text.deinit();
+                const sid = execWithWriter(alloc, cmd.run, &text.writer) catch |err| {
+                    try writeChildFrame(alloc, &out.interface, &seq, .{ .err = .{ .id = req.id, .code = @errorName(err), .message = @errorName(err), .fatal = false } });
+                    continue;
+                };
+                alloc.free(sid);
+                const chunk = core.tools.truncate.apply(text.written(), core.agent.max_frame_len / 2);
+                try writeChildFrame(alloc, &out.interface, &seq, .{ .out = .{ .id = req.id, .text = chunk.chunk } });
+                try writeChildFrame(alloc, &out.interface, &seq, .{ .done = .{ .id = req.id, .truncated = chunk.meta != null } });
+            },
+            .cancel => |req| {
+                if (!connected) return error.UnexpectedMsg;
+                try writeChildFrame(alloc, &out.interface, &seq, .{ .done = .{ .id = req.id, .stop = .canceled } });
+            },
+            else => return error.UnexpectedMsg,
+        }
+    }
+}
+
+fn writeChildFrame(alloc: std.mem.Allocator, out: *std.Io.Writer, seq: *u32, msg: core.agent.Msg) !void {
+    const raw = try core.agent.encodeLineAlloc(alloc, core.agent.Frame.init(seq.*, msg));
+    defer alloc.free(raw);
+    try out.writeAll(raw);
+    try out.flush();
+    seq.* += 1;
 }
 
 pub fn exec(alloc: std.mem.Allocator, run_cmd: cli.Run) (Err || anyerror)![]u8 {
@@ -2069,7 +2149,9 @@ fn execWithIoTuiHooks(
         .home = home,
         .policy_hash = pol.hash(),
         .sandbox_locked = pol.enforced(),
+        .egress = .{ .egress = .{ .rules = if (pol.enforced()) pol.resolved.doc.rules else &.{.{ .pattern = "runtime/web/*", .effect = .allow }} }, .allow_cross_host = true, .allow_cross_port = true },
     });
+    defer tools_rt.deinit();
 
     var sid: []u8 = &.{};
     var session_dir_path: ?[]u8 = null;
@@ -5754,6 +5836,10 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         "agent",
         "ask",
         "skill",
+        "web",
+        "patch",
+        "todo",
+        "github",
     };
     const bits = [_]u16{
         core.tools.builtin.mask_read,
@@ -5766,6 +5852,10 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         core.tools.builtin.mask_agent,
         core.tools.builtin.mask_ask,
         core.tools.builtin.mask_skill,
+        core.tools.builtin.mask_web,
+        core.tools.builtin.mask_patch,
+        core.tools.builtin.mask_todo,
+        core.tools.builtin.mask_github,
     };
 
     var need_sep = false;
@@ -6519,7 +6609,7 @@ test "OpenAI credentials unlock picker and native backend together" {
 }
 
 const provider_args = core.providers.auth.provider_names;
-const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill" };
+const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill", "web", "patch", "todo", "github" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
 const BgSub = enum {

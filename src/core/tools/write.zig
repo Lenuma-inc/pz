@@ -170,7 +170,11 @@ test "write handler overwrites file with deterministic timestamps" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .chunk: []const u8
-        \\          "• Edited out.txt (+1 -1)\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        \\          "• Edited out.txt (+1 -1)
+        \\@@ -1,1 +1,1 @@
+        \\-old
+        \\+new
+        \\"
         \\        .owned: bool = true
         \\        .truncated: bool = false
         \\    .out_owned: bool = true
