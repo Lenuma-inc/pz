@@ -87,6 +87,10 @@ pub const AskUiCtx = struct {
     fn runWithReader(self: *AskUiCtx, reader: *tui_input.Reader, args: core.tools.Call.AskArgs) anyerror![]u8 {
         if (args.questions.len == 0) return error.InvalidArgs;
 
+        for (args.questions) |q| {
+            if (q.review) |text| try self.ui.tr.infoText(text);
+        }
+
         var stored = try self.alloc.alloc(StoredAnswer, args.questions.len);
         defer {
             for (stored) |a| {
@@ -390,6 +394,37 @@ pub fn buildAskRows(
         .items = out_items,
         .kinds = out_kinds,
     };
+}
+
+test "sandbox approval renders review and requires a selected answer" {
+    const Pause = struct {
+        pause_ctl: PauseCtl = .{ .vt = &PauseCtl.Bind(@This(), set).vt },
+        paused: bool = false,
+        fn set(self: *@This(), value: bool) void {
+            self.paused = value;
+        }
+    };
+    var pause = Pause{};
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 24, "m", "p");
+    defer ui.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var ctx = AskUiCtx{ .alloc = std.testing.allocator, .ui = &ui, .out = &out.writer, .pause = &pause.pause_ctl };
+    var reader = tui_input.Reader.init(-1);
+    reader.inject("\r\x1b[B\x1b[B\r");
+    const raw = try ctx.runOnMain(&reader, .{ .questions = &.{.{
+        .id = "sandbox",
+        .header = "Sandbox",
+        .question = "Run outside sandbox?",
+        .review = "printf REVIEWCOMMAND",
+        .allow_other = false,
+        .options = &.{ .{ .label = "Approve once" }, .{ .label = "Deny" } },
+    }} });
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings("{\"cancelled\":false,\"answers\":[{\"id\":\"sandbox\",\"answer\":\"Approve once\",\"index\":0}]}", raw);
+    try std.testing.expect(!pause.paused);
+    try std.testing.expect(ui.ov == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "REVIEWCOMMAND") != null);
 }
 
 pub fn buildAskResult(alloc: std.mem.Allocator, cancelled: bool, answers: []const AskUiCtx.Answer) ![]u8 {

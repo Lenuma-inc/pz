@@ -105,7 +105,9 @@ Shell commands are tokenized and checked against protected path patterns before 
 
 On macOS, bash runs under `sandbox-exec` with a generated profile that restricts filesystem access and executable paths to the workspace and approved system roots.
 
-On Linux, bash runs under `bwrap` with a temporary root, selected system directories mounted read-only, the workspace mounted read-write, and a separate network namespace. Linux requires `bwrap` on `PATH` and kernel permission to create user and network namespaces; setup errors stop the command.
+On Linux, bash runs under `bwrap` with the host filesystem mounted read-only, the workspace and `/tmp` mounted read-write, and a separate network namespace. This permits reading home files and using externally installed interpreters. `TMPDIR`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, and `ZIG_GLOBAL_CACHE_DIR` point into `/tmp` for sandboxed commands. Linux requires `bwrap` on `PATH` and kernel permission to create user and network namespaces; setup errors stop the command.
+
+The model may request `sandbox_permissions: "require_escalated"` with a nonempty `justification` when a command needs network or write access beyond these roots. The TUI displays the command for review with **Approve once** first and **Deny** second; the user must select and submit an answer. An explicit **Approve once** executes that call outside the OS sandbox. Cancellation, malformed answers, missing interactive approval, and enforced policy prevent escalation. Approval never changes the default sandbox for subsequent calls.
 
 ## Egress Policy
 

@@ -91,7 +91,8 @@ pub fn installRaceHook(hook: *RaceHook) RaceGuard {
 
 pub fn openDir(path: []const u8, opts: Dir.OpenOptions) !Dir {
     const active_io = sys.io;
-    const rel = try relPath(path);
+    const rel = try relPath(path, false);
+    if (std.mem.eql(u8, rel, "/")) return Dir.cwd().openDir(active_io, "/", opts);
     if (rel.len == 0) return Dir.cwd().openDir(active_io, ".", opts);
 
     var parent = try openParentDir(rel);
@@ -105,7 +106,7 @@ pub fn openDir(path: []const u8, opts: Dir.OpenOptions) !Dir {
 }
 
 pub fn openFile(path: []const u8, flags: Dir.OpenFileOptions) !File {
-    const rel = try relPath(path);
+    const rel = try relPath(path, flags.mode != .read_only);
     if (rel.len == 0) return error.FileNotFound;
 
     var parent = try openParentDir(rel);
@@ -135,7 +136,7 @@ pub fn createFileInDir(dir: Dir, name: []const u8, flags: Dir.CreateFileOptions)
 }
 
 pub fn createFile(path: []const u8, flags: Dir.CreateFileOptions) !File {
-    const rel = try relPath(path);
+    const rel = try relPath(path, true);
     if (rel.len == 0) return error.FileNotFound;
 
     var parent = try openParentDir(rel);
@@ -155,7 +156,8 @@ const ParentDir = struct {
 
 fn openParentDir(rel_path: []const u8) !ParentDir {
     const active_io = sys.io;
-    var dir = try Dir.cwd().openDir(active_io, ".", .{ .access_sub_paths = true });
+    const base = if (std.fs.path.isAbsolute(rel_path)) "/" else ".";
+    var dir = try Dir.cwd().openDir(active_io, base, .{ .access_sub_paths = true });
     errdefer dir.close(active_io);
 
     var it = std.fs.path.componentIterator(rel_path);
@@ -198,8 +200,10 @@ fn fstatatNoFollow(dir_fd: posix.fd_t, name: []const u8) !File.Stat {
     return (Dir{ .handle = dir_fd }).statFile(sys.io, name, .{ .follow_symlinks = false });
 }
 
-fn relPath(path: []const u8) ![]const u8 {
+fn relPath(path: []const u8, write: bool) ![]const u8 {
+    if (!write) return path;
     if (!std.fs.path.isAbsolute(path)) return path;
+    if (std.mem.startsWith(u8, path, "/tmp/")) return path;
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try Dir.cwd().realPathFile(sys.io, ".", &root_buf);
@@ -581,6 +585,32 @@ test "resolveConfined denies dotdot escape" {
         error.AccessDenied,
         resolveConfined(std.testing.allocator, root, "sub/../../outside.txt"),
     );
+}
+
+test "workspace sandbox file tools share tmp and deny outside writes" {
+    if (native_os != .linux) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const path = try std.fmt.allocPrint(alloc, "/tmp/pz-guard-{d}", .{std.os.linux.getpid()});
+    defer alloc.free(path);
+    try Dir.cwd().createDir(sys.io, path, .fromMode(0o700));
+    defer Dir.cwd().deleteTree(sys.io, path) catch {}; // test cleanup
+    const file_path = try std.fs.path.join(alloc, &.{ path, "probe" });
+    defer alloc.free(file_path);
+    var file = try createFile(file_path, .{});
+    try file.writeStreamingAll(sys.io, "shared");
+    file.close(sys.io);
+    var rd = try openFile(file_path, .{ .mode = .read_write });
+    rd.close(sys.io);
+    try std.testing.expectError(error.AccessDenied, createFile("/etc/pz-denied-test", .{}));
+    const escape = try std.fs.path.join(alloc, &.{ path, "../..", "etc/pz-denied-test" });
+    defer alloc.free(escape);
+    try std.testing.expectError(error.AccessDenied, createFile(escape, .{}));
+    var dir = try Dir.cwd().openDir(sys.io, path, .{});
+    defer dir.close(sys.io);
+    try dir.symLink(sys.io, "/etc/pz-denied-test", "escape", .{});
+    const link = try std.fs.path.join(alloc, &.{ path, "escape" });
+    defer alloc.free(link);
+    try std.testing.expectError(error.SymLinkLoop, createFile(link, .{}));
 }
 
 test "openFile denies hardlinked leaf" {

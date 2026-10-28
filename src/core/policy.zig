@@ -2281,7 +2281,7 @@ test "network policy blocks local and private ranges" {
     try testing.expect(isBlockedNetAddr(netIp4(.{ 172, 16, 1, 9 }, 443)));
     try testing.expect(isBlockedNetAddr(netIp4(.{ 192, 168, 4, 5 }, 443)));
     try testing.expect(isBlockedNetAddr(netIp4(.{ 169, 254, 2, 9 }, 443)));
-    try testing.expect(isBlockedNetAddr(netIp6(@as([16]u8, @splat(0)) ++ .{1}, 443)));
+    try testing.expect(isBlockedNetAddr(netIp6(@as([15]u8, @splat(0)) ++ .{1}, 443)));
     try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfe, 0x80 } ++ @as([14]u8, @splat(0)), 443)));
     try testing.expect(isBlockedNetAddr(netIp6(.{ 0xfc, 0 } ++ @as([14]u8, @splat(0)), 443)));
 }

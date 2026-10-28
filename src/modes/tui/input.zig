@@ -110,7 +110,7 @@ pub const Reader = struct {
         // Read more data
         self.compact();
         const n = self.readReady() catch |err| switch (err) {
-            error.WouldBlock => return .none,
+            error.WouldBlock => 0,
             else => return .err,
         };
         if (n == 0) {
@@ -636,6 +636,22 @@ test "parse plain ASCII char" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "reader resolves lone escape after timeout and preserves partial arrows" {
+    const input = try makePipe();
+    defer closeFd(input[0]);
+    defer closeFd(input[1]);
+    const notify = try makePipe();
+    defer closeFd(notify[0]);
+    defer closeFd(notify[1]);
+    var reader = Reader.initWithNotify(input[0], notify[0]);
+    reader.inject("\x1b");
+    try expectKey(reader.next(), .esc);
+    reader.inject("\x1b[");
+    try std.testing.expect(reader.next() == .none);
+    reader.inject("A");
+    try expectKey(reader.next(), .up);
 }
 
 fn expectKey(ev: Event, expected: editor.Key) !void {

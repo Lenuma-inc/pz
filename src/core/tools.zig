@@ -132,6 +132,8 @@ pub const Call = struct {
         cmd: []const u8,
         cwd: ?[]const u8 = null,
         env: []const Env = &.{},
+        sandbox_permissions: enum { use_default, require_escalated } = .use_default,
+        justification: ?[]const u8 = null,
     };
 
     pub const EditArgs = struct {
@@ -175,6 +177,7 @@ pub const Call = struct {
             question: []const u8,
             options: []const Option,
             allow_other: bool = true,
+            review: ?[]const u8 = null,
         };
 
         pub const Option = struct {

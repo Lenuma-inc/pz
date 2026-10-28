@@ -58,6 +58,8 @@ const bash_params = [_]tools.Tool.Param{
     .{ .name = "cmd", .ty = .string, .required = true, .desc = "Shell command" },
     .{ .name = "cwd", .ty = .string, .required = false, .desc = "Working directory" },
     .{ .name = "env", .ty = .string, .required = false, .desc = "Environment variables (KEY=VALUE, one per line)" },
+    .{ .name = "sandbox_permissions", .ty = .string, .required = false, .desc = "use_default (default): read disk, write workspace and /tmp, no network. For sandbox permission or network failures, retry with require_escalated and justification; the harness asks the user before running outside the sandbox. Never retry after approval is denied." },
+    .{ .name = "justification", .ty = .string, .required = false, .desc = "Required for require_escalated: explain why this command needs access outside the sandbox" },
 };
 
 const edit_params = [_]tools.Tool.Param{
@@ -166,6 +168,7 @@ pub const Opts = struct {
     ask_hook: ?*AskHook = null,
     /// Parent's verified policy hash for agent sandbox inheritance.
     policy_hash: ?[]const u8 = null,
+    sandbox_locked: bool = false,
     home: ?[]const u8 = null,
 };
 
@@ -177,6 +180,7 @@ pub const Runtime = struct {
     agent_hook: ?*agent_tool.Hook,
     ask_hook: ?*AskHook,
     policy_hash: ?[]const u8,
+    sandbox_locked: bool,
     skill_cache: skill.Cache,
     entries: [11]tools.Entry = undefined,
     selected: [11]tools.Entry = undefined,
@@ -191,6 +195,7 @@ pub const Runtime = struct {
             .agent_hook = opts.agent_hook,
             .ask_hook = opts.ask_hook,
             .policy_hash = opts.policy_hash,
+            .sandbox_locked = opts.sandbox_locked,
             .skill_cache = .{ .home = opts.home },
         };
     }
@@ -480,12 +485,50 @@ pub const Runtime = struct {
     }
 
     fn runBash(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
+        if (std.meta.activeTag(call.args) != .bash) return error.KindMismatch;
+        const escalated = call.args.bash.sandbox_permissions == .require_escalated;
+        if (escalated) try self.approveBash(call);
         const h = bash.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
+            .allow_escalation = escalated,
         });
         return h.run(call, sink);
+    }
+
+    fn approveBash(self: *Runtime, call: tools.Call) !void {
+        // An interactive grant cannot override a verified policy.
+        if (self.sandbox_locked) return error.PolicyDenied;
+        const args = call.args.bash;
+        const reason = args.justification orelse return error.InvalidArgs;
+        if (std.mem.trim(u8, reason, " \t\r\n").len == 0 or args.cmd.len == 0) return error.InvalidArgs;
+        if (call.cancel) |cancel| if (cancel.isCanceled()) return error.ApprovalDenied;
+        const hook = self.ask_hook orelse return error.ApprovalRequired;
+        const details = try std.json.Stringify.valueAlloc(self.alloc, args, .{});
+        defer self.alloc.free(details);
+        const question = try std.fmt.allocPrint(self.alloc, "{s}\nRun outside the sandbox with your filesystem and network access?\n{s}", .{ reason, details });
+        defer self.alloc.free(question);
+        const raw = try hook.run(.{ .questions = &.{.{
+            .id = "sandbox",
+            .header = "Sandbox",
+            .question = "Run this command outside the sandbox? Review the command in the transcript.",
+            .review = question,
+            .options = &.{ .{ .label = "Approve once" }, .{ .label = "Deny" } },
+            .allow_other = false,
+        }} });
+        defer self.alloc.free(raw);
+        const Reply = struct {
+            cancelled: bool,
+            answers: []const struct { id: []const u8, answer: []const u8, index: usize },
+        };
+        const reply = try std.json.parseFromSlice(Reply, self.alloc, raw, .{});
+        defer reply.deinit();
+        if (call.cancel) |cancel| if (cancel.isCanceled()) return error.ApprovalDenied;
+        if (reply.value.cancelled or reply.value.answers.len != 1) return error.ApprovalDenied;
+        const answer = reply.value.answers[0];
+        if (!std.mem.eql(u8, answer.id, "sandbox") or answer.index != 0 or
+            !std.mem.eql(u8, answer.answer, "Approve once")) return error.ApprovalDenied;
     }
 
     fn runEdit(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
@@ -770,6 +813,55 @@ fn snapAskResult(alloc: std.mem.Allocator, res: tools.Result) !AskResultSnap {
 
 fn freeAskResultSnap(alloc: std.mem.Allocator, snap: AskResultSnap) void {
     alloc.free(snap.out);
+}
+
+test "bash escalation requires an explicit matching interactive grant" {
+    const Ask = struct {
+        ask_hook: AskHook = .{ .vt = &AskHook.Bind(@This(), run).vt },
+        raw: []const u8 = "",
+        seen: usize = 0,
+
+        fn run(self: *@This(), args: tools.Call.AskArgs) ![]u8 {
+            self.seen += 1;
+            const q = args.questions[0];
+            try std.testing.expect(!q.allow_other);
+            try std.testing.expect(std.mem.indexOf(u8, q.review.?, "printf approved") != null);
+            try std.testing.expectEqualStrings("Approve once", q.options[0].label);
+            return std.testing.allocator.dupe(u8, self.raw);
+        }
+    };
+    var ask = Ask{};
+    var rt = Runtime.init(.{ .alloc = std.testing.allocator });
+    defer rt.deinit();
+    const call: tools.Call = .{
+        .id = "escalation",
+        .kind = .bash,
+        .src = .model,
+        .at_ms = 0,
+        .args = .{ .bash = .{ .cmd = "printf approved", .sandbox_permissions = .require_escalated, .justification = "Test command approval" } },
+    };
+    try std.testing.expectError(error.ApprovalRequired, rt.runBash(call, noop.sink()));
+    rt.ask_hook = &ask.ask_hook;
+    const denied = [_][]const u8{
+        "{\"cancelled\":true,\"answers\":[]}",
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"sandbox\",\"answer\":\"Deny\",\"index\":0}]}",
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"other\",\"answer\":\"Approve once\",\"index\":0}]}",
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"sandbox\",\"answer\":\"Deny\",\"index\":1}]}",
+    };
+    for (denied) |raw| {
+        ask.raw = raw;
+        try std.testing.expectError(error.ApprovalDenied, rt.runBash(call, noop.sink()));
+    }
+    ask.raw = "{}";
+    try std.testing.expectError(error.MissingField, rt.approveBash(call));
+    ask.raw = "{\"cancelled\":false,\"answers\":[{\"id\":\"sandbox\",\"answer\":\"Approve once\",\"index\":0}]}";
+    const res = try rt.runBash(call, noop.sink());
+    defer rt.deinitResult(res);
+    try std.testing.expectEqualStrings("approved", res.out[0].chunk);
+    rt.sandbox_locked = true;
+    const seen = ask.seen;
+    try std.testing.expectError(error.PolicyDenied, rt.runBash(call, noop.sink()));
+    try std.testing.expectEqual(seen, ask.seen);
 }
 
 test "builtin runtime registry exposes all core tools" {

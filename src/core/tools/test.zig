@@ -99,6 +99,8 @@ test "tool contract handlers emit deterministic envelopes" {
     defer rd.deinitResult(rd_res);
 
     const wr = @import("write.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 4096,
         .now_ms = 22,
     });
     const wr_call: tools.Call = .{
@@ -425,7 +427,7 @@ test "tool contract handlers deny nested symlink escapes" {
         .at_ms = 0,
     }, sink));
 
-    const wr = @import("write.zig").Handler.init(.{});
+    const wr = @import("write.zig").Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 4096 });
     try std.testing.expectError(error.Denied, wr.run(.{
         .id = "w-deny",
         .kind = .write,

@@ -1314,6 +1314,7 @@ const OwnedAskArgs = struct {
             alloc.free(q.id);
             alloc.free(q.header);
             alloc.free(q.question);
+            if (q.review) |review| alloc.free(review);
             for (q.options) |opt| {
                 alloc.free(opt.label);
                 alloc.free(opt.description);
@@ -1333,6 +1334,7 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
             alloc.free(q.id);
             alloc.free(q.header);
             alloc.free(q.question);
+            if (q.review) |review| alloc.free(review);
             for (q.options) |opt| {
                 alloc.free(opt.label);
                 alloc.free(opt.description);
@@ -1343,6 +1345,8 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
     }
 
     for (args.questions, 0..) |q, i| {
+        const review = if (q.review) |text| try alloc.dupe(u8, text) else null;
+        errdefer if (review) |text| alloc.free(text);
         const opts = try alloc.alloc(core.tools.Call.AskArgs.Option, q.options.len);
         var opt_n: usize = 0;
         errdefer {
@@ -1365,6 +1369,7 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
             .question = try alloc.dupe(u8, q.question),
             .options = opts,
             .allow_other = q.allow_other,
+            .review = review,
         };
         q_n = i + 1;
     }
@@ -1952,7 +1957,11 @@ fn execWithIoTuiHooks(
 
     var provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
     var model_name = resolveDefault(run_cmd.cfg.model);
-    if (run_cmd.cfg.provider_cmd == null and std.mem.eql(u8, run_cmd.cfg.provider, "default")) {
+    if (run_cmd.cfg.provider_cmd != null) {
+        // External providers own the meaning of their configured model names.
+        provider_name = run_cmd.cfg.provider;
+        model_name = run_cmd.cfg.model;
+    } else if (std.mem.eql(u8, run_cmd.cfg.provider, "default")) {
         if (modelProvider(model_name)) |model_provider| {
             provider_name = model_provider;
         } else if (try firstConfiguredNativeProvider(alloc, hooks.auth())) |kind| {
@@ -2058,6 +2067,8 @@ fn execWithIoTuiHooks(
         .alloc = alloc,
         .tool_mask = run_cmd.tool_mask,
         .home = home,
+        .policy_hash = pol.hash(),
+        .sandbox_locked = pol.enforced(),
     });
 
     var sid: []u8 = &.{};
@@ -2280,10 +2291,10 @@ fn runPrint(
         .provider_opts = run_cmd.thinking.toProviderOpts(),
         .max_turns = run_cmd.max_turns,
         .cmd_cache = &cmd_cache,
-        .approval = .{
+        .approval = if (pol.enforced()) .{
             .loc = approval_loc,
             .policy = approval_bind,
-        },
+        } else null,
         .skip_prompt_guard = is_oauth, // OAuth: API rejects <untrusted-input> wrapping
     });
 
@@ -4629,10 +4640,10 @@ fn isAbsoluteMp4Prompt(line: []const u8) bool {
 }
 
 test "absolute MP4 paths are treated as prompts, not slash commands" {
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/Video_2026-10-23_01-29-25.mp4"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.MP4"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.mp4 summarize this"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/barry/clip.mp4, inspect it"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/video.mp4"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.MP4"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.mp4 summarize this"));
+    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.mp4, inspect it"));
     try std.testing.expect(!isAbsoluteMp4Prompt("/help"));
 }
 
@@ -7606,8 +7617,8 @@ const TurnCtx = struct {
             .cancel = self.cancel,
             .abort_slot = self.abort_slot,
             .cmd_cache = self.cmd_cache,
-            .approval = if (self.approval_loc) |loc| .{
-                .loc = loc,
+            .approval = if (self.pol.enforced() and self.approval_loc != null) .{
+                .loc = self.approval_loc.?,
                 .policy = self.approval_bind,
             } else null,
             .approver = self.approver,
@@ -10563,7 +10574,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.buffered(), "skill blocked: /release") != null);
 }
 
-test "TurnCtx.run binds approval context for destructive tools" {
+test "TurnCtx.run allows ordinary workspace writes without approval" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -10692,8 +10703,11 @@ test "TurnCtx.run binds approval context for destructive tools" {
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
         \\[]u8
-        \\  "cached=false sid=sid-rt cwd_match=true policy_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\  "cached=true sid= cwd_match=false policy_hash="
     ).expectEqual(snap);
+    const written = try tmp.dir.readFileAlloc(std.testing.io, "out.txt", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(written);
+    try std.testing.expectEqualStrings("hello", written);
 }
 
 test "handleSlashCommand blocks builtins under verified policy" {

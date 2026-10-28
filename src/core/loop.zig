@@ -1237,8 +1237,16 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
             .id = try opts.alloc.dupe(u8, tc.id),
             .output = if (run_err == error.TooLarge)
                 try opts.alloc.dupe(u8, "tool-failed:TooLarge (input exceeds the tool limit; read a smaller range or split the operation)")
+            else if (run_err == error.Denied)
+                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. For bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.", .{@errorName(run_err)})
             else
-                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. If this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim the command succeeded.", .{@errorName(run_err)}),
+                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. {s}", .{ @errorName(run_err), switch (run_err) {
+                    error.NotFound => "The file, parent directory, or executable does not exist. Check the path or create the parent directory; network approval does not fix this.",
+                    error.PolicyMismatch => "The child agent policy handshake failed. Report the configuration failure; user network approval cannot override it.",
+                    error.ApprovalRequired => "This action requires interactive approval, which is unavailable in this mode.",
+                    error.ApprovalDenied, error.PolicyDenied => "Access was denied. Do not retry this action or request the same permission again.",
+                    else => "Inspect the failure and correct its cause; do not assume it is a sandbox or network restriction.",
+                } }),
             .is_err = true,
         };
     };
@@ -1362,7 +1370,13 @@ fn joinFailedChunks(alloc: std.mem.Allocator, out: []const tools.Output, msg: []
     }
     try buf.appendSlice(alloc, "error: ");
     try buf.appendSlice(alloc, msg);
-    try buf.appendSlice(alloc, "\nIf this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim success.");
+    const markers = [_][]const u8{ "Permission denied", "Operation not permitted", "Read-only file system", "Network is unreachable" };
+    for (markers) |marker| {
+        if (std.ascii.findIgnoreCase(buf.items, marker) != null) {
+            try buf.appendSlice(alloc, "\nFor bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.");
+            break;
+        }
+    }
     return buf.toOwnedSlice(alloc);
 }
 
@@ -1373,7 +1387,17 @@ test "failed tool output keeps stdout stderr and error message" {
     };
     const joined = try joinFailedChunks(std.testing.allocator, &out, "bash exited non-zero");
     defer std.testing.allocator.free(joined);
-    try std.testing.expectEqualStrings("stdout:\npartial result\nstderr:\ncommand detail\nerror: bash exited non-zero\nIf this is an environment permission or sandbox restriction, stop retrying and use ask to request user approval; do not claim success.", joined);
+    try std.testing.expectEqualStrings("stdout:\npartial result\nstderr:\ncommand detail\nerror: bash exited non-zero", joined);
+}
+
+test "sandbox guidance is limited to permission failures" {
+    const out = [_]tools.Output{.{ .call_id = "c", .seq = 0, .at_ms = 0, .stream = .stderr, .chunk = "Read-only file system" }};
+    const joined = try joinFailedChunks(std.testing.allocator, &out, "bash exited non-zero");
+    defer std.testing.allocator.free(joined);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "sandbox_permissions=require_escalated") != null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidToolArgs, parseCallArgs(arena.allocator(), .bash, "{\"cmd\":\"true\",\"network\":true}"));
 }
 
 fn freeToolOut(alloc: std.mem.Allocator, res: tools.Result) void {
@@ -1445,7 +1469,7 @@ fn parseArgs(
     raw: []const u8,
 ) Err!T {
     return std.json.parseFromSliceLeaky(T, alloc, raw, .{
-        .ignore_unknown_fields = true,
+        .ignore_unknown_fields = T != tools.Call.BashArgs,
     }) catch |parse_err| switch (parse_err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidToolArgs,

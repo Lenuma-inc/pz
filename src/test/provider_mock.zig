@@ -8,9 +8,7 @@ fn errnoError(rc: isize) !void {
 }
 
 fn fdRead(fd: std.posix.fd_t, buf: []u8) !usize {
-    const rc = std.c.read(fd, buf.ptr, buf.len);
-    if (rc < 0) return std.posix.unexpectedErrno(std.posix.errno(rc));
-    return @intCast(rc);
+    return std.posix.read(fd, buf);
 }
 
 fn fdWrite(fd: std.posix.fd_t, bytes: []const u8) !usize {

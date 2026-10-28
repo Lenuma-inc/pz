@@ -30,6 +30,7 @@ pub const Opts = struct {
     max_bytes: usize,
     now_ms: i64 = 0,
     runner: ?*Runner = null,
+    allow_escalation: bool = false,
 };
 
 const Launch = struct {
@@ -68,6 +69,7 @@ pub const Handler = struct {
     max_bytes: usize,
     now_ms: i64,
     runner: ?*Runner,
+    allow_escalation: bool,
 
     pub fn init(opts: Opts) Handler {
         return .{
@@ -75,6 +77,7 @@ pub const Handler = struct {
             .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
             .runner = opts.runner,
+            .allow_escalation = opts.allow_escalation,
         };
     }
 
@@ -84,6 +87,8 @@ pub const Handler = struct {
 
         const args = call.args.bash;
         if (args.cmd.len == 0) return error.InvalidArgs;
+        const escalated = args.sandbox_permissions == .require_escalated;
+        if (escalated and !self.allow_escalation) return error.Denied;
 
         if (args.cwd) |cwd| {
             if (cwd.len == 0) return error.InvalidArgs;
@@ -113,7 +118,13 @@ pub const Handler = struct {
             if (policy.isProtectedPath(cwd)) return error.Denied;
         }
 
-        var launch_plan = try sandbox.prepareBash(self.alloc, &env, args.cwd, args.cmd);
+        if (!escalated) {
+            env.put("TMPDIR", "/tmp") catch return error.OutOfMemory;
+            env.put("XDG_CACHE_HOME", "/tmp/pz-cache") catch return error.OutOfMemory;
+            env.put("UV_CACHE_DIR", "/tmp/pz-cache/uv") catch return error.OutOfMemory;
+            env.put("ZIG_GLOBAL_CACHE_DIR", "/tmp/pz-cache/zig") catch return error.OutOfMemory;
+        }
+        var launch_plan = try sandbox.prepareBash(self.alloc, &env, args.cwd, args.cmd, escalated);
         defer launch_plan.deinit(self.alloc);
 
         const launch: Launch = .{
@@ -821,15 +832,9 @@ test "bash handler installs sandbox before bash exec" {
     } else if (builtin.os.tag == .linux) {
         try std.testing.expect(std.mem.endsWith(u8, argv[0], "/bwrap"));
         try std.testing.expect(hasArg(argv, "--ro-bind"));
-        try std.testing.expect(hasArg(argv, "--tmpfs"));
+        try std.testing.expect(hasArg(argv, "--die-with-parent"));
         try std.testing.expect(hasArg(argv, "/"));
         try std.testing.expect(hasArg(argv, root));
-        for (0..argv.len - 2) |i| {
-            if (std.mem.eql(u8, argv[i], "--ro-bind")) {
-                try std.testing.expect(!std.mem.eql(u8, argv[i + 1], "/"));
-                try std.testing.expect(!std.mem.eql(u8, argv[i + 2], "/"));
-            }
-        }
         try std.testing.expect(hasArg(argv, "--unshare-net"));
         try std.testing.expect(hasArg(argv, root));
         try std.testing.expectEqualStrings(sub, argv[argv.len - 7]);
@@ -923,12 +928,21 @@ test "bash handler returns failed final on signal exit" {
         failed.msg,
     });
     defer std.testing.allocator.free(snap);
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "out=0
-        \\failed=null|exec|bash terminated by signal
-        \\"
-    ).expectEqual(snap);
+    if (builtin.os.tag == .linux) {
+        try oh.snap(@src(),
+            \\[]u8
+            \\  "out=0
+            \\failed=143|exec|bash exited non-zero
+            \\"
+        ).expectEqual(snap);
+    } else {
+        try oh.snap(@src(),
+            \\[]u8
+            \\  "out=0
+            \\failed=null|exec|bash terminated by signal
+            \\"
+        ).expectEqual(snap);
+    }
 }
 
 test "bash handler returns invalid args on empty command" {
@@ -1049,7 +1063,8 @@ test "bash handler denies wrapped protected state access" {
     try std.testing.expectError(error.Denied, handler.run(call, sink));
 }
 
-test "bash handler denies file reads outside workspace inside sandbox" {
+test "bash handler reads files outside workspace in Linux workspace sandbox" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
@@ -1092,14 +1107,14 @@ test "bash handler denies file reads outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-file-deny|0|stdout|false|denied
-        \\
+        \\0=b-file-deny|0|stdout|false|leaked
         \\final=ok|0
         \\"
     ).expectEqual(snap);
 }
 
-test "bash handler denies process exec outside workspace inside sandbox" {
+test "bash handler executes programs outside workspace in Linux workspace sandbox" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
     var tmp = std.testing.tmpDir(.{});
@@ -1148,11 +1163,38 @@ test "bash handler denies process exec outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-proc-deny|0|stdout|false|denied
-        \\
+        \\0=b-proc-deny|0|stdout|false|noperan
         \\final=ok|0
         \\"
     ).expectEqual(snap);
+}
+
+test "bash handler refuses escalation without a trusted grant" {
+    const h = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
+    try std.testing.expectError(error.Denied, h.run(.{
+        .id = "no-grant",
+        .kind = .bash,
+        .src = .model,
+        .at_ms = 0,
+        .args = .{ .bash = .{ .cmd = "true", .sandbox_permissions = .require_escalated, .justification = "Please allow" } },
+    }, noop.sink()));
+}
+
+test "Linux workspace sandbox blocks outside writes and uses writable caches" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const outside = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, "README.md", std.testing.allocator);
+    defer std.testing.allocator.free(outside);
+    var cwd = try @import("path_guard.zig").CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    // Opening with append tests write permission without changing file contents.
+    const cmd = try std.fmt.allocPrint(std.testing.allocator, "if ( : >> '{s}' ) 2>/dev/null; then exit 99; fi; mkdir -p \"$UV_CACHE_DIR\" \"$ZIG_GLOBAL_CACHE_DIR\"; test -w \"$XDG_CACHE_HOME\" && test -w \"$TMPDIR\" && printf isolated", .{outside});
+    defer std.testing.allocator.free(cmd);
+    const h = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
+    const res = try h.run(.{ .id = "workspace-write", .kind = .bash, .src = .model, .at_ms = 0, .args = .{ .bash = .{ .cmd = cmd } } }, noop.sink());
+    defer h.deinitResult(res);
+    try std.testing.expectEqualStrings("isolated", res.out[0].chunk);
 }
 
 test "bash handler denies network connects inside sandbox" {
@@ -1234,7 +1276,7 @@ test "bash handler denies network connects inside sandbox" {
         \\start=0
         \\end=0
         \\out=0
-        \\final=failed|exec|bash exited non-zero|.{ 1 }
+        \\final=failed|exec|bash exited non-zero|1
         \\"
     ).expectEqual(snap);
 }
@@ -1460,8 +1502,12 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
 
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
     const bg_pid = try std.fmt.parseInt(std.posix.pid_t, res.out[0].chunk, 10);
-    defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {}; // test: error irrelevant
-    try WaitGone.run(bg_pid);
+    // On Linux the reported PID belongs to the private namespace. Returning
+    // after cancellation already proves all inherited stdout/stderr pipes closed.
+    if (builtin.os.tag != .linux) {
+        defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {}; // test cleanup
+        try WaitGone.run(bg_pid);
+    }
     try oh.snap(@src(),
         \\core.tools.bash.test.bash handler cancels running child and reaps TERM-resistant process.Snap
         \\  .stream: core.tools.Output.Stream

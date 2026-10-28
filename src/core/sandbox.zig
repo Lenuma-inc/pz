@@ -29,14 +29,12 @@ pub const BashPlan = struct {
     profile: ?[]u8 = null,
     workspace: ?[]u8 = null,
     bwrap: ?[]u8 = null,
-    exec_roots: ?[][]u8 = null,
 
     pub fn deinit(self: *BashPlan, alloc: std.mem.Allocator) void {
         alloc.free(self.argv);
         if (self.profile) |profile| alloc.free(profile);
         if (self.workspace) |workspace| alloc.free(workspace);
         if (self.bwrap) |bwrap| alloc.free(bwrap);
-        if (self.exec_roots) |roots| freeRoots(alloc, roots);
         if (self.cwd) |cwd| alloc.free(cwd);
         self.* = undefined;
     }
@@ -47,6 +45,7 @@ pub fn prepareBash(
     env: *const std.process.Environ.Map,
     raw_cwd: ?[]const u8,
     cmd: []const u8,
+    escalated: bool,
 ) Err!BashPlan {
     const root = std.Io.Dir.cwd().realPathFileAlloc(sys.io, ".", alloc) catch |err| return mapFsErr(err);
     defer alloc.free(root);
@@ -57,7 +56,13 @@ pub fn prepareBash(
         const base = cwd.?;
         cwd = null;
         alloc.free(base);
-        cwd = try resolveCwd(alloc, root, path);
+        cwd = try resolveCwd(alloc, root, path, !escalated);
+    }
+
+    if (escalated) {
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
+        const argv = try alloc.dupe([]const u8, &.{ "/bin/bash", "--noprofile", "--norc", "-lc", cmd });
+        return .{ .argv = argv, .cwd = cwd };
     }
 
     if (builtin.os.tag == .linux) return prepareLinuxBash(alloc, env, root, cwd.?, cmd);
@@ -101,28 +106,7 @@ fn prepareLinuxBash(
     errdefer alloc.free(workspace);
     var args: std.ArrayList([]const u8) = .empty;
     errdefer args.deinit(alloc);
-    try args.appendSlice(alloc, &.{ bwrap, "--tmpfs", "/" });
-    const system_dirs = [_][]const u8{ "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc" };
-    for (system_dirs) |path| {
-        const source = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => continue,
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.Io,
-        };
-        alloc.free(source);
-        try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
-    }
-    try args.appendSlice(alloc, &.{ "--tmpfs", "/tmp", "--dev", "/dev", "--proc", "/proc" });
-
-    const exec_roots = try collectLinuxPathRoots(alloc, env);
-    errdefer freeRoots(alloc, exec_roots);
-    for (exec_roots) |path| {
-        if (isWithin(root, path) or isWithin("/usr", path) or isWithin("/bin", path) or
-            isWithin("/sbin", path) or isWithin("/lib", path) or isWithin("/lib64", path) or isWithin("/etc", path)) continue;
-        try appendParents(alloc, &args, path);
-        try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
-    }
-    try appendParents(alloc, &args, root);
+    try args.appendSlice(alloc, &.{ bwrap, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--dev", "/dev", "--proc", "/proc" });
     try args.appendSlice(alloc, &.{ "--bind", workspace, workspace, "--unshare-net", "--chdir", cwd, "--", "/bin/bash", "--noprofile", "--norc", "-lc", cmd });
     const argv = try args.toOwnedSlice(alloc);
     errdefer alloc.free(argv);
@@ -132,31 +116,7 @@ fn prepareLinuxBash(
         .cwd = cwd,
         .workspace = workspace,
         .bwrap = bwrap,
-        .exec_roots = exec_roots,
     };
-}
-
-fn collectLinuxPathRoots(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) Err![][]u8 {
-    var roots = std.ArrayList([]u8).empty;
-    errdefer {
-        for (roots.items) |path| alloc.free(path);
-        roots.deinit(alloc);
-    }
-    if (env.get("PATH")) |path_env| {
-        var it = std.mem.splitScalar(u8, path_env, ':');
-        while (it.next()) |path| {
-            if (path.len != 0) try pushPathRoot(alloc, &roots, path);
-        }
-    }
-    return try roots.toOwnedSlice(alloc);
-}
-
-fn appendParents(alloc: std.mem.Allocator, args: *std.ArrayList([]const u8), path: []const u8) Err!void {
-    var start: usize = 1;
-    while (std.mem.indexOfScalarPos(u8, path, start, '/')) |slash| {
-        try args.appendSlice(alloc, &.{ "--dir", path[0..slash] });
-        start = slash + 1;
-    }
 }
 
 fn resolveBwrap(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) Err![]u8 {
@@ -177,10 +137,10 @@ fn resolveBwrap(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) E
     return error.NotFound;
 }
 
-fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8) Err![]const u8 {
+fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8, confined: bool) Err![]const u8 {
     const resolved_z = std.Io.Dir.cwd().realPathFileAlloc(sys.io, path, alloc) catch |err| return mapFsErr(err);
     defer alloc.free(resolved_z);
-    if (!isWithin(root, resolved_z)) return error.Denied;
+    if (confined and !isWithin(root, resolved_z)) return error.Denied;
     return alloc.dupe(u8, resolved_z) catch return error.OutOfMemory;
 }
 
@@ -389,7 +349,7 @@ test "prepareBash rejects unsupported platforms" {
     if (builtin.os.tag == .macos or builtin.os.tag == .linux) return error.SkipZigTest;
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
-    try std.testing.expectError(error.UnsupportedPlatform, prepareBash(std.testing.allocator, &env, null, "true"));
+    try std.testing.expectError(error.UnsupportedPlatform, prepareBash(std.testing.allocator, &env, null, "true", false));
 }
 
 test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace" {
@@ -406,7 +366,7 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
     defer env.deinit();
     try env.put("PATH", "/opt/homebrew/bin:/usr/bin:/bin");
 
-    var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok");
+    var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok", false);
     defer plan.deinit(std.testing.allocator);
 
     const root = try tmp.dir.realPathFileAlloc(sys.io, ".", std.testing.allocator);
@@ -450,7 +410,7 @@ test "prepareBash builds a Linux bubblewrap workspace sandbox" {
     defer std.testing.allocator.free(root);
     try env.put("HOME", root);
 
-    var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok");
+    var plan = try prepareBash(std.testing.allocator, &env, "sub", "printf ok", false);
     defer plan.deinit(std.testing.allocator);
 
     const sub = try tmp.dir.realPathFileAlloc(sys.io, "sub", std.testing.allocator);
@@ -458,15 +418,10 @@ test "prepareBash builds a Linux bubblewrap workspace sandbox" {
 
     try std.testing.expect(std.mem.startsWith(u8, plan.argv[0], bin));
     try std.testing.expect(hasArg(plan.argv, "--ro-bind"));
-    try std.testing.expect(hasArg(plan.argv, "--tmpfs"));
-    try std.testing.expectEqualStrings("/", plan.argv[2]);
+    try std.testing.expectEqualStrings("--ro-bind", plan.argv[3]);
+    try std.testing.expectEqualStrings("/", plan.argv[4]);
+    try std.testing.expectEqualStrings("/", plan.argv[5]);
     try std.testing.expect(!hasArg(plan.argv, "/run/pz/workspace"));
-    for (0..plan.argv.len - 2) |i| {
-        if (std.mem.eql(u8, plan.argv[i], "--ro-bind")) {
-            try std.testing.expect(!std.mem.eql(u8, plan.argv[i + 1], "/"));
-            try std.testing.expect(!std.mem.eql(u8, plan.argv[i + 2], "/"));
-        }
-    }
     try std.testing.expect(hasArg(plan.argv, root));
     try std.testing.expect(hasArg(plan.argv, "--unshare-net"));
     try std.testing.expectEqualStrings(sub, plan.argv[plan.argv.len - 7]);
@@ -500,7 +455,7 @@ test "prepareBash denies cwd escapes" {
     defer env.deinit();
     try env.put("PATH", "/usr/bin:/bin");
 
-    try std.testing.expectError(error.Denied, prepareBash(std.testing.allocator, &env, "escape", "true"));
+    try std.testing.expectError(error.Denied, prepareBash(std.testing.allocator, &env, "escape", "true", false));
 }
 
 test "scrubEnv removes sensitive keys and preserves others" {

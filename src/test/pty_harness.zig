@@ -200,9 +200,9 @@ fn mapWaitStatus(status: c_int) std.process.Child.Term {
     return if (c.WIFEXITED(status))
         .{ .exited = @intCast(c.WEXITSTATUS(status)) }
     else if (c.WIFSIGNALED(status))
-        .{ .signal = @fromBackingInt(@intCast(c.WTERMSIG(status))) }
+        .{ .signal = @enumFromInt(c.WTERMSIG(status)) }
     else if (c.WIFSTOPPED(status))
-        .{ .stopped = @fromBackingInt(@intCast(c.WSTOPSIG(status))) }
+        .{ .stopped = @enumFromInt(c.WSTOPSIG(status)) }
     else
         .{ .unknown = @intCast(status) };
 }
@@ -2885,6 +2885,89 @@ test "PTY walkthrough: tool call renders" {
     // The snapshot should show the bash tool was invoked.
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "bash") != null or
         std.mem.indexOf(u8, out.output, "bash") != null);
+}
+
+test "PTY sandbox escalation requires keyboard approval before running" {
+    for ([_]bool{ false, true }) |allow| {
+        const alloc = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+        const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+        defer alloc.free(cwd);
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+        defer alloc.free(home);
+        var env = try baseEnv(alloc, home);
+        defer env.deinit();
+        const provider =
+            "req=$(cat); case \"$req\" in *tool_result*) " ++
+            "printf 'text:ESCALATIONDONE\\nstop:done\\n';; *) " ++
+            "printf 'tool_call:c1|bash|{\"cmd\":\"printf approved > approval-marker\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test sandbox approval\"}\\nstop:tool\\n';; esac";
+        const steps = [_]InteractiveStep{
+            .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+            .{ .inject = "run the approval test\n" },
+            .{ .wait_for = .{ .text = "Approve once", .timeout_ms = 10000 } },
+            .{ .inject = if (allow) "\r\x1b[B\x1b[B\r" else "\x1b" },
+            .{ .wait_for = .{ .text = "ESCALATIONDONE", .timeout_ms = 10000 } },
+            .{ .inject = "\x03\x03" },
+            .{ .sleep = 500 },
+        };
+        var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session", "--provider-cmd", provider }, &steps);
+        defer out.deinit(alloc);
+        if (!allow) {
+            try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "approval-marker", .{}));
+            continue;
+        }
+        const marker = try tmp.dir.readFileAlloc(std.testing.io, "approval-marker", alloc, .limited(64));
+        defer alloc.free(marker);
+        try std.testing.expectEqualStrings("approved", marker);
+    }
+}
+
+test "PTY sandbox tools share tmp and continue without another prompt" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    const scratch = try std.fmt.allocPrint(alloc, "/tmp/pz-pty-chain-{d}", .{std.os.linux.getpid()});
+    defer alloc.free(scratch);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, scratch) catch {}; // test cleanup
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    try env.put("PZ_SMOKE_DIR", scratch);
+    const provider =
+        \\cat >/dev/null
+        \\n=$(cat provider-step 2>/dev/null || printf 0)
+        \\printf '%s' "$((n + 1))" > provider-step
+        \\case "$n" in
+        \\0) printf 'tool_call:c0|bash|{"cmd":"mkdir -p $PZ_SMOKE_DIR"}\nstop:tool\n';;
+        \\1) printf 'tool_call:c1|write|{"path":"%s/probe","text":"pending"}\nstop:tool\n' "$PZ_SMOKE_DIR";;
+        \\2) printf 'tool_call:c2|read|{"path":"%s/probe"}\nstop:tool\n' "$PZ_SMOKE_DIR";;
+        \\3) printf 'tool_call:c3|edit|{"path":"%s/probe","old":"pending","new":"done"}\nstop:tool\n' "$PZ_SMOKE_DIR";;
+        \\4) printf 'tool_call:c4|bash|{"cmd":"test -r $PZ_SMOKE_DIR/probe"}\nstop:tool\n';;
+        \\*) printf 'text:CHAINCOMPLETE\nstop:done\n';;
+        \\esac
+    ;
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "check tools in a temporary directory\n" },
+        .{ .wait_for = .{ .text = "CHAINCOMPLETE", .timeout_ms = 15000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session", "--provider-cmd", provider }, &steps);
+    defer out.deinit(alloc);
+    const file_path = try std.fs.path.join(alloc, &.{ scratch, "probe" });
+    defer alloc.free(file_path);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, alloc, .limited(64));
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("done", contents);
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "Approval required") == null);
 }
 
 test "PTY walkthrough: compaction after response" {
