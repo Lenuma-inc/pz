@@ -223,6 +223,19 @@ fn tokenizeGeneric(line: []const u8, buf: []Token) []const Token {
         if (isIdentStart(line[i])) {
             i += 1;
             while (i < line.len and isIdentChar(line[i])) : (i += 1) {}
+        } else if (line[i] >= 0x80) {
+            const seq_len = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
+            if (i + seq_len <= line.len) {
+                _ = std.unicode.utf8Decode(line[i .. i + seq_len]) catch {
+                    i += 1;
+                    buf[n] = .{ .start = start, .end = i, .kind = .text };
+                    n += 1;
+                    continue;
+                };
+                i += seq_len;
+            } else {
+                i += 1;
+            }
         } else {
             i += 1;
         }
@@ -781,6 +794,15 @@ test "unknown lang uses generic tokenizer" {
         \\7|text|10..11|" "
         \\8|number|11..13|"42""
     , line, toks);
+}
+
+test "generic tokenizer keeps utf8 codepoints in one token" {
+    var buf: [16]Token = undefined;
+    const line = "path → target";
+    const toks = tokenize(line, .unknown, &buf);
+    for (toks) |tok| {
+        _ = try std.unicode.Utf8View.init(line[tok.start..tok.end]);
+    }
 }
 
 test "zig: multi-token statement" {
