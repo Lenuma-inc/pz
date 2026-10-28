@@ -335,6 +335,7 @@ const SnapEv = union(enum) {
         is_err: bool,
     };
 
+    message: providers.Message,
     text: []const u8,
     thinking: []const u8,
     tool_call: ToolCall,
@@ -348,6 +349,7 @@ fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Event) ![]SnapEv {
     var out = std.ArrayList(SnapEv).empty;
     defer out.deinit(alloc);
     for (evs) |ev| switch (ev) {
+        .message => |msg| try out.append(alloc, .{ .message = msg }),
         .text => |text| try out.append(alloc, .{ .text = text }),
         .thinking => |text| try out.append(alloc, .{ .thinking = text }),
         .tool_call => |call| try out.append(alloc, .{ .tool_call = .{

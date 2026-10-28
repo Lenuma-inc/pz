@@ -12,6 +12,7 @@ pub const Event = struct {
     },
 
     pub const Data = union(Tag) {
+        message: @import("../providers/api.zig").Message,
         noop: void,
         prompt: Text,
         text: Text,
@@ -24,6 +25,7 @@ pub const Event = struct {
     };
 
     pub const Tag = enum {
+        message,
         noop,
         prompt,
         text,
@@ -60,6 +62,7 @@ pub const Event = struct {
     };
 
     pub const Stop = struct {
+        end_turn: ?bool = null,
         reason: StopReason,
     };
 
@@ -114,6 +117,7 @@ pub const Event = struct {
                 const out = try alloc.dupe(u8, tr.output);
                 break :blk .{ .tool_result = .{ .id = id, .output = out, .is_err = tr.is_err } };
             },
+            .message => |m| .{ .message = m },
             .usage => |u| .{ .usage = u },
             .stop => |s| .{ .stop = s },
             .err => |t| .{
@@ -124,7 +128,7 @@ pub const Event = struct {
 
     fn freeData(alloc: std.mem.Allocator, data: Data) void {
         switch (data) {
-            .noop, .usage, .stop => {},
+            .noop, .message, .usage, .stop => {},
             .prompt, .text, .thinking, .err => |t| alloc.free(t.text),
             .tool_call => |tc| {
                 alloc.free(tc.id);
@@ -180,6 +184,7 @@ fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!E
                 .is_err = tr.is_err,
             },
         },
+        .message => |m| .{ .message = m },
         .usage => |u| .{ .usage = u },
         .stop => |s| .{ .stop = s },
         .err => |t| .{

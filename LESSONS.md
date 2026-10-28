@@ -2,7 +2,24 @@
 
 Hard-won patterns and anti-patterns from building pz. **Update this file at the end of every session** with new discoveries.
 
+## Session Notes (2026-10-29)
+
+### Do More
+- Reproduce long SSE failures with valid raw chunked HTTP; test lines larger than the transfer buffer across multiple chunk sizes.
+- Clear `AbortSlot` before destroying its stream on every exit path; test a stream error followed by cancellation/quit.
+- Unwrap SSE `ReadFailed` through HTTP `bodyErr()` and connection `getReadError()` before reporting it to users.
+- Preserve message phase and boundaries through session replay and both OpenAI authentication modes; test fragmented text and explicit `end_turn: false`.
+
+### Do Not Do
+- Use Zig 0.16 `Reader.takeDelimiter` on chunked HTTP bodies: its full-buffer failing-writer probe can consume the next chunk header without updating decoder state. Use buffered scanning plus `streamDelimiter` from the outset.
+- Treat echoed AGENTS text in Responses metadata as proof of memory corruption; validate the raw HTTP framing independently.
+- Leave an abort callback pointing at a destroyed stream after `next()` fails; TUI shutdown will call it again.
+- Search raw ANSI output for rendered sentences; inspect the frame/vscreen because styling can split the bytes.
+
 ## Session Notes (2026-10-28)
+
+- When diagnosing silent turn endings, correlate session `tool_result`, `usage`, and `stop` events; missing terminal events support an incomplete stream but do not identify its transport cause. Keep child RPC EOF separate from provider SSE EOF.
+- Preserve Responses assistant message boundaries and `phase` through streaming, history, replay, and request serialization; text deltas alone lose commentary/final semantics. Compare `end_turn` and terminal SSE validation with native Codex before blaming model autonomy.
 
 ### Do More
 - Exercise signal draining with a real pending, thread-directed signal and verify the next read returns `WouldBlock`.

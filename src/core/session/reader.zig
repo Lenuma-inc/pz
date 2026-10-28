@@ -239,7 +239,7 @@ test "jsonl replay preserves event stream exactly" {
         \\    [2]: []u8
         \\      "{"version":1,"at_ms":3,"data":{"usage":{"in_tok":11,"out_tok":7,"tot_tok":18,"cache_read":0,"cache_write":0}}}"
         \\    [3]: []u8
-        \\      "{"version":1,"at_ms":4,"data":{"stop":{"reason":"done"}}}"
+        \\      "{"version":1,"at_ms":4,"data":{"stop":{"end_turn":null,"reason":"done"}}}"
     ).expectEqual(ReplaySnap{ .rows = rows.items });
 }
 

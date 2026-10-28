@@ -217,6 +217,7 @@ pub const Panels = struct {
 
     pub fn append(self: *Panels, ev: core.providers.Event) EventError!void {
         switch (ev) {
+            .message => {},
             .text, .thinking => {
                 if (!isTerminal(self.run_state)) self.run_state = .streaming;
             },
@@ -238,7 +239,7 @@ pub const Panels = struct {
                 self.has_usage = true;
             },
             .stop => |stop| {
-                self.run_state = mapStop(stop.reason);
+                self.run_state = if (stop.end_turn == false) .streaming else mapStop(stop.reason);
                 if (stop.reason == .done or stop.reason == .max_out) self.turns += 1;
             },
             .err => |msg| {

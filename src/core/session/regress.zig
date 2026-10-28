@@ -82,6 +82,7 @@ test "session persistence regression covers compacted replay and retry restore" 
         \\  .tries_done: u16 = 2
         \\  .fail_count: u16 = 1
         \\  .next_wait_ms: u64 = 100
-        \\  .last_err: core.session.retry_state.ErrKind = .transient
+        \\  .last_err: core.session.retry_state.ErrKind
+        \\    .transient
     ).expectEqual(rs);
 }

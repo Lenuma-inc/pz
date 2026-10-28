@@ -220,7 +220,7 @@ pub fn retryLoop(
         try stream.req.connection.?.flush();
 
         stream.response = try stream.req.receiveHead(&stream.redir_buf);
-        const status_int: u16 = @intFromEnum(stream.response.head.status);
+        const status_int: u16 = @intFromEnum(stream.response.?.head.status);
 
         // On 401 without OAuth: no refresh possible, propagate immediately
         if (status_int == 401 and auth.auth != .oauth) break;
@@ -253,7 +253,7 @@ pub fn retryLoop(
 }
 
 pub fn drainResponse(stream: anytype, ar: std.mem.Allocator) error{OutOfMemory}!void {
-    const rdr = stream.response.reader(&stream.transfer_buf);
+    const rdr = stream.response.?.reader(&stream.transfer_buf);
     _ = rdr.allocRemaining(ar, .limited(16384)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {}, // I/O errors acceptable: response body being discarded before retry
@@ -273,14 +273,14 @@ pub fn formatErrBody(
     stream.err_mode = true;
     var decomp: std.http.Decompress = undefined;
     var decomp_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    const rdr = stream.response.readerDecompressing(
+    const rdr = stream.response.?.readerDecompressing(
         &stream.transfer_buf,
         &decomp,
         &decomp_buf,
     );
     const err_body = rdr.allocRemaining(ar, .limited(16384)) catch
         try ar.dupe(u8, "unknown error");
-    const status_int: u16 = @intFromEnum(stream.response.head.status);
+    const status_int: u16 = @intFromEnum(stream.response.?.head.status);
     const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
     const msg = if (extractMsg) |f| (f(safe_body) orelse safe_body) else safe_body;
     const redacted = audit.redactTextAlloc(ar, msg, .@"pub") catch "unknown error";
@@ -317,32 +317,26 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
     while (true) {
         const rdr = self.body_rdr orelse {
             self.done = true;
-            return null;
+            return error.MissingStop;
         };
 
-        const line = rdr.takeDelimiter('\n') catch |err| switch (err) {
-            error.ReadFailed => {
+        // Avoid takeDelimiter's failing-writer probe, which can consume an HTTP chunk header.
+        const buffered = rdr.buffered();
+        const raw_line = if (std.mem.indexOfScalar(u8, buffered, '\n')) |nl| line: {
+            rdr.toss(nl + 1);
+            break :line buffered[0..nl];
+        } else line: {
+            var out = std.Io.Writer.Allocating.init(self.arena.allocator());
+            _ = rdr.streamDelimiter(&out.writer, '\n') catch |err| {
                 self.done = true;
-                return null;
-            },
-            error.StreamTooLong => long_line_result: {
-                var long_line = std.Io.Writer.Allocating.init(self.arena.allocator());
-                _ = rdr.streamDelimiter(&long_line.writer, '\n') catch |stream_err| switch (stream_err) {
-                    error.EndOfStream => {},
-                    error.ReadFailed, error.WriteFailed => {
-                        self.done = true;
-                        return null;
-                    },
+                return switch (err) {
+                    error.EndOfStream => error.MissingStop,
+                    error.ReadFailed => self.readError(),
+                    error.WriteFailed => error.OutOfMemory,
                 };
-                const owned_line = try long_line.toOwnedSlice();
-                if (rdr.seek != rdr.end) rdr.toss(1);
-                break :long_line_result @as(?[]const u8, owned_line);
-            },
-        };
-
-        const raw_line = line orelse {
-            self.done = true;
-            return null;
+            };
+            rdr.toss(1);
+            break :line try out.toOwnedSlice();
         };
 
         const raw = std.mem.trimEnd(u8, raw_line, "\r");
@@ -471,10 +465,10 @@ pub fn SseClient(comptime Cfg: type) type {
             var slp = RealSleeper{ .el = self.el };
             try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, self.cancel);
 
-            if (stream.response.head.status != .ok) {
+            if (stream.response.?.head.status != .ok) {
                 try formatErrBody(stream, ar, extractJsonErrMsg);
             } else {
-                stream.body_rdr = stream.response.reader(&stream.transfer_buf);
+                stream.body_rdr = stream.response.?.reader(&stream.transfer_buf);
             }
 
             return &stream.stream;
@@ -496,7 +490,7 @@ pub fn SseStream(comptime Cfg: type) type {
         io: std.Io,
         arena: std.heap.ArenaAllocator,
         req: std.http.Client.Request,
-        response: std.http.Client.Response,
+        response: ?std.http.Client.Response,
         send_buf: [1024]u8,
         transfer_buf: [16384]u8,
         redir_buf: [0]u8,
@@ -559,7 +553,7 @@ pub fn SseStream(comptime Cfg: type) type {
                 .io = std.Io.failing,
                 .arena = std.heap.ArenaAllocator.init(alloc),
                 .req = undefined,
-                .response = undefined,
+                .response = null,
                 .send_buf = undefined,
                 .transfer_buf = undefined,
                 .redir_buf = .{},
@@ -576,6 +570,14 @@ pub fn SseStream(comptime Cfg: type) type {
                 .pending = null,
                 .ext = Cfg.ext_init(),
             };
+        }
+
+        fn readError(self: *Self) anyerror {
+            if (self.response) |*response| {
+                if (response.bodyErr()) |err| return err;
+                if (self.req.connection) |conn| return conn.getReadError() orelse error.ReadFailed;
+            }
+            return error.ReadFailed;
         }
 
         pub fn next(self: *Self) anyerror!?providers.Event {

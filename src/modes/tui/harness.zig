@@ -1123,3 +1123,40 @@ test "basic tools UI renders patch todo and github calls" {
     }
     try std.testing.expectEqual(@as(usize, 0), ui.panels.runningCount());
 }
+
+test "Responses mock terminal separates commentary from final answer" {
+    var ui = try Ui.init(std.testing.allocator, 60, 12, "test", "openai");
+    defer ui.deinit();
+    try ui.onProvider(.{ .message = .{ .phase = .commentary } });
+    try ui.onProvider(.{ .text = "Checking " });
+    try ui.onProvider(.{ .text = "logs." });
+    try ui.onProvider(.{ .message = .{ .end = true } });
+    try ui.onProvider(.{ .message = .{ .phase = .final_answer } });
+    try ui.onProvider(.{ .text = "Found the cause." });
+    try ui.onProvider(.{ .message = .{ .end = true } });
+    try ui.onProvider(.{ .stop = .{ .reason = .done, .end_turn = true } });
+    try std.testing.expectEqual(@as(usize, 2), ui.tr.count());
+    var raw: [16384]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try ui.draw(&out);
+    const commentary = findAsciiSeqInFrame(&ui.frm, "Checking logs.") orelse return error.TestUnexpectedResult;
+    const final = findAsciiSeqInFrame(&ui.frm, "Found the cause.") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(commentary.y != final.y);
+    const texts = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}", .{ ui.tr.blocks.items[0].text(), ui.tr.blocks.items[1].text() });
+    defer std.testing.allocator.free(texts);
+    try expectSnapText(@src(), "Checking logs.\nFound the cause.", texts);
+}
+
+test "Responses mock terminal renders stream failure explanation" {
+    var ui = try Ui.init(std.testing.allocator, 120, 16, "test", "openai");
+    defer ui.deinit();
+    try ui.onProvider(.{ .text = "PARTIALRESPONSE" });
+    const msg = try @import("../../app/report.zig").fromName(std.testing.allocator, "MissingStop");
+    defer std.testing.allocator.free(msg);
+    try ui.tr.infoText(msg);
+    var raw: [32768]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try ui.draw(&out);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "provider stream ended before its completion event") != null);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "answer is incomplete") != null);
+}

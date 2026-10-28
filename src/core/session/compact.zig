@@ -586,7 +586,7 @@ fn collectSummaryText(alloc: std.mem.Allocator, provider: *providers.Provider, r
         .stop => |stop| if (stop.reason != .done) return error.SummaryFailed,
         .err => return error.SummaryFailed,
         .tool_call, .tool_result => return error.SummaryFailed,
-        .thinking, .usage => {},
+        .message, .thinking, .usage => {},
     };
 
     return try out.toOwnedSlice(alloc);
@@ -667,8 +667,8 @@ test "compaction rewrites stream and preserves semantic events" {
         \\  .version: u16 = 1
         \\  .in_lines: u64 = 5
         \\  .out_lines: u64 = 3
-        \\  .in_bytes: u64 = 252
-        \\  .out_bytes: u64 = 166
+        \\  .in_bytes: u64 = 268
+        \\  .out_bytes: u64 = 182
         \\  .compacted_at_ms: i64 = 777
     ).expectEqual(ck);
 
@@ -683,14 +683,14 @@ test "compaction rewrites stream and preserves semantic events" {
         \\    [1]: []u8
         \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"b"}}}"
         \\    [2]: []u8
-        \\      "{"version":1,"at_ms":5,"data":{"stop":{"reason":"done"}}}"
+        \\      "{"version":1,"at_ms":5,"data":{"stop":{"end_turn":null,"reason":"done"}}}"
         \\  .after: [][]u8
         \\    [0]: []u8
         \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"a"}}}"
         \\    [1]: []u8
         \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"b"}}}"
         \\    [2]: []u8
-        \\      "{"version":1,"at_ms":5,"data":{"stop":{"reason":"done"}}}"
+        \\      "{"version":1,"at_ms":5,"data":{"stop":{"end_turn":null,"reason":"done"}}}"
     ).expectEqual(SessionSnap{
         .before = before,
         .after = after,
@@ -704,8 +704,8 @@ test "compaction rewrites stream and preserves semantic events" {
         \\  .version: u16 = 1
         \\  .in_lines: u64 = 5
         \\  .out_lines: u64 = 3
-        \\  .in_bytes: u64 = 252
-        \\  .out_bytes: u64 = 166
+        \\  .in_bytes: u64 = 268
+        \\  .out_bytes: u64 = 182
         \\  .compacted_at_ms: i64 = 777
     ).expectEqual(loaded);
 }
@@ -1001,8 +1001,8 @@ test "multi-event roundtrip preserves all event types" {
         \\  .version: u16 = 1
         \\  .in_lines: u64 = 8
         \\  .out_lines: u64 = 8
-        \\  .in_bytes: u64 = 571
-        \\  .out_bytes: u64 = 571
+        \\  .in_bytes: u64 = 587
+        \\  .out_bytes: u64 = 587
         \\  .compacted_at_ms: i64 = 999
     ).expectEqual(ck);
 
@@ -1025,7 +1025,7 @@ test "multi-event roundtrip preserves all event types" {
         \\    [5]: []u8
         \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
         \\    [6]: []u8
-        \\      "{"version":1,"at_ms":7,"data":{"stop":{"reason":"done"}}}"
+        \\      "{"version":1,"at_ms":7,"data":{"stop":{"end_turn":null,"reason":"done"}}}"
         \\    [7]: []u8
         \\      "{"version":1,"at_ms":8,"data":{"err":{"text":"oops"}}}"
         \\  .after: [][]u8
@@ -1042,7 +1042,7 @@ test "multi-event roundtrip preserves all event types" {
         \\    [5]: []u8
         \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
         \\    [6]: []u8
-        \\      "{"version":1,"at_ms":7,"data":{"stop":{"reason":"done"}}}"
+        \\      "{"version":1,"at_ms":7,"data":{"stop":{"end_turn":null,"reason":"done"}}}"
         \\    [7]: []u8
         \\      "{"version":1,"at_ms":8,"data":{"err":{"text":"oops"}}}"
     ).expectEqual(SessionSnap{

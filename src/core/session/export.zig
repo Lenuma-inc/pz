@@ -153,7 +153,7 @@ const StreamCtx = struct {
                 .err => |e| {
                     try writeSection(self.alloc, file, "Error", e.text);
                 },
-                .usage, .stop, .noop => {},
+                .message, .usage, .stop, .noop => {},
             }
         }
     }

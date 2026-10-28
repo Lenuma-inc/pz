@@ -697,7 +697,7 @@ const TuiSink = struct {
                 try self.ui.onProvider(.{ .err = s });
             },
             // Non-text events pass through directly
-            .usage, .stop => try self.ui.onProvider(pev),
+            .message, .usage, .stop => try self.ui.onProvider(pev),
         }
     }
 };
@@ -1385,6 +1385,7 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
 
 fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) !core.providers.Event {
     return switch (ev) {
+        .message => |msg| .{ .message = msg },
         .text => |txt| .{ .text = try alloc.dupe(u8, txt) },
         .thinking => |txt| .{ .thinking = try alloc.dupe(u8, txt) },
         .tool_call => |tc| blk: {
@@ -1432,7 +1433,7 @@ fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) void {
             alloc.free(tr.id);
             alloc.free(tr.output);
         },
-        .usage, .stop => {},
+        .message, .usage, .stop => {},
         .err => |txt| alloc.free(txt),
     }
 }
@@ -5953,6 +5954,7 @@ fn restoreSessionIntoUi(
         // or tool output that was persisted verbatim. Sanitize all text
         // fields before passing to TUI which requires valid UTF-8.
         switch (ev.data) {
+            .message => |msg| try ui.onProvider(.{ .message = msg }),
             .noop => {},
             .prompt => |p| {
                 const s = try ensureUtf8OrSanitize(alloc, p.text);
@@ -6002,6 +6004,7 @@ fn restoreSessionIntoUi(
             } }),
             .stop => |stop| try ui.onProvider(.{ .stop = .{
                 .reason = mapSessionStopReason(stop.reason),
+                .end_turn = stop.end_turn,
             } }),
             .err => |msg| {
                 const s = try ensureUtf8OrSanitize(alloc, msg.text);

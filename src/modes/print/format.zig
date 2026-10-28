@@ -58,6 +58,7 @@ pub const Formatter = struct {
 
     pub fn push(self: *Formatter, ev: core.providers.Event) !void {
         switch (ev) {
+            .message => {},
             .text => |text| try self.pushText(text),
             .thinking => |text| try self.pushThinking(text),
             .tool_call => |tc| try self.pushToolCall(tc),

@@ -3398,3 +3398,61 @@ test "basic tools agent delegates through the real child entry point" {
     try std.testing.expect(result.term == .exited and result.term.exited == 0);
     try @import("helpers.zig").expectSnapText(@src(), "PARENT_OK\n", result.stdout);
 }
+
+test "Responses PTY keyboard resume preserves commentary and final boundaries" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    try tmp.dir.createDirPath(std.testing.io, "sess");
+    const events = [_]core.session.Event{
+        .{ .data = .{ .prompt = .{ .text = "Investigate" } } },
+        .{ .data = .{ .message = .{ .phase = .commentary } } },
+        .{ .data = .{ .text = .{ .text = "Checking " } } },
+        .{ .data = .{ .text = .{ .text = "logs." } } },
+        .{ .data = .{ .message = .{ .phase = .commentary, .end = true } } },
+        .{ .data = .{ .message = .{ .phase = .final_answer } } },
+        .{ .data = .{ .text = .{ .text = "Found the cause." } } },
+        .{ .data = .{ .message = .{ .phase = .final_answer, .end = true } } },
+        .{ .data = .{ .stop = .{ .reason = .done, .end_turn = true } } },
+    };
+    try writeSessionEventsFile(tmp.dir, "sess/100.jsonl", &events);
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/resume 100\n" },
+        .{ .wait_for = .{ .text = "Found the cause.", .timeout_ms = 5000 } },
+        .{ .snapshot = "phases" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--session-dir", "sess" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "Checking logs.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "Checking logs.Found") == null);
+}
+
+test "Responses PTY stream failure explains incomplete answer and quits cleanly" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    const provider = "cat >/dev/null; printf 'text:PARTIALRESPONSE\\n'";
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "investigate\n" },
+        .{ .wait_for = .{ .text = "provider stream ended before its completion event", .timeout_ms = 5000 } },
+        .{ .snapshot = "stream-failure" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session", "--provider-cmd", provider }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(out.term == .exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "answer is incomplete") != null);
+}

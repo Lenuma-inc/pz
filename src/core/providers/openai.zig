@@ -88,6 +88,7 @@ const Item = struct {
     call_id: ?[]const u8 = null,
     name: ?[]const u8 = null,
     arguments: ?[]const u8 = null,
+    phase: ?providers.Phase = null,
 };
 
 const ItemEv = struct {
@@ -111,6 +112,7 @@ const OaiUsage = struct {
 };
 
 const Response = struct {
+    end_turn: ?bool = null,
     status: ?[]const u8 = null,
     usage: ?OaiUsage = null,
 };
@@ -187,6 +189,7 @@ fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?p
     }).value;
     const item = ev.item orelse return null;
     const item_type = item.type orelse return null;
+    if (std.mem.eql(u8, item_type, "message")) return .{ .message = .{ .phase = item.phase } };
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
 
     self.ext.tool_call_id.clearRetainingCapacity();
@@ -230,6 +233,7 @@ fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?pr
     }).value;
     const item = ev.item orelse return null;
     const item_type = item.type orelse return null;
+    if (std.mem.eql(u8, item_type, "message")) return .{ .message = .{ .phase = item.phase, .end = true } };
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
 
     if (item.call_id) |call_id| {
@@ -303,7 +307,7 @@ fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?provide
     var stop_reason = mapStopStatus(response.status);
     if (self.ext.saw_tool_call and stop_reason == .done) stop_reason = .tool;
 
-    self.pending = .{ .stop = .{ .reason = stop_reason } };
+    self.pending = .{ .stop = .{ .reason = stop_reason, .end_turn = response.end_turn } };
     self.done = true;
 
     const usage_ev: providers.Event = .{ .usage = .{
@@ -456,7 +460,7 @@ fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bo
         for (req.msgs) |msg| switch (msg.role) {
             .system => {},
             .user => try writeTextInput(ar, &js, "user", msg.parts),
-            .assistant => try writeAssistantInput(ar, &js, msg.parts),
+            .assistant => try writeAssistantInput(ar, &js, msg),
             .tool => try writeToolInput(ar, &js, msg.parts),
         };
         try js.endArray();
@@ -478,7 +482,7 @@ fn writeInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const p
         switch (msg.role) {
             .system => try writeTextInput(alloc, js, "developer", msg.parts),
             .user => try writeTextInput(alloc, js, "user", msg.parts),
-            .assistant => try writeAssistantInput(alloc, js, msg.parts),
+            .assistant => try writeAssistantInput(alloc, js, msg),
             .tool => try writeToolInput(alloc, js, msg.parts),
         }
     }
@@ -528,14 +532,18 @@ fn writeInputImage(alloc: std.mem.Allocator, js: *std.json.Stringify, image: pro
     try js.endObject();
 }
 
-fn writeAssistantInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []const providers.Part) !void {
-    for (parts) |part| switch (part) {
+fn writeAssistantInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msg: providers.Msg) !void {
+    for (msg.parts) |part| switch (part) {
         .text => |text| {
             try js.beginObject();
             try js.objectField("type");
             try js.write("message");
             try js.objectField("role");
             try js.write("assistant");
+            if (msg.phase) |phase| {
+                try js.objectField("phase");
+                try js.write(@tagName(phase));
+            }
             try js.objectField("status");
             try js.write("completed");
             try js.objectField("content");
@@ -1197,4 +1205,124 @@ test "fuzz parseSseData survives arbitrary bytes" {
         "not json",
         "\xff\xfe\x00\x01",
     } });
+}
+
+test "Responses phase boundaries and end_turn survive parsing" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    const start = (try testParse(&stream,
+        \\{"type":"response.output_item.added","item":{"type":"message","phase":"commentary"}}
+    )).?;
+    const end = (try testParse(&stream,
+        \\{"type":"response.output_item.done","item":{"type":"message","phase":"final_answer"}}
+    )).?;
+    _ = try testParse(&stream,
+        \\{"type":"response.completed","response":{"status":"completed","end_turn":false}}
+    );
+    const raw = try std.json.Stringify.valueAlloc(testing.allocator, .{ start, end, stream.pending.? }, .{});
+    defer testing.allocator.free(raw);
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "[{\"message\":{\"phase\":\"commentary\",\"end\":false}},{\"message\":{\"phase\":\"final_answer\",\"end\":true}},{\"stop\":{\"end_turn\":false,\"reason\":\"done\"}}]", raw);
+}
+
+test "Responses SSE rejects premature EOF and read failures" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    var reader = std.Io.Reader.fixed("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n");
+    stream.body_rdr = &reader;
+    const ev = (try stream.next()).?;
+    try testing.expectEqualStrings("partial", ev.text);
+    try testing.expectError(error.MissingStop, stream.next());
+
+    resetParserState(&stream);
+    var read_buf: [8]u8 = undefined;
+    var failing: std.Io.Reader = .{
+        .vtable = &.{ .stream = struct {
+            fn read(_: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+                return error.ReadFailed;
+            }
+        }.read },
+        .buffer = &read_buf,
+        .seek = 0,
+        .end = 0,
+    };
+    stream.body_rdr = &failing;
+    try testing.expectError(error.ReadFailed, stream.next());
+}
+
+test "Responses SSE accepts completed response without socket EOF" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    var reader = std.Io.Reader.fixed("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n");
+    stream.body_rdr = &reader;
+    try testing.expect((try stream.next()).? == .usage);
+    try testing.expect((try stream.next()).? == .stop);
+    try testing.expectEqual(@as(?providers.Event, null), try stream.next());
+}
+
+test "Responses read failure exposes HTTP body and socket causes" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    var read_buf: [8]u8 = undefined;
+    var failing: std.Io.Reader = .{
+        .vtable = &.{ .stream = struct {
+            fn read(_: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+                return error.ReadFailed;
+            }
+        }.read },
+        .buffer = &read_buf,
+        .seek = 0,
+        .end = 0,
+    };
+    stream.response = .{ .request = &stream.req, .head = undefined };
+    stream.req.reader.body_err = error.HttpChunkTruncated;
+    stream.body_rdr = &failing;
+    try testing.expectError(error.HttpChunkTruncated, stream.next());
+    resetParserState(&stream);
+    var conn: std.http.Client.Connection = undefined;
+    conn.protocol = .plain;
+    conn.stream_reader.err = error.ConnectionResetByPeer;
+    stream.req.connection = &conn;
+    stream.req.reader.body_err = null;
+    try testing.expectError(error.ConnectionResetByPeer, stream.next());
+}
+
+test "Responses long SSE lines preserve HTTP chunk state" {
+    const alloc = testing.allocator;
+    var payload = std.Io.Writer.Allocating.init(alloc);
+    defer payload.deinit();
+    try payload.writer.writeAll("data: {\"type\":\"response.created\",\"response\":{\"instructions\":\"");
+    try payload.writer.splatByteAll('x', 40000);
+    try payload.writer.writeAll("\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n");
+    for ([_]usize{ 4096, 5000, 8192, 16384 }) |chunk_size| {
+        var wire = std.Io.Writer.Allocating.init(alloc);
+        defer wire.deinit();
+        var offset: usize = 0;
+        while (offset < payload.written().len) {
+            const end = @min(offset + chunk_size, payload.written().len);
+            try wire.writer.print("{x}\r\n{s}\r\n", .{ end - offset, payload.written()[offset..end] });
+            offset = end;
+        }
+        try wire.writer.writeAll("0\r\n\r\n");
+        var input = std.Io.Reader.fixed(wire.written());
+        var http: std.http.Reader = .{ .in = &input, .interface = undefined, .state = .received_head, .max_head_len = 8192 };
+        var stream = testStream();
+        defer stream.arena.deinit();
+        stream.body_rdr = http.bodyReader(&stream.transfer_buf, .chunked, null);
+        try testing.expectEqualStrings("OK", (try stream.next()).?.text);
+        try testing.expect((try stream.next()).? == .usage);
+        try testing.expect((try stream.next()).? == .stop);
+        try testing.expect((try stream.next()) == null);
+        try testing.expect(http.body_err == null);
+    }
+}
+
+test "Responses SSE still rejects invalid HTTP chunk framing" {
+    var input = std.Io.Reader.fixed("9\r\ndata: {}\nX\r\n0\r\n\r\n");
+    var stream = testStream();
+    defer stream.arena.deinit();
+    stream.req.reader = .{ .in = &input, .interface = undefined, .state = .received_head, .max_head_len = 8192 };
+    stream.req.connection = null;
+    stream.response = .{ .request = &stream.req, .head = undefined };
+    stream.body_rdr = stream.req.reader.bodyReader(&stream.transfer_buf, .chunked, null);
+    try testing.expectError(error.HttpChunkInvalid, stream.next());
 }

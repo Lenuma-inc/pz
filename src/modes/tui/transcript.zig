@@ -80,6 +80,7 @@ pub const Transcript = struct {
     alloc: std.mem.Allocator,
     blocks: std.ArrayListUnmanaged(Block) = .empty,
     next_seq: u64 = 1,
+    text_break: bool = false,
     md: markdown.Renderer = .{},
     scroll_off: usize = 0,
     show_tools: bool = true,
@@ -126,9 +127,12 @@ pub const Transcript = struct {
 
     pub fn appendSeq(self: *Transcript, seq: u64, ev: core.providers.Event) AppendError!void {
         switch (ev) {
+            .message => self.text_break = true,
             .text => |t| {
                 // Coalesce consecutive text events
-                if (self.blocks.items.len > 0) {
+                const text_break = self.text_break;
+                self.text_break = false;
+                if (!text_break and self.blocks.items.len > 0) {
                     const last = &self.blocks.items[self.blocks.items.len - 1];
                     if (last.kind == .text and last.seq <= seq) {
                         try ensureUtf8(t);

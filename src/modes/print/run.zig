@@ -76,6 +76,7 @@ fn mapEvent(ev: core.providers.Event) core.session.Event {
     return .{
         .at_ms = core.time.milliTimestamp(),
         .data = switch (ev) {
+            .message => |msg| .{ .message = msg },
             .text => |text| .{
                 .text = .{ .text = text },
             },
@@ -105,6 +106,7 @@ fn mapEvent(ev: core.providers.Event) core.session.Event {
             },
             .stop => |stop| .{
                 .stop = .{
+                    .end_turn = stop.end_turn,
                     .reason = switch (stop.reason) {
                         .done => .done,
                         .max_out => .max_out,

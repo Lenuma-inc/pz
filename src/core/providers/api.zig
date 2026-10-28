@@ -17,7 +17,15 @@ pub const Request = struct {
     opts: Opts = .{},
 };
 
+pub const Phase = enum { commentary, partial_answer, final_answer };
+
+pub const Message = struct {
+    phase: ?Phase = null,
+    end: bool = false,
+};
+
 pub const Msg = struct {
+    phase: ?Phase = null,
     role: Role,
     parts: []const Part,
 };
@@ -135,6 +143,7 @@ pub const CancelPoll = struct {
 };
 
 pub const Event = union(enum) {
+    message: Message,
     text: []const u8,
     thinking: []const u8,
     tool_call: ToolCall,
@@ -153,6 +162,7 @@ pub const Usage = struct {
 };
 
 pub const Stop = struct {
+    end_turn: ?bool = null,
     reason: StopReason,
 };
 

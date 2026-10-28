@@ -7,6 +7,14 @@ const Rule = struct {
 };
 
 const rule_map = std.StaticStringMap(Rule).initComptime(.{
+    .{ "ReadFailed", Rule{ .summary = "response stream could not be read; no lower-level cause was provided", .next = "retry; inspect network/proxy logs if this repeats" } },
+    .{ "MissingStop", Rule{ .summary = "provider stream ended before its completion event", .next = "the answer is incomplete; retry the turn" } },
+    .{ "HttpChunkTruncated", Rule{ .summary = "HTTP response ended in the middle of a chunk", .next = "check the server/proxy connection and retry the incomplete turn" } },
+    .{ "HttpChunkInvalid", Rule{ .summary = "server or proxy returned invalid HTTP chunk framing", .next = "check the proxy/server and retry" } },
+    .{ "HttpHeadersOversize", Rule{ .summary = "HTTP response headers exceeded the client limit", .next = "check the server or proxy response" } },
+    .{ "TlsConnectionTruncated", Rule{ .summary = "TLS connection ended before the response completed", .next = "check the network/proxy and retry the incomplete turn" } },
+    .{ "TlsBadRecordMac", Rule{ .summary = "TLS response failed its integrity check", .next = "check the network/proxy TLS path" } },
+    .{ "TlsAlert", Rule{ .summary = "peer terminated the TLS connection with an alert", .next = "check the server/proxy TLS logs" } },
     .{
         "SessionDisabled",
         Rule{
@@ -469,4 +477,17 @@ test "report inline shows friendly summary" {
     const msg = try inlineMsg(std.testing.allocator, error.SessionDisabled);
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "session persistence is disabled") != null);
+}
+
+test "Responses errors explain incomplete stream and transport cause" {
+    const alloc = std.testing.allocator;
+    const chunk = try fromName(alloc, "HttpChunkTruncated");
+    defer alloc.free(chunk);
+    const eof = try fromName(alloc, "MissingStop");
+    defer alloc.free(eof);
+    const socket = try fromName(alloc, "ConnectionResetByPeer");
+    defer alloc.free(socket);
+    const text = try std.fmt.allocPrint(alloc, "{s}\n{s}\n{s}", .{ chunk, eof, socket });
+    defer alloc.free(text);
+    try @import("../test/helpers.zig").expectSnapText(@src(), "HTTP response ended in the middle of a chunk — check the server/proxy connection and retry the incomplete turn\nprovider stream ended before its completion event — the answer is incomplete; retry the turn\nconnection dropped by server — try again; if it persists, the API may be experiencing issues", text);
 }

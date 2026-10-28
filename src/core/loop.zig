@@ -462,6 +462,7 @@ pub const RunOut = struct {
 };
 
 const HistItem = struct {
+    phase: ?providers.Phase = null,
     role: providers.Role,
     part: providers.Part,
 };
@@ -475,7 +476,29 @@ const Hist = struct {
     alloc: std.mem.Allocator,
     items: std.ArrayListUnmanaged(HistEnt) = .empty,
 
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    phase: ?providers.Phase = null,
+
+    fn flushText(self: *Hist) !void {
+        if (self.text.items.len == 0) return;
+        try self.pushTextDup(.assistant, self.text.items);
+        self.items.items[self.items.items.len - 1].item.phase = self.phase;
+        self.text.clearRetainingCapacity();
+    }
+
+    fn message(self: *Hist, msg: providers.Message) !void {
+        if (msg.end) {
+            if (msg.phase) |phase| self.phase = phase;
+            try self.flushText();
+            self.phase = null;
+        } else {
+            try self.flushText();
+            self.phase = msg.phase;
+        }
+    }
+
     fn deinit(self: *Hist) void {
+        self.text.deinit(self.alloc);
         for (self.items.items) |ent| {
             switch (ent) {
                 .item => |it| freePart(self.alloc, it.part),
@@ -560,13 +583,20 @@ const Hist = struct {
     }
 
     fn clear(self: *Hist) !void {
+        try self.flushText();
+        self.phase = null;
         try self.items.append(self.alloc, .{ .clear = {} });
     }
 
     fn appendFromSession(self: *Hist, ev: session.Event) !void {
         switch (ev.data) {
+            .text, .thinking, .usage, .message => {},
+            else => try self.flushText(),
+        }
+        switch (ev.data) {
             .prompt => |prompt| try self.pushTextDup(.user, prompt.text),
-            .text => |text| try self.pushTextDup(.assistant, text.text),
+            .message => |msg| try self.message(msg),
+            .text => |text| try self.text.appendSlice(self.alloc, text.text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, .{
                 .id = tc.id,
                 .name = tc.name,
@@ -583,7 +613,12 @@ const Hist = struct {
 
     fn appendFromProvider(self: *Hist, ev: providers.Event) !void {
         switch (ev) {
-            .text => |text| try self.pushTextDup(.assistant, text),
+            .text, .thinking, .usage, .message => {},
+            else => try self.flushText(),
+        }
+        switch (ev) {
+            .message => |msg| try self.message(msg),
+            .text => |text| try self.text.appendSlice(self.alloc, text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, tc),
             .tool_result => |tr| try self.pushToolResultDup(.tool, tr),
             else => {}, // .thinking, .usage, .stop, .err: not part of conversation history
@@ -612,6 +647,7 @@ pub const LoopCtx = struct {
     turn_arena: std.heap.ArenaAllocator,
     stream: ?*providers.Stream,
     saw_tool_call: bool,
+    end_turn: ?bool = null,
     pending_tc: ?providers.ToolCall,
     turn_state: TurnState,
 
@@ -651,6 +687,8 @@ pub const LoopCtx = struct {
                 .prompt = .{ .text = opts.prompt },
             },
         };
+        hist.flushText() catch |hist_err| return failWithReport(opts, .store_append, hist_err);
+        hist.phase = null;
         hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
             return failWithReport(opts, .store_append, hist_err);
         };
@@ -693,6 +731,7 @@ pub const LoopCtx = struct {
     }
 
     pub fn deinit(self: *LoopCtx) void {
+        if (self.opts.abort_slot) |slot| slot.set(null);
         if (self.stream) |s| s.deinit();
         self.turn_arena.deinit();
         for (self.req_tools) |t| self.opts.alloc.free(t.schema);
@@ -720,6 +759,7 @@ pub const LoopCtx = struct {
                 const tool_prompt = tools.builtin.toolPromptAlloc(turn_alloc, self.opts.reg, self.opts.system_prompt) catch |msg_err| {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
+                self.hist.flushText() catch |err| return failWithReport(self.opts, .stream_next, err);
                 const req_msgs = buildReqMsgs(turn_alloc, self.hist.items.items, tool_prompt, self.opts.skip_prompt_guard) catch |msg_err| {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
@@ -736,6 +776,7 @@ pub const LoopCtx = struct {
                 };
                 if (self.opts.abort_slot) |slot| slot.set(self.stream.?.aborter());
                 self.saw_tool_call = false;
+                self.end_turn = null;
                 continue :state .streaming;
             },
             .streaming => {
@@ -756,7 +797,7 @@ pub const LoopCtx = struct {
                         };
                         continue :state .done;
                     }
-                    if (!self.saw_tool_call) {
+                    if (!self.saw_tool_call and self.end_turn != false) {
                         self.turns +|= 1;
                         continue :state .done;
                     }
@@ -787,6 +828,10 @@ pub const LoopCtx = struct {
                 };
 
                 switch (ev) {
+                    .stop => |stop| {
+                        self.end_turn = if (stop.reason == .done) stop.end_turn else true;
+                        continue :state .streaming;
+                    },
                     .tool_call => |tc| {
                         self.pending_tc = tc;
                         continue :state .tool_dispatch;
@@ -984,6 +1029,7 @@ fn buildReqMsgs(
         parts[part_idx] = try cloneReqPart(alloc, item.role, item.part, skip_guard);
         msgs[msg_idx] = .{
             .role = item.role,
+            .phase = item.phase,
             .parts = parts[part_idx .. part_idx + 1],
         };
         msg_idx += 1;
@@ -1037,8 +1083,8 @@ fn cloneReqText(
 
 fn freeReqMsgsOwned(alloc: std.mem.Allocator, msgs: []providers.Msg) void {
     if (msgs.len == 0) return;
-    for (msgs[1..]) |msg| {
-        for (msg.parts) |part| freePart(alloc, part);
+    for (msgs) |msg| {
+        if (msg.role != .system) for (msg.parts) |part| freePart(alloc, part);
     }
     const part_ct = msgs[0].parts.len + msgs.len - 1;
     alloc.free(msgs[0].parts.ptr[0..part_ct]);
@@ -1485,6 +1531,7 @@ fn mapProviderEv(ev: providers.Event, at_ms: i64) session.Event {
     return .{
         .at_ms = at_ms,
         .data = switch (ev) {
+            .message => |msg| .{ .message = msg },
             .text => |text| .{
                 .text = .{ .text = text },
             },
@@ -1516,6 +1563,7 @@ fn mapProviderEv(ev: providers.Event, at_ms: i64) session.Event {
             },
             .stop => |stop| .{
                 .stop = .{
+                    .end_turn = stop.end_turn,
                     .reason = switch (stop.reason) {
                         .done => .done,
                         .max_out => .max_out,
@@ -5637,4 +5685,170 @@ test "CmdCache TTL checked on lookup rejects expired entries" {
     try std.testing.expect(!cache.containsAt(key, 1001));
     // Entry was removed
     try std.testing.expectEqual(@as(usize, 0), cache.count());
+}
+
+test "Responses history preserves phases and message boundaries across replay" {
+    const alloc = std.testing.allocator;
+    var live = Hist{ .alloc = alloc };
+    defer live.deinit();
+    var replay = Hist{ .alloc = alloc };
+    defer replay.deinit();
+    const events = [_]providers.Event{
+        .{ .message = .{ .phase = .commentary } },
+        .{ .text = "Checking " },
+        .{ .text = "logs." },
+        .{ .message = .{ .phase = .commentary, .end = true } },
+        .{ .message = .{ .phase = .final_answer } },
+        .{ .text = "Found " },
+        .{ .text = "the cause." },
+        .{ .message = .{ .phase = .final_answer, .end = true } },
+        .{ .stop = .{ .reason = .done, .end_turn = true } },
+    };
+    for (events) |ev| {
+        try live.appendFromProvider(ev);
+        const raw = try @import("session/schema.zig").encodeAlloc(alloc, mapProviderEv(ev, 1));
+        defer alloc.free(raw);
+        const parsed = try @import("session/schema.zig").decodeSlice(alloc, raw);
+        defer parsed.deinit();
+        try replay.appendFromSession(parsed.value);
+    }
+    const a = try buildReqMsgs(alloc, live.items.items, null, true);
+    defer freeReqMsgsOwned(alloc, a);
+    const b = try buildReqMsgs(alloc, replay.items.items, null, true);
+    defer freeReqMsgsOwned(alloc, b);
+    const expected = "[{\"phase\":\"commentary\",\"role\":\"assistant\",\"parts\":[{\"text\":\"Checking logs.\"}]},{\"phase\":\"final_answer\",\"role\":\"assistant\",\"parts\":[{\"text\":\"Found the cause.\"}]}]";
+    const raw_a = try std.json.Stringify.valueAlloc(alloc, a, .{});
+    defer alloc.free(raw_a);
+    const raw_b = try std.json.Stringify.valueAlloc(alloc, b, .{});
+    defer alloc.free(raw_b);
+    try @import("../test/helpers.zig").expectSnapText(@src(), expected, raw_a);
+    try @import("../test/helpers.zig").expectSnapText(@src(), expected, raw_b);
+    for ([_]bool{ false, true }) |is_sub| {
+        const body = try providers.openai.Cfg.buildBody(alloc, .{ .model = "test", .msgs = b }, is_sub);
+        defer alloc.free(body);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{ .allocate = .alloc_always });
+        defer parsed.deinit();
+        const input = try std.json.Stringify.valueAlloc(alloc, parsed.value.object.get("input").?, .{});
+        defer alloc.free(input);
+        try @import("../test/helpers.zig").expectSnapText(@src(), "[{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking logs.\",\"annotations\":[]}]},{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Found the cause.\",\"annotations\":[]}]}]", input);
+    }
+}
+
+test "Responses end_turn false continues without a tool call" {
+    const Mock = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), start).vt },
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), next, deinit).vt },
+        starts: usize = 0,
+        idx: usize = 0,
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.starts += 1;
+            self.idx = 0;
+            if (self.starts > 2) return error.TestUnexpectedResult;
+            return &self.stream;
+        }
+        fn next(self: *@This()) !?providers.Event {
+            self.idx += 1;
+            return switch (self.idx) {
+                1 => .{ .message = .{ .phase = if (self.starts == 1) .commentary else .final_answer } },
+                2 => .{ .text = if (self.starts == 1) "Checking." else "Done." },
+                3 => .{ .message = .{ .end = true } },
+                4 => .{ .stop = .{ .reason = .done, .end_turn = self.starts == 2 } },
+                else => null,
+            };
+        }
+        fn deinit(_: *@This()) void {}
+    };
+    const Sink = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), push).vt },
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+    var mock = Mock{};
+    var sink = Sink{};
+    var store = session.null_store.Store.init();
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "phase",
+        .prompt = "Investigate",
+        .model = "test",
+        .provider = &mock.provider,
+        .store = store.sessionStore(),
+        .reg = tools.Registry.init(&.{}),
+        .mode = &sink.mode_sink,
+    });
+    try std.testing.expectEqual(@as(usize, 2), mock.starts);
+    try @import("ohsnap").default.snap(@src(),
+        \\core.loop.RunOut
+        \\  .turns: u16 = 2
+        \\  .tool_calls: u32 = 0
+    ).expectEqual(out);
+}
+
+test "Responses property text fragmentation preserves one phased message" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { text: zc.String, chunk: u8 }) bool {
+            const alloc = std.testing.allocator;
+            var hist = Hist{ .alloc = alloc };
+            defer hist.deinit();
+            const text = args.text.slice();
+            hist.appendFromProvider(.{ .message = .{ .phase = .commentary } }) catch return false;
+            var offset: usize = 0;
+            while (offset < text.len) {
+                const end = @min(text.len, offset + @as(usize, args.chunk) + 1);
+                hist.appendFromProvider(.{ .text = text[offset..end] }) catch return false;
+                offset = end;
+            }
+            hist.appendFromProvider(.{ .message = .{ .end = true } }) catch return false;
+            if (text.len == 0) return hist.items.items.len == 0;
+            if (hist.items.items.len != 1) return false;
+            const item = hist.items.items[0].item;
+            return item.phase == .commentary and std.mem.eql(u8, item.part.text, text);
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
+test "Responses stream failure clears abort callback before teardown" {
+    const Mock = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), start).vt },
+        stream: providers.Stream = .{ .vt = &providers.Stream.BindAbortable(@This(), next, deinit, cancel).vt },
+        aborter: providers.Aborter = .{ .vt = &providers.Aborter.Bind(@This(), cancel).vt },
+        slot: *providers.AbortSlot,
+        cleared: bool = false,
+        cancels: usize = 0,
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            return &self.stream;
+        }
+        fn next(_: *@This()) !?providers.Event {
+            return error.ReadFailed;
+        }
+        fn cancel(self: *@This()) void {
+            self.cancels += 1;
+        }
+        fn deinit(self: *@This()) void {
+            self.cleared = self.slot.cur == null;
+        }
+    };
+    const Sink = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), push).vt },
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+    var slot = providers.AbortSlot{};
+    var mock = Mock{ .slot = &slot };
+    var sink = Sink{};
+    var store = session.null_store.Store.init();
+    try std.testing.expectError(error.ReadFailed, run(.{
+        .alloc = std.testing.allocator,
+        .sid = "failed",
+        .prompt = "Investigate",
+        .model = "test",
+        .provider = &mock.provider,
+        .store = store.sessionStore(),
+        .reg = tools.Registry.init(&.{}),
+        .mode = &sink.mode_sink,
+        .abort_slot = &slot,
+    }));
+    slot.abort();
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "cleared={} cancels={d}", .{ mock.cleared, mock.cancels });
+    defer std.testing.allocator.free(snap);
+    try @import("../test/helpers.zig").expectSnapText(@src(), "cleared=true cancels=0", snap);
 }
