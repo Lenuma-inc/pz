@@ -4,16 +4,26 @@ A security-first coding harness rewritten from the ground up in Zig for enterpri
 
 ## Measured footprint
 
-Local Linux x86_64 measurements with Zig 0.16.0 and the default `zig build` Debug configuration:
+Local Linux x86_64 measurements on 2026-10-30 with Zig 0.16.0 and
+`zig build -Doptimize=ReleaseFast -Dgit-hash=c43627bf6b51`:
 
-| Measurement | Result |
-|---|---:|
-| Binary size (`zig-out/bin/pz`, unstripped) | 65.4 MiB |
-| `pz --version` startup (25 runs, median) | 23.33 ms |
-| `pz --version` peak RSS | 9.3 MiB |
-| TUI idle RSS (empty temporary profile, 3 seconds) | 11.9–13.2 MiB |
+| Measurement | Result | Scope / method |
+|---|---:|---|
+| Zig source lines | 96,570 | Physical lines in 153 `src/**/*.zig` files, including comments, blank lines and tests |
+| Separate test-module lines | 7,074 | `src/test/**/*.zig`; included above, excludes inline tests elsewhere |
+| Binary size | 16.7 MiB | `zig-out/bin/pz`, unstripped, with debug info |
+| CLI startup | 1.02 ms | Median of 25 `pz --version` runs; includes process creation |
+| CLI peak RAM (RSS) | 2.8 MiB | `pz --version`, Linux `/usr/bin/time -f %M` |
 
-Startup timing includes process creation. RSS is resident memory reported by Linux; TUI samples were taken after launch with version checks disabled. These are local Debug-build measurements, not release-build or provider-response benchmarks. The Linux binary is dynamically linked to glibc and libm; bash sandboxing also requires `bwrap`.
+Line counts include tests and are not a production-only code count. These are
+local ReleaseFast measurements; CLI startup/RAM do not describe an active TUI,
+agent turn or provider response. TUI memory was not remeasured successfully in
+this run. The Linux binary is dynamically linked to glibc and libm; bash
+sandboxing also requires `bwrap`.
+
+For comparison, the same local Debug build measured 62.4 MiB on disk,
+26.36 ms startup and 9.2 MiB peak CLI RSS. ReleaseFast is about 3.7× smaller
+even with debug info retained.
 
 ## Features
 
@@ -21,9 +31,9 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 
 - **Interactive TUI** — streaming responses, markdown rendering, syntax highlighting
 - **Image rendering** — Kitty graphics protocol support in terminal
-- **24 slash commands** — `/model`, `/fork`, `/export`, `/compact`, `/share`, `/tree`, and more
+- **Slash commands** — `/model`, `/fork`, `/export`, `/compact`, `/share`, `/tree`, and more
 - **Autocomplete dropdown** — fuzzy-filtered command and file path completion
-- **14 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`
+- **16 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`, `swarm`, `ffmpeg`
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
@@ -32,6 +42,8 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 - **Prompt caching** — automatic cache_control on system messages
 - **Headless modes** — `--print`, `--json`, and `rpc` for scripting and integration
 - **Agent tool** — spawn subagents with dedicated RPC fd, progress streaming, process group isolation
+- **Swarm tool** — collaborating live workers with addressed messages and explicit wait/stop/close operations
+- **File attachments** — local text, images, documents and bounded video-frame extraction; clipboard images enter the outgoing prompt
 - **Zero-alloc hot path** — rendering and input handling avoid heap allocations
 
 ### Security
@@ -65,18 +77,18 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 - **LRU approval cache** — bounded eviction for context-bound approvals
 - **Fail-closed policy** — unknown keys rejected, unsigned policies rejected in lock mode
 - **Secure local storage** — 0700/0600 perms, atomic writes (temp+fsync+rename), O_NOFOLLOW confinement
-- **Event loop** — kqueue (macOS) event loop core with provider and tool I/O migration
+- **Event loop** — epoll (Linux) and kqueue (macOS/BSD) backends
 
 ### Testing
 
-- **1300+ tests** — unit, integration, snapshot (ohsnap), and property (zcheck) tests
+- **Automated coverage** — unit, integration, snapshot (ohsnap), and property (zcheck) tests
 - **PTY harness** — real-process TUI tests with ANSI AST parsing
 - **Mock infrastructure** — provider, syslog, HTTP, cancel, time mocks
 - **Allocator regression** — test-allocator proofs for UAF and leak safety
 
 ## Build
 
-Supports [Zig](https://ziglang.org) 0.16.0 and 0.17.0.
+The minimum [Zig](https://ziglang.org) version declared in `build.zig.zon` is 0.16.0.
 
 ```
 zig build
@@ -85,6 +97,12 @@ zig build
 The binary lands in `zig-out/bin/pz`.
 
 On Linux, bash execution requires `bubblewrap` (`bwrap`) on `PATH` and permission to create user and network namespaces. A temporary root exposes system directories read-only, mounts the workspace writable, and blocks shell network access.
+
+For an optimized local build:
+
+```sh
+zig build -Doptimize=ReleaseFast -Dgit-hash=<commit-hash>
+```
 
 Release builds require `-Dgit-hash=<hash>` and embed `CHANGELOG.md`. Debug builds use VCS.
 
@@ -103,8 +121,11 @@ pz resume --last   # most recent (also: pz -c)
 pz resume 123      # specific session ID
 
 # Headless
-pz --print "explain this codebase"
-echo '{"prompt":"hello"}' | pz --json
+pz print "explain this codebase"
+echo '{"prompt":"hello"}' | pz json
+
+# Choose a supported reasoning effort
+pz --thinking low
 ```
 
 ## Test
@@ -135,7 +156,7 @@ Canonical `pz` state lives under `.pz/`:
 
 MIT
 
-## Repository tools
+## Attachments and clipboard
 
 Drop local files into the prompt or paste their paths. Quoted paths, escaped
 spaces, `file:///` URLs, `~/`, `./`, and multiple files are supported. Ctrl+V
@@ -160,6 +181,8 @@ fail explicitly. Image input still requires a vision-capable model. Media
 generation is a separate provider tool; selecting a Codex model alone does not
 expose Codex app tools in pz.
 
+## Repository tools
+
 `grep` uses installed `rg` for regular expressions, including single-file searches;
 `find` uses installed `fd` for literal names or glob patterns. Both honor ignore
 files. Missing executables fail explicitly. HTTP tools require installed `curl`.
@@ -169,26 +192,46 @@ writing. It updates or creates files; file deletion and renaming are separate
 operations. `todo` keeps a task list for the current runtime session. `skill`
 without a name lists the available model-invocable skills.
 
+`github` inspects public GitHub, GitLab, Gitea and Forgejo repositories without
+cloning. It supports directory listings, line-ranged file reads, trees, history,
+branches, tags and repository metadata. Commit patches and comparisons are
+GitHub-only. Metadata is returned as compact text with pagination hints and
+explicit warnings for missing patches.
+
+Examples of model tool arguments:
+
+```json
+{"repo":"owner/repo","op":"list","path":"src"}
+{"repo":"owner/repo","op":"read","path":"src/main.zig","from_line":1,"to_line":20}
+{"repo":"https://codeberg.org/owner/repo","op":"tree"}
+{"api":"gitea","repo":"https://git.example.org/owner/repo","op":"info"}
+```
+
+`owner/repo` selects GitHub. HTTPS URLs infer known hosts (github.com, gitlab.com,
+codeberg.org and gitea.com); self-hosted URLs require an explicit `api` value.
+Omit `ref` for the default branch, or specify a branch, tag or commit. Reads are
+capped at 2 MiB, other API responses at 8 MiB, and returned output at the normal
+tool limit. GitHub directories hitting 1,000 entries and truncated GitHub trees
+fail explicitly. Follow page hints to retrieve remaining results. Private
+repositories and authenticated API access are not implemented. Requests remain
+subject to egress policy.
+
+`ffmpeg` provides fixed local operations: inspect, thumbnails, trim, fit to
+landscape/portrait/square, codec export, GIF creation and audio extraction.
+It requires installed `ffmpeg` and `ffprobe`, checks input/output path policy,
+limits inputs to 100 MiB and generated outputs to 64 MiB, and never overwrites
+an existing output file. Rendering operations also limit input duration to five
+minutes; inspection does not impose that duration limit.
+
+`agent` runs a child agent; `swarm` provides live workers with spawn, send/recv,
+wait, stop and close operations. Spawn peers before waiting when collaboration
+is needed. LSP and external web search are outside this tool set.
+
+## Models and keyboard help
+
 The OpenAI picker and thinking controls use a generated catalog from Codex model
 metadata. Refresh it with `python3 tools/update-openai-models.py`, then run
 `zig build`. This updates the bundled snapshot; pz does not fetch it at startup.
 The startup screen shows short hints and skill names; `/hotkeys` lists the full
 keyboard help.
 
-`github` browses public repositories one directory or file at a time using the
-GitHub Contents API, following the approach in
-[ghgrab](https://github.com/abhixdd/ghgrab/blob/main/src/github.rs).
-It never clones repositories. Examples of model tool arguments:
-
-```json
-{"repo":"abhixdd/ghgrab","op":"list","path":"src"}
-{"repo":"abhixdd/ghgrab","op":"read","path":"src/github.rs","from_line":190,"to_line":210}
-```
-
-Omit `ref` for the repository's default branch, or specify a branch, tag, or commit.
-Files are capped at 2 MiB and returned output at the normal tool limit. Large
-files need a line range; directories hitting GitHub's 1,000-entry limit fail
-explicitly. Private repositories and authenticated API access are not implemented.
-The model receives tool guidance on each request, including instructions to use
-`github` for source exploration before considering a clone. LSP and external web
-search are outside this tool set.

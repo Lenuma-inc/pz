@@ -5,6 +5,9 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Measure optimized builds for README footprint figures and state whether debug symbols remain; keep Debug comparisons separate.
+- Date footprint measurements and state build mode, line-count scope and measured process mode; do not reuse stale TUI RSS as a fresh result.
+- Reconcile README tool inventories and CLI examples with the registry and parser; separate attachment dependencies from repository-tool behavior.
 - Keep session continuation (`-c`, `resume --last`) separate from interactive selection (`-r`, `resume`); exercise both through the real binary.
 - Keep forge adapters on the shared HTTP policy path; infer only known hosts and require an explicit API for self-hosted repository URLs.
 - Treat Gitea/Forgejo tree `truncated` as pagination, unlike GitHub's incomplete-tree error; test second pages against real servers.
