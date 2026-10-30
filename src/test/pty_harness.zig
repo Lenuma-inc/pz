@@ -2578,6 +2578,27 @@ test "pty: error display from provider" {
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "something went wrong") != null);
 }
 
+test "quota PTY shows unavailable data for the provider selected from the keyboard" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/login openai sk-test-no-network\r" },
+        .{ .wait_for = .{ .text = "API key saved for openai", .timeout_ms = 3000 } },
+        .{ .inject = "/provider openai\r" },
+        .{ .wait_for = .{ .text = "provider set to openai", .timeout_ms = 3000 } },
+        .{ .snapshot = "quota_unavailable" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "limits: n/a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "used 5h:0%") == null);
+}
+
 test "pty: OpenAI login exposes selectable models without restarting" {
     const alloc = std.testing.allocator;
     var ctx = try setupInteractiveEnv(alloc);

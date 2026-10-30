@@ -27,6 +27,7 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
+- **Subscription quotas** — the footer shows used percentages from the selected Codex/Claude provider's response headers or Codex stream events after a completed request. Window labels follow the reported duration (5h, week, month); missing quota data shows `limits: n/a` and changing model/provider clears it. API-key responses may not include subscription quotas.
 - **Thinking levels** — prefer off when supported; OpenAI model metadata determines the available levels through max. Shift+Tab skips unsupported levels. Any adjustment is shown explicitly; Anthropic uses token budgets for enabled levels.
 - **Prompt caching** — automatic cache_control on system messages
 - **Headless modes** — `--print`, `--json`, and `rpc` for scripting and integration

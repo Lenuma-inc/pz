@@ -268,6 +268,7 @@ test "parser handles tool_result usage and err frames" {
         \\      .tot_tok: u64 = 8
         \\      .cache_read: u64 = 0
         \\      .cache_write: u64 = 0
+        \\      .limits: ?core.providers.limits.Limits = null
         \\  [2]: core.providers.stream_parse.SnapEv
         \\    .err: []const u8
         \\      "oops"

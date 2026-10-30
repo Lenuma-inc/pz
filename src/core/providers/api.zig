@@ -159,6 +159,7 @@ pub const Usage = struct {
     tot_tok: u64 = 0,
     cache_read: u64 = 0,
     cache_write: u64 = 0,
+    limits: ?@import("limits.zig").Limits = null,
 };
 
 pub const Stop = struct {

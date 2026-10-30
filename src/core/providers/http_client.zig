@@ -360,6 +360,7 @@ fn processSseLine(self: anytype, raw: []const u8) anyerror!?providers.Event {
 
     const ev = self.parseSseData(data_copy) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidQuota => return error.InvalidQuota,
         else => return null,
     };
     return ev;
@@ -464,6 +465,9 @@ pub fn SseClient(comptime Cfg: type) type {
 
             var slp = RealSleeper{ .el = self.el };
             try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, self.cancel);
+            errdefer stream.req.deinit();
+
+            stream.limits = try @import("limits.zig").parse(Cfg.provider_tag, stream.response.?.head.bytes);
 
             if (stream.response.?.head.status != .ok) {
                 try formatErrBody(stream, ar, extractJsonErrMsg);
@@ -491,6 +495,7 @@ pub fn SseStream(comptime Cfg: type) type {
         arena: std.heap.ArenaAllocator,
         req: std.http.Client.Request,
         response: ?std.http.Client.Response,
+        limits: ?@import("limits.zig").Limits = null,
         send_buf: [1024]u8,
         transfer_buf: [16384]u8,
         redir_buf: [0]u8,
@@ -533,7 +538,7 @@ pub fn SseStream(comptime Cfg: type) type {
 
         fn streamNext(s: *providers.Stream) anyerror!?providers.Event {
             const self: *Self = @fieldParentPtr("stream", s);
-            return sseNext(self);
+            return self.next();
         }
 
         fn streamDeinit(s: *providers.Stream) void {
@@ -581,7 +586,9 @@ pub fn SseStream(comptime Cfg: type) type {
         }
 
         pub fn next(self: *Self) anyerror!?providers.Event {
-            return sseNext(self);
+            var ev = (try sseNext(self)) orelse return null;
+            if (ev == .usage) ev.usage.limits = self.limits;
+            return ev;
         }
 
         pub fn parseSseData(self: *Self, data: []const u8) anyerror!?providers.Event {

@@ -33,6 +33,7 @@ test {
     _ = @import("modes/tui/table_layout.zig");
     _ = @import("modes/tui/vscreen.zig");
     _ = @import("modes/tui/test.zig");
+    _ = @import("modes/tui/panels.zig");
     _ = @import("perf/baseline.zig");
     _ = @import("core/skill.zig");
     _ = @import("core/policy.zig");

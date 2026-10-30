@@ -5,6 +5,7 @@ const frame = @import("frame.zig");
 const tool_display = @import("tool_display.zig");
 const theme = @import("theme.zig");
 const spinner = @import("spinner.zig");
+const quota = @import("../../core/providers/limits.zig");
 
 pub const Rect = frame.Rect;
 
@@ -50,6 +51,7 @@ pub const Panels = struct {
     branch: []const u8 = "",
     usage: core.providers.Usage = .{},
     has_usage: bool = false,
+    limits: ?quota.Limits = null,
     cost_micents: u64 = 0, // cumulative cost in 1/100000 of a dollar
     cum_tok: u64 = 0, // latest turn tokens for context gauge
     tot_in: u64 = 0,
@@ -115,12 +117,14 @@ pub const Panels = struct {
 
     pub fn setModel(self: *Panels, model: []const u8) EventError!void {
         try ensureUtf8(model);
+        if (!std.mem.eql(u8, self.model.items, model)) self.limits = null;
         try self.model.resize(self.alloc, 0);
         try self.model.appendSlice(self.alloc, model);
     }
 
     pub fn setProvider(self: *Panels, provider: []const u8) EventError!void {
         try ensureUtf8(provider);
+        if (!std.mem.eql(u8, self.provider.items, provider)) self.limits = null;
         try self.provider.resize(self.alloc, 0);
         try self.provider.appendSlice(self.alloc, provider);
     }
@@ -236,6 +240,7 @@ pub const Panels = struct {
                 self.tot_cr +|= usage.cache_read;
                 self.tot_cw +|= usage.cache_write;
                 self.usage = usage;
+                self.limits = usage.limits;
                 self.has_usage = true;
             },
             .stop => |stop| {
@@ -265,10 +270,19 @@ pub const Panels = struct {
         // --- Line 1: dim(project path + branch) + right-aligned hint ---
         {
             var x = rect.x;
-            try self.renderPathBranch(frm, &x, x_end, y1, rect.w, dim_st);
-
-            const hint = "drag: select";
-            if (hint.len + 1 < rect.w) {
+            var quota_buf: [128]u8 = undefined;
+            const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai") or std.mem.eql(u8, self.provider.items, "anthropic");
+            const hint = if (show_limits) quota.format(self.limits, &quota_buf) catch return error.NoSpaceLeft else "drag: select";
+            if (show_limits) {
+                const cols = @min(hint.len, rect.w);
+                const path_end = x_end - cols - @intFromBool(cols < rect.w);
+                try self.renderPathBranch(frm, &x, path_end, y1, path_end - rect.x, dim_st);
+                var hx = x_end - cols;
+                try writePart(frm, &hx, x_end, y1, hint, dim_st);
+            } else {
+                try self.renderPathBranch(frm, &x, x_end, y1, rect.w, dim_st);
+            }
+            if (!show_limits and hint.len + 1 < rect.w) {
                 var hx = x_end - hint.len;
                 if (hx > x + 1) {
                     try writePart(frm, &hx, x_end, y1, hint, dim_st);
@@ -840,6 +854,45 @@ test "panels track tool lifecycle and state transitions" {
         "after_text state=streaming\nafter_call state=tool id=call-1 name=read tool=running\nafter_result state=streaming tool=ok\nafter_stop state=done",
         snap.items,
     );
+}
+
+test "quota footer renders reported windows and clears them on provider change" {
+    var ps = try Panels.initFull(std.testing.allocator, "gpt", "openai", "/a/very/long/project/path/that/must/not/hide/quotas", "main");
+    defer ps.deinit();
+    try ps.append(.{ .usage = .{ .limits = .{ .windows = .{
+        .{ .used = 25, .minutes = 300 },
+        .{ .used = 80, .minutes = 10080 },
+    } } } });
+    var frm = try frame.Frame.init(std.testing.allocator, 40, 2);
+    defer frm.deinit(std.testing.allocator);
+    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
+    const row = try rowSegmentsAlloc(std.testing.allocator, &frm, 0);
+    defer std.testing.allocator.free(row);
+    try expectSnapText(@src(), "@0:/hide/quotas | @13:(main) | @20:used | @25:5h:25% | @32:week:80%", row);
+    try ps.setProvider("anthropic");
+    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
+    const cleared = try rowSegmentsAlloc(std.testing.allocator, &frm, 0);
+    defer std.testing.allocator.free(cleared);
+    try expectSnapText(@src(), "@0:/must/not/hide/quotas | @22:(main) | @29:limits: | @37:n/a", cleared);
+}
+
+test "quota footer clears missing data and model changes and fits narrow terminals" {
+    var ps = try Panels.init(std.testing.allocator, "gpt", "openai");
+    defer ps.deinit();
+    const u: core.providers.Usage = .{ .limits = .{ .windows = .{ .{ .used = 0, .minutes = 43200 }, null } } };
+    try ps.append(.{ .usage = u });
+    try ps.setModel("other");
+    try std.testing.expect(ps.limits == null);
+    try ps.append(.{ .usage = u });
+    try ps.append(.{ .usage = .{} });
+    try std.testing.expect(ps.limits == null);
+    try ps.append(.{ .usage = u });
+    var frm = try frame.Frame.init(std.testing.allocator, 8, 2);
+    defer frm.deinit(std.testing.allocator);
+    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 8, .h = 2 });
+    const actual = try rowSegmentsAlloc(std.testing.allocator, &frm, 0);
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(), "@0:used | @5:mon", actual);
 }
 
 test "panels render 2-line footer with cwd and model" {

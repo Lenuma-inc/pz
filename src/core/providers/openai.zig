@@ -153,6 +153,7 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
         completed,
         failed,
         error_ev,
+        limits,
     };
     const event_map = std.StaticStringMap(EventType).initComptime(.{
         .{ "response.output_item.added", .output_item_added },
@@ -165,6 +166,7 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
         .{ "response.completed", .completed },
         .{ "response.failed", .failed },
         .{ "error", .error_ev },
+        .{ "codex.rate_limits", .limits },
     });
 
     const resolved = event_map.get(ev_type) orelse return null;
@@ -179,6 +181,16 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
         .completed => onCompleted(self, ar, data),
         .failed => onFailed(self),
         .error_ev => onError(self, ar, data),
+        .limits => blk: {
+            const quota = @import("limits.zig");
+            const Event = struct { rate_limits: ?quota.CodexLimits = null };
+            const ev = std.json.parseFromSlice(Event, ar, data, json_opts) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidQuota,
+            };
+            if (ev.value.rate_limits) |limits| self.limits = try quota.fromCodex(limits);
+            break :blk null;
+        },
     };
 }
 
@@ -1305,6 +1317,40 @@ test "Responses SSE rejects premature EOF and read failures" {
     };
     stream.body_rdr = &failing;
     try testing.expectError(error.ReadFailed, stream.next());
+}
+
+test "quota response headers reach usage without changing token counts" {
+    var stream = hc.testStream(Cfg);
+    defer stream.arena.deinit();
+    stream.limits = try @import("limits.zig").parse(auth_mod.Provider.openai, "HTTP/1.1 200 OK\r\nx-codex-primary-used-percent: 12\r\nx-codex-primary-window-minutes: 300\r\n\r\n");
+    var reader = std.Io.Reader.fixed("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}}\n\n");
+    stream.body_rdr = &reader;
+    const ev = (try stream.stream.next()).?;
+    try testing.expectEqual(@as(u64, 14), ev.usage.tot_tok);
+    var buf: [128]u8 = undefined;
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "used 5h:12%", try @import("limits.zig").format(ev.usage.limits, &buf));
+}
+
+test "quota Codex stream event supplies limits when headers are absent" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    var reader = std.Io.Reader.fixed(
+        "data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":24,\"window_minutes\":300},\"secondary\":{\"used_percent\":63,\"window_minutes\":10080}}}\n\n" ++
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}}\n\n",
+    );
+    stream.body_rdr = &reader;
+    const ev = (try stream.next()).?;
+    try testing.expectEqual(@as(u64, 14), ev.usage.tot_tok);
+    var buf: [128]u8 = undefined;
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "used 5h:24% week:63%", try @import("limits.zig").format(ev.usage.limits, &buf));
+}
+
+test "quota malformed Codex stream event is reported" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    var reader = std.Io.Reader.fixed("data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":-1}}}\n\n");
+    stream.body_rdr = &reader;
+    try testing.expectError(error.InvalidQuota, stream.next());
 }
 
 test "Responses SSE accepts completed response without socket EOF" {
