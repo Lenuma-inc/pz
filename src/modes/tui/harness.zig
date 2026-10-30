@@ -296,6 +296,9 @@ pub const Ui = struct {
 
         self.applySelection(tx_h);
 
+        // Publish cells and the editor cursor together, with no cursor on dirty runs.
+        try out.writeAll("\x1b[?2026h\x1b[?25l");
+        errdefer out.writeAll("\x1b[?2026l") catch {}; // cleanup: propagation impossible
         try self.renderer.render(&self.frm, out);
 
         // Render inline images after frame (they overlay frame cells)
@@ -321,6 +324,7 @@ pub const Ui = struct {
         } else {
             try out.writeAll("\x1b[?25l"); // hide cursor
         }
+        try out.writeAll("\x1b[?2026l");
     }
 
     fn applySelection(self: *Ui, transcript_h: usize) void {

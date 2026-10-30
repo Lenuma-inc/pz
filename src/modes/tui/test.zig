@@ -1298,6 +1298,35 @@ test "UX2 model cycle returns cycle_model action" {
     try std.testing.expectEqual(harness.editor.Action.cycle_model, act);
 }
 
+test "UX2 backspace and arrows publish editor text and cursor in one frame" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+    var vs = try VScreen.init(std.testing.allocator, 40, 8);
+    defer vs.deinit();
+    try ui.ed.insertSlice("Тест fff");
+    try renderToVs(&ui, &vs);
+
+    const keys = [_]harness.editor.Key{ .left, .backspace, .left, .{ .char = 'X' }, .right, .delete };
+    for (keys) |key| {
+        _ = try ui.onKey(key);
+        var buf: [16384]u8 = undefined;
+        var out = BufWriter.init(&buf);
+        try ui.draw(&out);
+        const raw = out.view();
+        try std.testing.expect(std.mem.startsWith(u8, raw, "\x1b[?2026h\x1b[?25l"));
+        try std.testing.expect(std.mem.endsWith(u8, raw, "\x1b[?25h\x1b[?2026l"));
+        const end = std.mem.indexOf(u8, raw, "\x1b[?2026l").?;
+        try std.testing.expectEqual(raw.len - "\x1b[?2026l".len, end);
+        vs.feed(raw);
+        const row = try vs.rowText(std.testing.allocator, 4);
+        defer std.testing.allocator.free(row);
+        try std.testing.expectEqualStrings(ui.editorText(), std.mem.trim(u8, row, " "));
+    }
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "text={s}|row={d}|col={d}", .{ ui.editorText(), vs.row, vs.col });
+    defer std.testing.allocator.free(snap);
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "text=Тест Xf|row=4|col=8", snap);
+}
+
 test "UX2 editor submit clears and adds to transcript" {
     var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
     defer ui.deinit();

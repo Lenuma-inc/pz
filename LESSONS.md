@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-31)
 
 ### Do More
+- Keep synchronized terminal updates open through editor cursor placement, and hide the cursor while painting dirty cells.
 - Compare context compaction by pinned version: OpenCode V1 pruning differs from V2 summary/tail retention; distinguish active context replacement from persisted history deletion.
 - Search exact symbols in known paths before repository-wide scans; preview long matching lines rather than sending them whole.
 - Reduce repeated agent instructions and model-visible output before trading away reasoning quality; stop exploration and verification once task evidence is sufficient.
@@ -19,6 +20,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Correlate child errors and replay stages with the user's actual session before changing swarm scheduling.
 
 ### Do Not Do
+- Treat a frame-only renderer test as proof of cursor redraw correctness; test the complete Ui.draw transaction and real keyboard edits.
 - Treat ffprobe metadata as proof of full decoding or visual quality; keep media regression checks focused when requested.
 - Treat ordinary directory context in delegated tasks as a file attachment, or fabricate content for attachments absent from old sessions.
 - Assume deterministic provider fixtures match current reasoning budgets or guarded tool-result framing.

@@ -8,7 +8,6 @@ const DecMode = enum(u16) {
     cursor = 25,
     alt_screen = 1049,
     bracketed_paste = 2004,
-    sync = 2026,
 };
 
 const Layer = color_detect.Layer;
@@ -78,9 +77,6 @@ pub const Renderer = struct {
     pub fn render(self: *Renderer, next: *const frame.Frame, out: anytype) (RenderError || anyerror)!void {
         if (self.prev.w != next.w or self.prev.h != next.h) return error.SizeMismatch;
 
-        try out.writeAll(decSet(.sync));
-        errdefer out.writeAll(decRst(.sync)) catch {}; // cleanup: propagation impossible
-
         if (self.cold) {
             try out.writeAll("\x1b[0m\x1b[2J\x1b[H");
         }
@@ -123,8 +119,6 @@ pub const Renderer = struct {
         if (!cur_st.isDefault()) {
             try out.writeAll("\x1b[0m");
         }
-
-        try out.writeAll(decRst(.sync));
 
         try self.prev.copyFrom(next);
         self.cold = false;
@@ -179,7 +173,7 @@ test "renderer first frame clears and paints dirty runs" {
     try rnd.render(&frm, &out);
 
     try std.testing.expectEqualStrings(
-        decSet(.sync) ++ "\x1b[0m\x1b[2J\x1b[H\x1b[1;1HAB\x1b[2;4HQ" ++ decRst(.sync),
+        "\x1b[0m\x1b[2J\x1b[H\x1b[1;1HAB\x1b[2;4HQ",
         out.view(),
     );
 }
@@ -202,7 +196,7 @@ test "renderer only emits changed cells after initial frame" {
     try frm.set(1, 0, 'Z', .{});
     try rnd.render(&frm, &out);
 
-    try std.testing.expectEqualStrings(decSet(.sync) ++ "\x1b[1;2HZ" ++ decRst(.sync), out.view());
+    try std.testing.expectEqualStrings("\x1b[1;2HZ", out.view());
 }
 
 test "renderer emits style transitions and resets to default" {
@@ -225,7 +219,7 @@ test "renderer emits style transitions and resets to default" {
     try rnd.render(&frm, &out);
 
     try std.testing.expectEqualStrings(
-        decSet(.sync) ++ "\x1b[0m\x1b[2J\x1b[H\x1b[1;1H\x1b[0;1;38;5;1mAB\x1b[0mC" ++ decRst(.sync),
+        "\x1b[0m\x1b[2J\x1b[H\x1b[1;1H\x1b[0;1;38;5;1mAB\x1b[0mC",
         out.view(),
     );
 }

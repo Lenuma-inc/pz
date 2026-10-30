@@ -1466,6 +1466,38 @@ test "UX2 PTY input: type text, ctrl-u kills line, ctrl-c quits" {
     try std.testing.expect(out.output.len > 0);
 }
 
+test "UX2 PTY backspace and arrows redraw repeated and Cyrillic text" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "Тест fff" },
+        .{ .wait_for = .{ .text = "Тест fff" } },
+        .{ .inject = "\x1b[D\x7f\x1b[DX\x1b[C\x1b[3~" },
+        .{ .wait_for = .{ .text = "Тест Xf" } },
+        .{ .snapshot = "edited" },
+        .{ .inject = "\x03\x03" },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    var lines = std.mem.splitScalar(u8, out.snapshots[0].grid, '\n');
+    var edited: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "Тест") != null) edited = std.mem.trim(u8, line, " ");
+    }
+    try @import("helpers.zig").expectSnapText(@src(), "Тест Xf", edited orelse return error.TestUnexpectedResult);
+}
+
 test "UX3 PTY commands: /help and /hotkeys render output" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
