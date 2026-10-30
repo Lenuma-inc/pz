@@ -16,6 +16,7 @@ pub const Overlay = struct {
         title: []u8,
         time: []u8,
         tokens: []u8,
+        at_ms: i64 = 0,
     };
 
     items: []const []const u8,

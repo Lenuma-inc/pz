@@ -6392,10 +6392,20 @@ fn listSessionRows(alloc: std.mem.Allocator, session_dir: []const u8) ![]tui_ove
     });
 
     const now_ms = core.time.milliTimestamp();
-    for (names.items, 0..) |sid, idx| {
-        rows[idx] = try buildSessionRow(alloc, dir, sid, now_ms);
+    var count: usize = 0;
+    for (names.items) |sid| {
+        if (try buildSessionRow(alloc, dir, sid, now_ms)) |row| {
+            rows[count] = row;
+            count += 1;
+        }
     }
-    return rows;
+    std.sort.pdq(tui_overlay.Overlay.SessionRow, rows[0..count], {}, struct {
+        fn less(_: void, a: tui_overlay.Overlay.SessionRow, b: tui_overlay.Overlay.SessionRow) bool {
+            if (a.at_ms != b.at_ms) return a.at_ms > b.at_ms;
+            return std.mem.order(u8, a.sid, b.sid) == .gt;
+        }
+    }.less);
+    return try alloc.realloc(rows, count);
 }
 
 fn listSessionSids(alloc: std.mem.Allocator, session_dir: []const u8) ![][]u8 {
@@ -6430,7 +6440,7 @@ fn buildSessionRow(
     dir: std.Io.Dir,
     sid: []const u8,
     now_ms: i64,
-) !tui_overlay.Overlay.SessionRow {
+) !?tui_overlay.Overlay.SessionRow {
     var title: ?[]u8 = null;
     errdefer if (title) |t| alloc.free(t);
     var last_ms: i64 = 0;
@@ -6455,11 +6465,10 @@ fn buildSessionRow(
         }
     }
 
+    const row_title = title orelse return null;
     const sid_dup = try alloc.dupe(u8, sid);
     errdefer alloc.free(sid_dup);
-    const row_title = if (title) |t| t else try alloc.dupe(u8, sid);
-    errdefer if (title == null) alloc.free(row_title);
-    const time = try formatSessionAgeAlloc(alloc, now_ms, last_ms);
+    const time = if (last_ms > 0) try formatSessionAgeAlloc(alloc, now_ms, last_ms) else try alloc.dupe(u8, "—");
     errdefer alloc.free(time);
     const tokens = try formatSessionTokensAlloc(alloc, tot_tok);
     errdefer alloc.free(tokens);
@@ -6469,6 +6478,7 @@ fn buildSessionRow(
         .title = row_title,
         .time = time,
         .tokens = tokens,
+        .at_ms = last_ms,
     };
 }
 
@@ -8725,12 +8735,14 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
     try tmp.dir.createDirPath(std.testing.io, "sess");
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sess/200.jsonl",
-        .data = "",
+        .data = "{\"version\":1,\"at_ms\":0,\"data\":{\"prompt\":{\"text\":\"Recent\"}}}\n",
     });
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sess/100.jsonl",
-        .data = "",
+        .data = "{\"version\":1,\"at_ms\":0,\"data\":{\"prompt\":{\"text\":\"Earlier\"}}}\n",
     });
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sess/300.jsonl", .data = "" });
 
     const sess_abs = try tmp.dir.realPathFileAlloc(std.testing.io, "sess", std.testing.allocator);
     defer std.testing.allocator.free(sess_abs);
@@ -8759,24 +8771,24 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
         \\  .title: []const u8
         \\    "Resume Session"
         \\  .selected: []const u8
-        \\    "100"
+        \\    "200"
         \\  .rows: [2]app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
         \\    [0]: app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
         \\      .sid: []const u8
-        \\        "100"
+        \\        "200"
         \\      .title: []const u8
-        \\        "100"
+        \\        "Recent"
         \\      .time: []const u8
-        \\        "now"
+        \\        "—"
         \\      .tokens: []const u8
         \\        "0 tok"
         \\    [1]: app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
         \\      .sid: []const u8
-        \\        "200"
+        \\        "100"
         \\      .title: []const u8
-        \\        "200"
+        \\        "Earlier"
         \\      .time: []const u8
-        \\        "now"
+        \\        "—"
         \\      .tokens: []const u8
         \\        "0 tok"
     ).expectEqual(Snap{
@@ -8789,11 +8801,11 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
     });
 
     ui.ov.?.down();
-    try std.testing.expectEqualStrings("200", ui.ov.?.selected().?);
-    ui.ov.?.down();
     try std.testing.expectEqualStrings("100", ui.ov.?.selected().?);
-    ui.ov.?.up();
+    ui.ov.?.down();
     try std.testing.expectEqualStrings("200", ui.ov.?.selected().?);
+    ui.ov.?.up();
+    try std.testing.expectEqualStrings("100", ui.ov.?.selected().?);
 
     ui.ov.?.deinit(std.testing.allocator);
     ui.ov = null;
