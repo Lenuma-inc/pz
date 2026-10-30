@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-31)
 
 ### Do More
+- Distinguish punctuation outside a quoted path in pasted diagnostics from punctuation inside an attachment filename.
 - Sort session pickers by recorded activity; hide sessions without prompts instead of presenting internal IDs as titles.
 - Persist admitted attachment contents in session prompts; replay recorded data instead of reopening temporary source paths.
 - Cut display previews at UTF-8 boundaries, including small byte limits and footer buffers.

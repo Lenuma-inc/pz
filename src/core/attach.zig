@@ -24,6 +24,7 @@ pub const Paths = struct {
             if (self.pos == self.text.len) return null;
             var len: usize = 0;
             var quote: ?u8 = null;
+            var quoted_len: ?usize = null;
             var literal = false;
             while (self.pos < self.text.len) {
                 var c = self.text[self.pos];
@@ -31,6 +32,7 @@ pub const Paths = struct {
                 self.pos += 1;
                 if (quote != null and c == quote.?) {
                     quote = null;
+                    quoted_len = len;
                     continue;
                 }
                 if (quote == null and (c == '"' or c == '\'') and len == 0) {
@@ -50,6 +52,12 @@ pub const Paths = struct {
             var path: []const u8 = self.buf[0..len];
             if (!literal) path = std.mem.trimEnd(u8, path, ",;:!?)]}");
             const uri = std.mem.startsWith(u8, path, "file:///");
+            // A quoted path followed by prose punctuation (e.g. a traceback) is context.
+            if (!uri and !std.mem.startsWith(u8, path, "@")) {
+                if (quoted_len) |end| {
+                    if (end < path.len and std.mem.trim(u8, path[end..], ",;:!?)]}").len == 0) continue;
+                }
+            }
             const explicit = uri or std.fs.path.isAbsolute(path) or std.mem.startsWith(u8, path, "./") or
                 std.mem.startsWith(u8, path, "../") or std.mem.startsWith(u8, path, "~/") or std.mem.startsWith(u8, path, "@");
             if (!explicit) {
@@ -211,6 +219,7 @@ test "attachment paths handle quoted, escaped, URI and multiple files" {
     try std.testing.expect(try paths.next() == null);
     try std.testing.expect(!isPrompt("/help"));
     try std.testing.expect(!isPrompt("/skill argument"));
+    try std.testing.expect(!isPrompt("File \"/tmp/settings_dialog.py\", line 1839, in eventFilter"));
     var invalid = Paths{ .text = "file:///tmp/x%00.png" };
     try std.testing.expectError(error.InvalidAttachmentPath, invalid.next());
 }
