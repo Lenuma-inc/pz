@@ -1,4 +1,4 @@
-//! Bounded MP4 contact-sheet extraction for vision-capable providers.
+//! Bounded local video contact sheets and image conversion.
 const builtin = @import("builtin");
 const std = @import("std");
 const sys = @import("pz_io");
@@ -29,10 +29,11 @@ pub fn contactSheetAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
 
     const ffmpeg = try resolveTool(alloc, "ffmpeg");
     defer alloc.free(ffmpeg);
-    const filter = try std.fmt.allocPrint(alloc, "fps={d:.8},scale=320:-2,tile=4x2", .{8.0 / duration});
+    // Pad short clips so every sheet has eight cells; constrain portrait and landscape frames alike.
+    const filter = try std.fmt.allocPrint(alloc, "fps={d:.8}:round=up,scale=480:360:force_original_aspect_ratio=decrease,pad=480:360:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop=8,tile=4x2", .{8.0 / duration});
     defer alloc.free(filter);
     const result = try std.process.run(alloc, sys.io, .{
-        .argv = &.{ ffmpeg, "-protocol_whitelist", "file,pipe", "-threads", "1", "-v", "error", "-i", path, "-vf", filter, "-frames:v", "1", "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1" },
+        .argv = &.{ ffmpeg, "-nostdin", "-protocol_whitelist", "file,pipe", "-threads", "1", "-v", "error", "-i", path, "-map", "0:v:0", "-an", "-sn", "-vf", filter, "-frames:v", "1", "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1" },
         .stdout_limit = .limited(max_image_bytes),
         .stderr_limit = .limited(2048),
     });
@@ -44,15 +45,26 @@ pub fn contactSheetAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     return result.stdout;
 }
 
-pub fn findPath(text: []const u8) ?[]const u8 {
-    // shortcut: video paths must be whitespace-delimited; replace with a shell-style tokenizer if paths with spaces are needed.
-    var words = std.mem.tokenizeAny(u8, text, " \t\r\n\"'<>");
-    while (words.next()) |word| {
-        const path = std.mem.trimEnd(u8, word, ".,;:!?)]}");
-        if (!std.fs.path.isAbsolute(path) or path.len < 5) continue;
-        if (std.ascii.eqlIgnoreCase(path[path.len - 4 ..], ".mp4")) return path;
+pub fn isPath(path: []const u8) bool {
+    const exts = [_][]const u8{ ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpg", ".mpeg", ".3gp", ".mts", ".m2ts", ".flv", ".wmv" };
+    for (exts) |ext| {
+        if (std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ext)) return true;
     }
-    return null;
+    return false;
+}
+
+pub fn imageAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    const ffmpeg = try resolveTool(alloc, "ffmpeg");
+    defer alloc.free(ffmpeg);
+    const result = try std.process.run(alloc, sys.io, .{
+        .argv = &.{ ffmpeg, "-nostdin", "-protocol_whitelist", "file,pipe", "-threads", "1", "-v", "error", "-i", path, "-vf", "scale=1920:1920:force_original_aspect_ratio=decrease", "-frames:v", "1", "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1" },
+        .stdout_limit = .limited(max_image_bytes),
+        .stderr_limit = .limited(2048),
+    });
+    defer alloc.free(result.stderr);
+    errdefer alloc.free(result.stdout);
+    if (result.term != .exited or result.term.exited != 0 or result.stdout.len == 0) return error.ImageDecodeFailed;
+    return result.stdout;
 }
 
 fn resolveTool(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
@@ -66,12 +78,6 @@ fn resolveTool(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
         return try alloc.dupe(u8, candidate);
     }
     return error.VideoToolUnavailable;
-}
-
-test "findPath extracts only absolute MP4 paths" {
-    try std.testing.expectEqualStrings("/home/user/clip.mp4", findPath("Review /home/user/clip.mp4, please").?);
-    try std.testing.expect(findPath("/help") == null);
-    try std.testing.expect(findPath("clip.mp4") == null);
 }
 
 test "contactSheetAlloc reports a missing video path" {

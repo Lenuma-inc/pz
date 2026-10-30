@@ -11,6 +11,8 @@ const version_check = @import("version.zig");
 const config = @import("config.zig");
 const core = @import("../core.zig");
 const core_skill = @import("../core/skill.zig");
+const attach = @import("../core/attach.zig");
+const clipboard = @import("clipboard.zig");
 const summary_types = @import("../core/session/summary.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
@@ -4825,18 +4827,17 @@ fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8, home: ?[]const u8)
     return classifySlashSkill(skills, name);
 }
 
-fn isAbsoluteMp4Prompt(line: []const u8) bool {
+fn isFilePrompt(line: []const u8) bool {
     const end = std.mem.indexOfAny(u8, line, " \t\r\n") orelse line.len;
-    const path = std.mem.trimEnd(u8, line[0..end], ".,;:!?)]}");
-    return std.fs.path.isAbsolute(path) and path.len >= 4 and std.ascii.eqlIgnoreCase(path[path.len - 4 ..], ".mp4");
+    return attach.isPrompt(line[0..end]);
 }
 
-test "absolute MP4 paths are treated as prompts, not slash commands" {
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/video.mp4"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.MP4"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.mp4 summarize this"));
-    try std.testing.expect(isAbsoluteMp4Prompt("/home/user/clip.mp4, inspect it"));
-    try std.testing.expect(!isAbsoluteMp4Prompt("/help"));
+test "absolute file paths are prompts while slash commands retain arguments" {
+    try std.testing.expect(attach.isPrompt("/home/user/video.mp4"));
+    try std.testing.expect(attach.isPrompt("/home/user/report.pdf summarize this"));
+    try std.testing.expect(attach.isPrompt("/home/user/screen.png, inspect it"));
+    try std.testing.expect(!attach.isPrompt("/help"));
+    try std.testing.expect(!isFilePrompt("/export /tmp/out.md"));
 }
 
 fn handleSlashCommand(
@@ -4858,7 +4859,7 @@ fn handleSlashCommand(
     ctl_audit: *RuntimeCtlAudit,
     home: ?[]const u8,
 ) !CmdRes {
-    if (line.len == 0 or line[0] != '/' or isAbsoluteMp4Prompt(line)) return .unhandled;
+    if (line.len == 0 or line[0] != '/' or isFilePrompt(line)) return .unhandled;
 
     const body = std.mem.trim(u8, line[1..], " \t");
     if (body.len == 0) return .handled;
@@ -7715,88 +7716,105 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
 }
 
 fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8, pol: *const RuntimePolicy) !void {
-    if (!pol.allowsCmdKind("osascript", null, "clipboard")) {
+    var env = try sys.environ().createMap(alloc);
+    defer env.deinit();
+    const source = clipboard.backend(env.get("WAYLAND_DISPLAY"), env.get("DISPLAY")) catch |err| {
+        try pasteError(alloc, ui, err);
+        return;
+    };
+    if (!pol.allowsCmdKind(source.command(), null, "clipboard")) {
         try ui.tr.infoText("[paste denied: policy]");
         return;
     }
-    // macOS: check clipboard for image via osascript
-    const argv = [_][]const u8{
-        "/usr/bin/osascript", "-e",
-        "try\nset theType to (clipboard info for «class PNGf»)\nreturn \"image\"\non error\nreturn \"none\"\nend try",
-    };
-    const result = std.process.run(alloc, sys.io, .{
-        .argv = argv[0..],
-        .stdout_limit = .limited(256),
-        .stderr_limit = .limited(256),
-    }) catch {
-        try ui.tr.infoText("[paste: clipboard check failed]");
+    const content = clipboard.readAlloc(alloc, source) catch |err| {
+        try pasteError(alloc, ui, err);
         return;
     };
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-
-    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (!std.mem.eql(u8, trimmed, "image")) {
-        try pasteText(alloc, ui, pol);
-        return;
-    }
-
-    // Save clipboard image to unique temp file
-    var tmp_buf: [128]u8 = undefined;
-    const ts: u64 = @truncate(@as(u128, @bitCast(core.time.nanoTimestamp())));
-    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/pz-paste-{d}.png", .{ tmp_dir, ts });
-    defer std.Io.Dir.deleteFileAbsolute(sys.io, tmp_path) catch {}; // cleanup: propagation impossible
-
-    // Reject paths with chars that could break out of AppleScript string interpolation.
-    if (std.mem.indexOfAny(u8, tmp_path, "\"\\") != null) {
-        try ui.tr.infoText("[paste: unsafe temp path]");
-        return;
-    }
-
-    const script = try std.fmt.allocPrint(alloc, "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"{s}\" with write permission\nwrite imgData to fp\nclose access fp", .{tmp_path});
-    defer alloc.free(script);
-
-    const save_argv = [_][]const u8{ "/usr/bin/osascript", "-e", script };
-    const save_result = std.process.run(alloc, sys.io, .{
-        .argv = save_argv[0..],
-        .stdout_limit = .limited(256),
-        .stderr_limit = .limited(256),
-    }) catch {
-        try ui.tr.infoText("[paste: save failed]");
-        return;
-    };
-    defer alloc.free(save_result.stdout);
-    defer alloc.free(save_result.stderr);
-
-    ui.tr.imageBlock(tmp_path) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "[pasted image: {s}]", .{tmp_path});
-        defer alloc.free(msg);
-        ui.tr.infoText(msg) catch return err;
-    };
+    defer alloc.free(content.data);
+    insertClipboard(alloc, ui, tmp_dir, content) catch |err| try pasteError(alloc, ui, err);
 }
 
-fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimePolicy) !void {
-    if (!pol.allowsCmdKind("pbpaste", null, "clipboard")) {
-        try ui.tr.infoText("[paste denied: policy]");
-        return;
-    }
-    const argv = [_][]const u8{"/usr/bin/pbpaste"};
-    const result = std.process.run(alloc, sys.io, .{
-        .argv = argv[0..],
-        .stdout_limit = .limited(256 * 1024),
-        .stderr_limit = .limited(256 * 1024),
-    }) catch {
-        try ui.tr.infoText("[paste failed]");
+fn pasteError(alloc: std.mem.Allocator, ui: *tui_harness.Ui, err: anyerror) !void {
+    const message = try std.fmt.allocPrint(alloc, "[paste: {s}; Linux requires wl-paste (Wayland) or xclip (X11)]", .{@errorName(err)});
+    defer alloc.free(message);
+    try ui.tr.infoText(message);
+}
+
+fn insertClipboard(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8, content: clipboard.Content) !void {
+    const ext = content.ext orelse {
+        try ui.ed.insertSlice(content.data);
         return;
     };
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
+    if (content.data.len > attach.max_bytes) return error.AttachmentTooLarge;
+    const ts: u64 = @truncate(@as(u128, @bitCast(core.time.nanoTimestamp())));
+    const path = try std.fmt.allocPrint(alloc, "{s}/pz-paste-{d}{s}", .{ tmp_dir, ts, ext });
+    defer alloc.free(path);
+    const file = try core.fs_secure.createFilePath(path, .{ .exclusive = true });
+    defer file.close(sys.io);
+    try file.writeStreamingAll(sys.io, content.data);
+    // Keep the source available for submission and session replay, just like a dropped file.
+    const quoted = try quoteAttachmentPath(alloc, path);
+    defer alloc.free(quoted);
+    try ui.ed.insertSlice(quoted);
+    try ui.tr.infoText("[image attached; Enter to send]");
+}
 
-    if (result.stdout.len > 0) {
-        ui.ed.insertSlice(result.stdout) catch |err| {
-            ui.tr.infoText("[paste: invalid UTF-8]") catch return err;
-        };
+fn quoteAttachmentPath(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, " \"");
+    for (path) |c| {
+        if (c == '\\' or c == '\"') try out.append(alloc, '\\');
+        try out.append(alloc, c);
     }
+    try out.appendSlice(alloc, "\" ");
+    return out.toOwnedSlice(alloc);
+}
+
+test "files UX clipboard image survives insertion and becomes a provider image" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    const png = "\x89PNG\r\n\x1a\npixels";
+    try insertClipboard(alloc, &ui, root, .{ .data = @constCast(png), .ext = ".png" });
+    var paths = attach.Paths{ .text = ui.ed.text() };
+    const path = (try paths.next()).?;
+    const loaded = try attach.readAlloc(alloc, path);
+    defer alloc.free(loaded.part.image.data);
+    try std.testing.expectEqualStrings(png, loaded.part.image.data);
+    try std.testing.expectEqualStrings("image/png", loaded.part.image.media_type);
+    var buf: [32768]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    try ui.draw(&out);
+    const vscreen = @import("../modes/tui/vscreen.zig");
+    var vs = try vscreen.VScreen.init(alloc, 80, 12);
+    defer vs.deinit();
+    vs.feed(out.buffered());
+    var seen = false;
+    for (0..12) |row| {
+        const text = try vs.rowText(alloc, row);
+        defer alloc.free(text);
+        if (std.mem.indexOf(u8, text, "image attached; Enter to send") != null) seen = true;
+    }
+    try std.testing.expect(seen);
+}
+
+test "files UX quoted dropped paths stay prompts and clipboard text enters editor" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    try insertClipboard(alloc, &ui, "/tmp", .{ .data = @constCast("read this "), .ext = null });
+    const quoted = try quoteAttachmentPath(alloc, "/tmp/a \"quoted\" image.png");
+    defer alloc.free(quoted);
+    try ui.ed.insertSlice(quoted);
+    var paths = attach.Paths{ .text = ui.ed.text() };
+    try std.testing.expectEqualStrings("/tmp/a \"quoted\" image.png", (try paths.next()).?);
+    try std.testing.expect(isFilePrompt("/tmp/report.pdf"));
+    try std.testing.expect(!isFilePrompt("/export /tmp/report.pdf"));
 }
 
 const TurnCtx = struct {

@@ -3495,6 +3495,84 @@ test "pty: /bg run with extra args submits without picker interference" {
     try std.testing.expect(std.mem.indexOf(u8, out.output, "bg started") != null);
 }
 
+test "files PTY dropped text and renamed image reach provider in one prompt" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a note.txt", .data = "ATTACHED_TEXT_42" });
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "photo.bin", .data = "\x89PNG\r\n\x1a\npixels" });
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "files-provider.py", .data =
+        \\import json, sys
+        \\req = json.load(sys.stdin)
+        \\raw = json.dumps(req)
+        \\assert 'ATTACHED_TEXT_42' in raw, raw
+        \\assert 'image/png' in raw and 'iVBORw0KGgpwaXhlbHM=' in raw, raw
+        \\print('text:FILESRECEIVED\nstop:done')
+    });
+    const input = try std.fmt.allocPrint(alloc, "\x1b[200~'{s}/a note.txt' '{s}/photo.bin'\x1b[201~\n", .{ ctx.cwd_abs, ctx.cwd_abs });
+    defer alloc.free(input);
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = input },
+        .{ .wait_for = .{ .text = "FILESRECEIVED", .timeout_ms = 5000 } },
+        .{ .snapshot = "files" },
+        .{ .inject = "\x03\x03" },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session", "--provider-cmd", "python3 files-provider.py" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "FILESRECEIVED") != null);
+}
+
+test "files PTY Ctrl-V attaches clipboard image on Wayland and X11" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    for ([_]bool{ true, false }) |wayland| {
+        var ctx = try setupInteractiveEnv(alloc);
+        defer ctx.deinit();
+        const command = if (wayland) "wl-paste" else "xclip";
+        const script =
+            \\#!/usr/bin/python3
+            \\import sys
+            \\if '--list-types' in sys.argv or 'TARGETS' in sys.argv:
+            \\    print('text/plain\nimage/png')
+            \\else:
+            \\    sys.stdout.buffer.write(b'\x89PNG\r\n\x1a\npixels')
+        ;
+        const file = try ctx.tmp.dir.createFile(std.testing.io, command, .{ .permissions = .fromMode(0o700) });
+        try file.writeStreamingAll(std.testing.io, script);
+        file.close(std.testing.io);
+        const path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ ctx.cwd_abs, ctx.env.get("PATH") orelse "/usr/bin:/bin" });
+        defer alloc.free(path);
+        try ctx.env.put("PATH", path);
+        try ctx.env.put("TMPDIR", ctx.cwd_abs);
+        if (wayland) {
+            try ctx.env.put("WAYLAND_DISPLAY", "pz-test");
+        } else {
+            _ = ctx.env.swapRemove("WAYLAND_DISPLAY");
+            try ctx.env.put("DISPLAY", ":99");
+        }
+        try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "clip-provider.py", .data =
+            \\import json, sys
+            \\raw = json.dumps(json.load(sys.stdin))
+            \\assert 'image/png' in raw and 'iVBORw0KGgpwaXhlbHM=' in raw, raw
+            \\print('text:CLIPBOARDRECEIVED\nstop:done')
+        });
+        const steps = [_]InteractiveStep{
+            .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+            .{ .inject = "\x16" },
+            .{ .wait_for = .{ .text = "image attached; Enter to send", .timeout_ms = 5000 } },
+            .{ .inject = "\n" },
+            .{ .wait_for = .{ .text = "CLIPBOARDRECEIVED", .timeout_ms = 5000 } },
+            .{ .snapshot = "clipboard" },
+            .{ .inject = "\x03\x03" },
+        };
+        const args = [_][]const u8{ "--no-config", "--no-session", "--provider-cmd", "python3 clip-provider.py" };
+        var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &args, &steps);
+        defer out.deinit(alloc);
+        try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "CLIPBOARDRECEIVED") != null);
+    }
+}
+
 test "pty: unknown slash command shows error in transcript" {
     const alloc = std.testing.allocator;
     var ctx = try setupInteractiveEnv(alloc);

@@ -131,6 +131,29 @@ MIT
 
 ## Repository tools
 
+Drop local files into the prompt or paste their paths. Quoted paths, escaped
+spaces, `file:///` URLs, `~/`, `./`, and multiple files are supported. Ctrl+V
+reads images or text from the clipboard using `wl-paste` on Wayland, `xclip`
+on X11, or `osascript` on macOS. Pasted images enter the editor as attachments;
+press Enter to send them. Their private temporary files remain available for
+submission and replay; removing a source file makes replay fail explicitly.
+
+Text is read as UTF-8 regardless of extension. PNG, JPEG, GIF and WebP are
+recognized by their contents and sent as image parts. Other supported raster
+formats use installed `ffmpeg`. Video containers including MP4, MOV, MKV, WebM
+and AVI use `ffprobe` and `ffmpeg` to produce eight chronological frames;
+audio is not transcribed. Audio files provide format/stream metadata only.
+PDFs use installed `pdftotext` (text only; scans need OCR). DOCX, XLSX, PPTX,
+OpenDocument and EPUB text use isolated Python 3; other ZIPs provide a directory
+listing without extracting files. Embedded images, macros, spreadsheet display
+formatting and document layout are not preserved by text extraction.
+
+Limits: eight files, 4 MiB total extracted content, 100 MiB per source and five
+minutes per video. Unknown binaries, missing converters and oversized inputs
+fail explicitly. Image input still requires a vision-capable model. Media
+generation is a separate provider tool; selecting a Codex model alone does not
+expose Codex app tools in pz.
+
 `grep` uses installed `rg` for regular expressions, including single-file searches;
 `find` uses installed `fd` for literal names or glob patterns. Both honor ignore
 files. Missing executables fail explicitly. HTTP tools require installed `curl`.

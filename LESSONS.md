@@ -5,6 +5,9 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Attach clipboard images to the outgoing editor prompt and retain their source files; terminal preview alone does not send image content.
+- Choose clipboard readers from the active desktop session: wl-paste for Wayland, xclip for X11, osascript for macOS.
+- Sniff image bytes and label text-only document extraction and silent video frames explicitly in model context.
 - Test both legacy and Kitty key encodings through the real PTY; enabling Kitty changes how Shift+Tab arrives.
 - Verify thinking levels in serialized provider requests, including explicit off and distinct high/xhigh efforts.
 - Keep CLI, runtime, and provider defaults aligned; test startup without a thinking flag and reject removed mode names.

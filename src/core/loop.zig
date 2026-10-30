@@ -10,7 +10,7 @@ const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
 const core_time = @import("time.zig");
-const video = @import("video.zig");
+const attach = @import("attach.zig");
 
 pub const Err = error{
     EmptySessionId,
@@ -509,24 +509,42 @@ const Hist = struct {
     }
 
     fn pushTextDup(self: *Hist, role: providers.Role, text: []const u8) !void {
-        const owned = try self.alloc.dupe(u8, text);
-        errdefer self.alloc.free(owned);
-
-        try self.items.append(self.alloc, .{ .item = .{
-            .role = role,
-            .part = .{ .text = owned },
-        } });
-
-        if (role == .user) {
-            if (video.findPath(text)) |path| {
-                const image = try video.contactSheetAlloc(self.alloc, path);
-                errdefer self.alloc.free(image);
-                try self.items.append(self.alloc, .{ .item = .{
-                    .role = .user,
-                    .part = .{ .image = .{ .media_type = "image/jpeg", .data = image } },
-                } });
-            }
+        const start = self.items.items.len;
+        errdefer {
+            for (self.items.items[start..]) |ent| freePart(self.alloc, ent.item.part);
+            self.items.shrinkRetainingCapacity(start);
         }
+        try self.pushPartOwned(role, .{ .text = try self.alloc.dupe(u8, text) });
+        if (role != .user) return;
+        var paths = attach.Paths{ .text = text };
+        var count: usize = 0;
+        var total: usize = 0;
+        while (try paths.next()) |path| {
+            count += 1;
+            if (count > attach.max_files) return error.TooManyAttachments;
+            const loaded = try attach.readAlloc(self.alloc, path);
+            // Transfer the payload before any further fallible work so rollback owns it.
+            const label = std.fmt.allocPrint(self.alloc, "Attached file: {s}\n[{s}]", .{ path, loaded.note }) catch |err| {
+                freePart(self.alloc, loaded.part);
+                return err;
+            };
+            self.pushPartOwned(role, .{ .text = label }) catch |err| {
+                freePart(self.alloc, loaded.part);
+                return err;
+            };
+            try self.pushPartOwned(role, loaded.part);
+            total += switch (loaded.part) {
+                .text => |data| data.len,
+                .image => |image| image.data.len,
+                else => 0,
+            };
+            if (total > attach.max_bytes) return error.AttachmentsTooLarge;
+        }
+    }
+
+    fn pushPartOwned(self: *Hist, role: providers.Role, part: providers.Part) !void {
+        errdefer freePart(self.alloc, part);
+        try self.items.append(self.alloc, .{ .item = .{ .role = role, .part = part } });
     }
 
     fn pushToolCallDup(
@@ -5688,6 +5706,63 @@ test "CmdCache TTL checked on lookup rejects expired entries" {
     try std.testing.expect(!cache.containsAt(key, 1001));
     // Entry was removed
     try std.testing.expectEqual(@as(usize, 0), cache.count());
+}
+
+test "files history reads multiple attachments and rolls back a failed batch" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "FILE_CONTENT_42" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "renamed.bin", .data = "\x89PNG\r\n\x1a\npixels" });
+    const prompt = try std.fmt.allocPrint(alloc, "Read '{s}/note.txt' '{s}/renamed.bin'", .{ root, root });
+    defer alloc.free(prompt);
+    var hist = Hist{ .alloc = alloc };
+    defer hist.deinit();
+    try hist.pushTextDup(.user, prompt);
+    try std.testing.expectEqual(@as(usize, 5), hist.items.items.len);
+    const Snap = struct { text: []const u8, mime: []const u8, image_bytes: usize };
+    try @import("ohsnap").default.snap(@src(),
+        \\core.loop.test.files history reads multiple attachments and rolls back a failed batch.Snap
+        \\  .text: []const u8
+        \\    "FILE_CONTENT_42"
+        \\  .mime: []const u8
+        \\    "image/png"
+        \\  .image_bytes: usize = 14
+    ).expectEqual(Snap{
+        .text = hist.items.items[2].item.part.text,
+        .mime = hist.items.items[4].item.part.image.media_type,
+        .image_bytes = hist.items.items[4].item.part.image.data.len,
+    });
+    const bad = try std.fmt.allocPrint(alloc, "'{s}/note.txt' '{s}/missing'", .{ root, root });
+    defer alloc.free(bad);
+    try std.testing.expectError(error.FileNotFound, hist.pushTextDup(.user, bad));
+    try std.testing.expectEqual(@as(usize, 5), hist.items.items.len);
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: std.mem.Allocator, text: []const u8) !void {
+            var history = Hist{ .alloc = a };
+            defer history.deinit();
+            try history.pushTextDup(.user, text);
+        }
+    }.run, .{prompt});
+}
+
+test "files property arbitrary path tokens terminate without out-of-bounds access" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { text: zc.String }) bool {
+            const text = args.text.slice();
+            var paths = attach.Paths{ .text = text };
+            for (0..text.len + 1) |_| {
+                const before = paths.pos;
+                const path = paths.next() catch return true;
+                if (path == null) return true;
+                if (paths.pos <= before or paths.pos > text.len) return false;
+            }
+            return false;
+        }
+    }.prop, .{ .iterations = 200 });
 }
 
 test "Responses history preserves phases and message boundaries across replay" {
