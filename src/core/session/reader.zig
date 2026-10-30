@@ -11,6 +11,7 @@ const File = std.Io.File;
 
 pub const Opts = struct {
     max_line_bytes: usize = 32 * 1024 * 1024,
+    context: bool = false,
 };
 
 pub const ReplayReader = struct {
@@ -25,6 +26,11 @@ pub const ReplayReader = struct {
     arena: std.heap.ArenaAllocator,
     max_line_bytes: usize,
     line_no: usize = 0,
+    line_buf_len: usize = 0,
+    offset: u64 = 0,
+    context: bool = false,
+    checkpoint: ?Event = null,
+    checkpoint_sent: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, dir: Dir, sid: []const u8, opts: Opts) !ReplayReader {
         if (opts.max_line_bytes == 0) return error.InvalidMaxLineBytes;
@@ -35,17 +41,56 @@ pub const ReplayReader = struct {
         // Confined open: O_NOFOLLOW + hardlink check for .pz state.
         const file = try fs_secure.openConfined(dir, path, .{ .mode = .read_only });
 
-        return .{
+        var self: ReplayReader = .{
             .alloc = alloc,
             .file = file,
             .arena = std.heap.ArenaAllocator.init(alloc),
             .max_line_bytes = opts.max_line_bytes,
         };
+        errdefer self.deinit();
+        if (opts.context) {
+            while (try self.next()) |ev| {
+                if (ev.data != .checkpoint) continue;
+                const ck = ev.data.checkpoint;
+                const start = self.offset - self.line_buf_len;
+                if (ck.keep_from == 0 or ck.keep_from > start or ck.text.len == 0) return error.InvalidCheckpoint;
+                if (self.checkpoint) |prev| {
+                    if (ck.keep_from < prev.data.checkpoint.keep_from) return error.InvalidCheckpoint;
+                }
+                const owned = try ev.dupe(alloc);
+                if (self.checkpoint) |prev| prev.free(alloc);
+                self.checkpoint = owned;
+            }
+            const offset = if (self.checkpoint) |ev| ev.data.checkpoint.keep_from else 0;
+            const rc = std.c.lseek(self.file.handle, @intCast(offset -| 1), std.c.SEEK.SET);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {},
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+            if (offset > 0) {
+                var boundary: [1]u8 = undefined;
+                const n = try self.file.readStreaming(sys.io, &.{boundary[0..]});
+                if (n != 1 or boundary[0] != '\n') return error.InvalidCheckpoint;
+            }
+            self.io_pos = 0;
+            self.io_len = 0;
+            self.eof = false;
+            self.line_no = 0;
+            self.offset = offset;
+            self.context = true;
+        }
+        return self;
     }
 
     /// Returns an event whose string slices borrow from the reader arena.
     /// That storage is invalidated by the next `next()` or `nextDup()` call.
     pub fn next(self: *ReplayReader) !?Event {
+        if (self.checkpoint) |ev| {
+            if (self.context and !self.checkpoint_sent) {
+                self.checkpoint_sent = true;
+                return ev;
+            }
+        }
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.alloc);
 
@@ -76,6 +121,7 @@ pub const ReplayReader = struct {
                 try self.appendLinePart(slice[0..rel]);
                 self.io_pos += rel + 1;
                 const ev = try self.finishLine();
+                if (self.context and ev.data == .checkpoint) continue;
                 return ev;
             }
 
@@ -95,6 +141,7 @@ pub const ReplayReader = struct {
     }
 
     pub fn deinit(self: *ReplayReader) void {
+        if (self.checkpoint) |ev| ev.free(self.alloc);
         self.arena.deinit();
         self.line_buf.deinit(self.alloc);
         self.file.close(sys.io);
@@ -110,6 +157,8 @@ pub const ReplayReader = struct {
     }
 
     fn finishLine(self: *ReplayReader) !Event {
+        self.line_buf_len = self.line_buf.items.len + 1;
+        self.offset += self.line_buf_len;
         self.line_no += 1;
         defer {
             self.line_buf.clearRetainingCapacity();
@@ -721,5 +770,23 @@ test "P0-1 regression: no UAF across multi-event compaction replay" {
         const want_raw = try schema.encodeAlloc(alloc, want);
         defer alloc.free(want_raw);
         try std.testing.expectEqualStrings(want_raw, got_raw);
+    }
+}
+
+
+test "context replay rejects invalid checkpoint offsets without raw fallback" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wr = try @import("writer.zig").Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
+    for ([_]u64{ 0, 1, std.math.maxInt(u64) }) |offset| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.jsonl", .data = "" });
+        try wr.append("bad", .{ .data = .{ .prompt = .{ .text = "original" } } });
+        try wr.append("bad", .{ .data = .{ .checkpoint = .{ .text = "summary", .keep_from = offset } } });
+        try std.testing.expectError(error.InvalidCheckpoint, ReplayReader.init(alloc, tmp.dir, "bad", .{ .context = true }));
+        var raw = try ReplayReader.init(alloc, tmp.dir, "bad", .{});
+        defer raw.deinit();
+        const first = (try raw.next()) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(first.data == .prompt);
     }
 }

@@ -32,6 +32,11 @@ pub const Checkpoint = struct {
     compacted_at_ms: i64 = 0,
 };
 
+const Options = struct {
+    keep_tokens: usize = 20_000,
+    batch_bytes: usize = 64 * 1024,
+};
+
 pub fn summarize(
     alloc: Allocator,
     dir: Dir,
@@ -40,90 +45,177 @@ pub fn summarize(
     provider: *providers.Provider,
     model: []const u8,
 ) !Checkpoint {
+    return summarizeWith(alloc, dir, sid, now, provider, model, .{});
+}
+
+fn summarizeWith(
+    alloc: Allocator,
+    dir: Dir,
+    sid: []const u8,
+    now: i64,
+    provider: *providers.Provider,
+    model: []const u8,
+    opts: Options,
+) !Checkpoint {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
-    var rdr = try reader.ReplayReader.init(alloc, dir, sid, .{});
+    var rdr = try reader.ReplayReader.init(alloc, dir, sid, .{ .context = true });
     defer rdr.deinit();
+    const source_bytes = (try rdr.file.stat(sys.io)).size;
     var events: std.ArrayList(schema.Event) = .empty;
-    var lines: u64 = 0;
-    var last_prompt: usize = 0;
-    var prompts: usize = 0;
-    var last_stop: ?schema.Event.StopReason = null;
-    var last_model: ?schema.Event = null;
+    var offsets: std.ArrayList(u64) = .empty;
+    var sizes: std.ArrayList(usize) = .empty;
+    var input_bytes: u64 = 0;
+    var input_tokens: usize = 0;
     while (try rdr.next()) |ev| {
-        lines += 1;
         if (ev.data == .noop) continue;
-        if (ev.data == .prompt) {
-            last_prompt = events.items.len;
-            prompts += 1;
-        }
-        if (ev.data == .stop) last_stop = ev.data.stop.reason;
+        const raw = try schema.encodeAlloc(alloc, ev);
+        defer alloc.free(raw);
+        input_bytes += raw.len + 1;
         try events.append(a, try ev.dupe(a));
+        try offsets.append(a, if (ev.data == .checkpoint) 0 else rdr.offset - rdr.line_buf_len);
+        const tokens = estimateTokens(raw);
+        try sizes.append(a, tokens);
+        input_tokens +|= tokens;
     }
-    if (events.items.len == 0) return run(alloc, dir, sid, now);
+    const end = try cutPoint(a, events.items, sizes.items, opts.keep_tokens);
+    if (end == 0) return error.NoCompactableHistory;
+    const keep_from = if (end < offsets.items.len) offsets.items[end] else source_bytes;
 
-    // Keep the latest user turn intact, including attachments and tool pairs.
-    const end = if (prompts > 1) last_prompt else blk: {
-        if (last_stop == .done) break :blk events.items.len;
-        return error.NoCompactableHistory;
-    };
     var summary: ?[]const u8 = null;
     var start: usize = 0;
     while (start < end) {
         var batch: std.ArrayList(schema.Event) = .empty;
-        if (summary) |text| try batch.append(a, .{ .data = .{ .prompt = .{ .text = text } } });
+        if (summary) |text| try batch.append(a, .{ .data = .{ .checkpoint = .{ .text = text, .keep_from = keep_from } } });
         var bytes: usize = 0;
+        const batch_start = start;
         while (start < end) {
             const ev = events.items[start];
-            const raw = try schema.encodeAlloc(alloc, ev);
+            const raw = (try summaryEventAlloc(alloc, ev)) orelse {
+                start += 1;
+                continue;
+            };
             defer alloc.free(raw);
-            const wrapped = try prov_api.wrapUntrustedNamed(alloc, "session-event", @tagName(ev.data), raw);
-            defer alloc.free(wrapped);
-            if (bytes != 0 and bytes + wrapped.len > 128 * 1024) break;
-            bytes += wrapped.len;
+            if (bytes != 0 and bytes + raw.len > opts.batch_bytes) break;
+            if (raw.len > opts.batch_bytes) return error.SummaryInputOverBudget;
+            bytes += raw.len;
             try batch.append(a, ev);
-            if (ev.data == .model) last_model = ev;
             start += 1;
         }
+        if (batch.items.len == 0) continue;
+        // The final checkpoint gets deterministic paths from every summarized event.
         const result = (try generateSummaryWithProvider(alloc, provider, model, batch.items, .{
             .max_bytes = 256 * 1024,
-            .max_input_tokens = 256 * 1024,
+            .max_input_tokens = 128 * 1024,
         })) orelse return error.SummaryFailed;
         defer alloc.free(result.summary);
-        summary = try a.dupe(u8, result.summary);
+        if (start == batch_start) return error.SummaryInputOverBudget;
+        const footer = try formatFileOps(a, batch.items);
+        const body = if (footer) |text| result.summary[0 .. result.summary.len - text.len - 2] else result.summary;
+        summary = try a.dupe(u8, body);
     }
-
-    var kept: std.ArrayList(schema.Event) = .empty;
-    if (last_model) |ev| try kept.append(a, ev);
-    const final_summary = try appendFileOpsFooter(a, summary.?, events.items[0..end]);
-    try kept.append(a, .{ .at_ms = now, .data = .{ .prompt = .{ .text = final_summary } } });
-    try kept.append(a, .{ .at_ms = now, .data = .{ .stop = .{ .reason = .done } } });
-    try kept.appendSlice(a, events.items[end..]);
+    var original_rdr = try reader.ReplayReader.init(alloc, dir, sid, .{});
+    defer original_rdr.deinit();
+    var file_events: std.ArrayList(schema.Event) = .empty;
+    while (try original_rdr.next()) |ev| {
+        if (original_rdr.offset > keep_from) break;
+        if (ev.data == .tool_call) try file_events.append(a, try ev.dupe(a));
+    }
+    const final_summary = try appendFileOpsFooter(a, summary orelse return error.NoCompactableHistory, file_events.items);
+    const checkpoint: schema.Event = .{ .at_ms = now, .data = .{ .checkpoint = .{ .text = final_summary, .keep_from = keep_from } } };
+    const raw = try schema.encodeAlloc(alloc, checkpoint);
+    defer alloc.free(raw);
+    var ck: Checkpoint = .{
+        .in_lines = events.items.len,
+        .in_bytes = input_bytes,
+        .out_lines = 1,
+        .out_bytes = raw.len + 1,
+        .compacted_at_ms = now,
+    };
+    var out_tokens = estimateTokens(raw);
+    for (events.items[end..], sizes.items[end..]) |ev, tokens| {
+        out_tokens +|= tokens;
+        const row = try schema.encodeAlloc(alloc, ev);
+        defer alloc.free(row);
+        ck.out_lines += 1;
+        ck.out_bytes += row.len + 1;
+    }
+    if (ck.out_bytes >= ck.in_bytes or out_tokens >= input_tokens) return error.SummaryDidNotShrink;
 
     const path = try sid_path.sidJsonlAlloc(alloc, sid);
     defer alloc.free(path);
     const original = try fs_secure.openConfined(dir, path, .{ .mode = .read_only });
     defer original.close(sys.io);
-    var ck: Checkpoint = .{ .in_lines = lines, .in_bytes = (try original.stat(sys.io)).size, .compacted_at_ms = now };
+    if ((try original.stat(sys.io)).size != source_bytes) return error.SessionChanged;
     var tmp = try session_file.createSessionFile(alloc, dir, sid, ".jsonl.compact.tmp");
     defer tmp.deinit();
     const file = try fs_secure.createConfined(dir, tmp.path, .{ .truncate = true });
     defer file.close(sys.io);
-    for (kept.items) |ev| {
-        const raw = try schema.encodeAlloc(alloc, ev);
-        defer alloc.free(raw);
-        try file.writeStreamingAll(sys.io, raw);
-        try file.writeStreamingAll(sys.io, "\n");
-        ck.out_lines += 1;
-        ck.out_bytes += raw.len + 1;
+    var buf: [8192]u8 = undefined;
+    var copied: u64 = 0;
+    while (true) {
+        const n = original.readStreaming(sys.io, &.{buf[0..]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
+        if (n == 0) break;
+        copied += n;
+        if (copied > source_bytes) return error.SessionChanged;
+        try file.writeStreamingAll(sys.io, buf[0..n]);
     }
-    if (ck.out_bytes >= ck.in_bytes) return error.SummaryDidNotShrink;
+    if (copied != source_bytes) return error.SessionChanged;
+    try file.writeStreamingAll(sys.io, raw);
+    try file.writeStreamingAll(sys.io, "\n");
     try file.sync(sys.io);
+    try saveCheckpoint(alloc, dir, sid, ck);
+    if ((try original.stat(sys.io)).size != source_bytes) return error.SessionChanged;
     try dir.rename(tmp.path, dir, path, sys.io);
     tmp.close();
-    try saveCheckpoint(alloc, dir, sid, ck);
     return ck;
+}
+
+// Conservative estimate: ASCII coding text averages about three bytes per token.
+fn estimateTokens(text: []const u8) usize {
+    var ascii: usize = 0;
+    for (text) |byte| if (byte < 0x80) {
+        ascii += 1;
+    };
+    return (ascii + 2) / 3 + text.len - ascii;
+}
+
+fn cutPoint(alloc: Allocator, events: []const schema.Event, sizes: []const usize, keep_tokens: usize) !usize {
+    var target = events.len;
+    var kept: usize = 0;
+    while (target > 0 and kept < keep_tokens) {
+        target -= 1;
+        kept +|= sizes[target];
+    }
+    var pending: std.StringHashMapUnmanaged(void) = .empty;
+    defer pending.deinit(alloc);
+    var cut: ?usize = null;
+    var last_stop: ?schema.Event.StopReason = null;
+    for (events, 0..) |ev, i| {
+        const after_tools = i > 0 and events[i - 1].data == .tool_result;
+        if (cut == null and i >= target and ev.data != .checkpoint and ev.data != .tool_result and pending.count() == 0 and
+            (ev.data == .prompt or last_stop != null or after_tools)) cut = i;
+        switch (ev.data) {
+            .tool_call => |tc| {
+                const entry = try pending.getOrPut(alloc, tc.id);
+                if (entry.found_existing) return error.DuplicateToolCall;
+            },
+            .tool_result => |tr| {
+                if (!pending.remove(tr.id)) return error.OrphanToolResult;
+            },
+            .stop => |stop| last_stop = stop.reason,
+            .noop, .model, .usage, .checkpoint => {},
+            else => last_stop = null,
+        }
+    }
+    if (cut == null and pending.count() == 0 and last_stop == .done) return events.len;
+    // Do not spend a summary call merely replacing the preceding checkpoint.
+    if (cut == 1 and events[0].data == .checkpoint) return 0;
+    return cut orelse 0;
 }
 
 pub fn run(
@@ -155,6 +247,7 @@ pub fn run(
     var out_bytes: u64 = 0;
     while (try rdr.next()) |ev| {
         in_lines += 1;
+        if (ev.data == .checkpoint) return error.CompactedJournal;
         if (ev.data == .noop) continue;
 
         const raw = try schema.encodeAlloc(alloc, ev);
@@ -260,6 +353,45 @@ pub const GeneratedSummary = struct {
     event_jsons: [][]u8,
 };
 
+fn headEnd(text: []const u8, limit: usize) usize {
+    var end = @min(text.len, limit);
+    while (end > 0 and end < text.len and text[end] & 0xc0 == 0x80) end -= 1;
+    return end;
+}
+
+fn summaryEventAlloc(alloc: Allocator, ev: schema.Event) !?[]u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bounded = ev;
+    switch (ev.data) {
+        .noop, .thinking, .usage, .model, .message => return null,
+        .tool_result => |tr| {
+            if (tr.output.len > 4096) {
+                const head = headEnd(tr.output, 2048);
+                var tail = tr.output.len - 2048;
+                while (tail < tr.output.len and tr.output[tail] & 0xc0 == 0x80) tail += 1;
+                bounded.data.tool_result.output = try std.fmt.allocPrint(a,
+                    "{s}\n[compaction omitted {d} bytes of tool output; full output remains in session journal]\n{s}",
+                    .{ tr.output[0..head], tail - head, tr.output[tail..] });
+            }
+        },
+        .prompt => |prompt| {
+            const attachments = try a.dupe(schema.Event.Attachment, prompt.attachments);
+            for (attachments) |*part| {
+                if (part.media_type) |mime| {
+                    part.data = try std.fmt.allocPrint(a, "[binary attachment: {s}, {d} encoded bytes; original in session journal]", .{ mime, part.data.len });
+                    part.media_type = null;
+                }
+            }
+            bounded.data.prompt.attachments = attachments;
+        },
+        else => {},
+    }
+    const raw = try schema.encodeAlloc(a, bounded);
+    return try prov_api.wrapUntrustedNamed(alloc, "session-event", @tagName(ev.data), raw);
+}
+
 pub fn generateSummary(alloc: Allocator, events: []const schema.Event) !?GeneratedSummary {
     if (events.len == 0) return null;
 
@@ -270,10 +402,8 @@ pub fn generateSummary(alloc: Allocator, events: []const schema.Event) !?Generat
     }
 
     for (events) |ev| {
-        if (ev.data == .noop) continue;
-        const raw = try schema.encodeAlloc(alloc, ev);
-        defer alloc.free(raw);
-        const wrapped = try prov_api.wrapUntrustedNamed(alloc, "session-event", @tagName(ev.data), raw);
+        const wrapped = (try summaryEventAlloc(alloc, ev)) orelse continue;
+        errdefer alloc.free(wrapped);
         try jsons.append(alloc, wrapped);
     }
 
@@ -383,7 +513,7 @@ fn extractPath(alloc: std.mem.Allocator, args: []const u8) !?[]const u8 {
         struct { path: ?[]const u8 = null, file_path: ?[]const u8 = null },
         alloc,
         args,
-        .{ .allocate = .alloc_always },
+        .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null, // JSON parse failure
@@ -528,7 +658,7 @@ fn freeSummaryCall(alloc: std.mem.Allocator, call: SummaryCall) void {
 fn pushTextMeta(meta: *summary_types.SummaryMeta, text: []const u8) void {
     meta.input_bytes = shared.satAdd(u64, meta.input_bytes, text.len);
     // Exact provider tokenizers vary; byte count is a deterministic upper bound.
-    meta.input_tokens = shared.satAdd(u32, meta.input_tokens, text.len);
+    meta.input_tokens = shared.satAdd(u32, meta.input_tokens, estimateTokens(text));
 }
 
 fn clampCount(n: usize) u32 {
@@ -566,44 +696,8 @@ fn metaWithinBudget(meta: summary_types.SummaryMeta) bool {
 
 fn fitSummaryReq(req: summary_types.SummaryReq) summary_types.SummaryReq {
     var out = req;
-    const full = summaryInputMeta(req.events_json, req.file_ops, req.budget);
-    if (metaWithinBudget(full)) {
-        out.meta = full;
-        return out;
-    }
-
-    var keep_start = req.events_json.len;
-    var keep_len: usize = 0;
-    while (keep_start > 0) {
-        const next_start = keep_start - 1;
-        const meta = summaryInputMeta(req.events_json[next_start..], req.file_ops, req.budget);
-        if (metaWithinBudget(meta)) {
-            keep_start = next_start;
-            keep_len = req.events_json.len - next_start;
-            break;
-        }
-        keep_start = next_start;
-    }
-
-    if (keep_len == 0) {
-        out.events_json = req.events_json[req.events_json.len..];
-        out.meta = summary_types.SummaryMeta{
-            .outcome = .over_budget,
-            .input_bytes = full.input_bytes,
-            .input_tokens = full.input_tokens,
-            .max_bytes = req.budget.max_bytes,
-            .max_input_tokens = req.budget.max_input_tokens,
-            .kept_events = 0,
-            .dropped_events = clampCount(req.events_json.len),
-        };
-        return out;
-    }
-
-    out.events_json = req.events_json[keep_start..];
-    out.meta = summaryInputMeta(out.events_json, req.file_ops, req.budget);
-    out.meta.outcome = .scaled;
-    out.meta.kept_events = clampCount(out.events_json.len);
-    out.meta.dropped_events = clampCount(req.events_json.len - out.events_json.len);
+    out.meta = summaryInputMeta(req.events_json, req.file_ops, req.budget);
+    if (!metaWithinBudget(out.meta)) out.meta.outcome = .over_budget;
     return out;
 }
 
@@ -677,9 +771,13 @@ fn collectSummaryText(alloc: std.mem.Allocator, provider: *providers.Provider, r
     var done = false;
 
     while (try stream.next()) |ev| switch (ev) {
-        .text => |text| try out.appendSlice(alloc, text),
+        .text => |text| {
+            if (done) return error.SummaryFailed;
+            if (text.len > 32 * 1024 - out.items.len) return error.SummaryOutputOverBudget;
+            try out.appendSlice(alloc, text);
+        },
         .stop => |stop| {
-            if (stop.reason != .done) return error.SummaryFailed;
+            if (done or stop.reason != .done) return error.SummaryFailed;
             done = true;
         },
         .err => return error.SummaryFailed,
@@ -703,8 +801,6 @@ pub fn generateSummaryWithProvider(
 
     var req = generated.req;
     if (budget) |cfg| req.budget = cfg;
-
-    if (fitSummaryReq(req).meta.dropped_events != 0) return error.SummaryInputOverBudget;
 
     const call = try buildSummaryCall(alloc, model, req);
     defer freeSummaryCall(alloc, call);
@@ -734,7 +830,7 @@ test "summary compaction shrinks history and preserves recent tool pairs and att
         .{ .data = .{ .prompt = .{ .text = "original goal" } } },
         .{ .data = .{ .tool_call = .{ .id = "old", .name = "write", .args = "{\"path\":\"a\"}" } } },
         .{ .data = .{ .tool_result = .{ .id = "old", .output = "large old diff\n" ** 10000 } } },
-        .{ .data = .{ .text = .{ .text = "old response\n" ** 10000 } } },
+        .{ .data = .{ .text = .{ .text = "old response\n" ** 1000 } } },
         .{ .data = .{ .stop = .{ .reason = .done } } },
     };
     const recent = [_]schema.Event{
@@ -749,18 +845,18 @@ test "summary compaction shrinks history and preserves recent tool pairs and att
         .{ .ev = .{ .stop = .{ .reason = .done } } },
     });
     defer scripted.deinit();
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(1024 * 1024));
+    defer alloc.free(before);
     const ck = try summarize(alloc, tmp.dir, "s", 99, &scripted.provider, "m");
     try std.testing.expect(ck.out_bytes < ck.in_bytes / 10);
-    var rdr = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{});
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(1024 * 1024));
+    defer alloc.free(after);
+    try snap(@src(), before, after[0..before.len]);
+    var rdr = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{ .context = true });
     defer rdr.deinit();
-    const model_ev = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(model_ev.data == .model);
-    try std.testing.expectEqualStrings("m", model_ev.data.model.id);
     const summary_ev = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(summary_ev.data == .prompt);
-    try snap(@src(), "checkpoint\n\n<modified-files>\na\n</modified-files>\n", summary_ev.data.prompt.text);
-    const boundary = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(boundary.data == .stop and boundary.data.stop.reason == .done);
+    try std.testing.expect(summary_ev.data == .checkpoint);
+    try snap(@src(), "checkpoint\n\n<modified-files>\na\n</modified-files>\n", summary_ev.data.checkpoint.text);
     for (recent) |expected| {
         const actual = (try rdr.next()) orelse return error.TestUnexpectedResult;
         const want = try schema.encodeAlloc(alloc, expected);
@@ -791,12 +887,114 @@ test "summary compaction leaves journal intact on failed incomplete or growing s
     for (cases) |case| {
         var scripted = try mock.ScriptedProvider.init(case.steps);
         defer scripted.deinit();
-        try std.testing.expectError(case.err, summarize(alloc, tmp.dir, "s", 99, &scripted.provider, "m"));
+        try std.testing.expectError(case.err, summarizeWith(alloc, tmp.dir, "s", 99, &scripted.provider, "m", .{ .keep_tokens = 0 }));
         const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(4096));
         defer alloc.free(after);
         try std.testing.expectEqualStrings(before, after);
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "s.jsonl.compact.tmp", .{}));
     }
+}
+
+test "repeated summaries retain the original journal and cumulative paths" {
+    const alloc = std.testing.allocator;
+    const mock = @import("../../test/provider_mock.zig");
+    const snap = @import("../../test/helpers.zig").expectSnapText;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wr = try @import("writer.zig").Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
+    const old = [_]schema.Event{
+        .{ .data = .{ .prompt = .{ .text = "original goal and constraints" } } },
+        .{ .data = .{ .tool_call = .{ .id = "a", .name = "write", .args = "{\"path\":\"a\",\"content\":\"data\"}" } } },
+        .{ .data = .{ .tool_result = .{ .id = "a", .output = "old output\n" ** 100 } } },
+        .{ .data = .{ .stop = .{ .reason = .done } } },
+    };
+    for (old) |ev| try wr.append("s", ev);
+    var scripted = try mock.ScriptedProvider.init(&.{
+        .{ .ev = .{ .text = "checkpoint" } },
+        .{ .ev = .{ .stop = .{ .reason = .done } } },
+    });
+    defer scripted.deinit();
+    _ = try summarizeWith(alloc, tmp.dir, "s", 1, &scripted.provider, "m", .{ .keep_tokens = 0 });
+    try wr.append("s", .{ .data = .{ .prompt = .{ .text = "corrected user request" } } });
+    try wr.append("s", .{ .data = .{ .tool_call = .{ .id = "b", .name = "read", .args = "{\"path\":\"b\",\"offset\":1}" } } });
+    try wr.append("s", .{ .data = .{ .tool_result = .{ .id = "b", .output = "new output\n" ** 100 } } });
+    try wr.append("s", .{ .data = .{ .stop = .{ .reason = .done } } });
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(64 * 1024));
+    defer alloc.free(before);
+    _ = try summarizeWith(alloc, tmp.dir, "s", 2, &scripted.provider, "m", .{ .keep_tokens = 0, .batch_bytes = 1024 });
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(64 * 1024));
+    defer alloc.free(after);
+    try snap(@src(), before, after[0..before.len]);
+    try wr.append("s", .{ .data = .{ .prompt = .{ .text = "pending request" } } });
+    var active = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{ .context = true });
+    defer active.deinit();
+    const checkpoint = (try active.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(checkpoint.data == .checkpoint);
+    try snap(@src(), "checkpoint\n\n<read-files>\nb\n</read-files>\n<modified-files>\na\n</modified-files>\n", checkpoint.data.checkpoint.text);
+    const prompt = (try active.next()) orelse return error.TestUnexpectedResult;
+    const raw = try schema.encodeAlloc(alloc, prompt);
+    defer alloc.free(raw);
+    try snap(@src(), "{\"version\":1,\"at_ms\":0,\"data\":{\"prompt\":{\"text\":\"pending request\"}}}", raw);
+    try std.testing.expect((try active.next()) == null);
+    try std.testing.expectError(error.CompactedJournal, run(alloc, tmp.dir, "s", 3));
+}
+
+test "cutPoint property never splits a parallel tool batch" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { budget: u8 }) !bool {
+            const events = [_]schema.Event{
+                .{ .data = .{ .prompt = .{ .text = "goal" } } },
+                .{ .data = .{ .tool_call = .{ .id = "a", .name = "read", .args = "{}" } } },
+                .{ .data = .{ .tool_call = .{ .id = "b", .name = "read", .args = "{}" } } },
+                .{ .data = .{ .tool_result = .{ .id = "a", .output = "first" } } },
+                .{ .data = .{ .tool_result = .{ .id = "b", .output = "second" } } },
+                .{ .data = .{ .stop = .{ .reason = .tool } } },
+                .{ .data = .{ .text = .{ .text = "result" } } },
+                .{ .data = .{ .stop = .{ .reason = .done } } },
+                .{ .data = .{ .prompt = .{ .text = "continue" } } },
+            };
+            const sizes = [_]usize{1} ** events.len;
+            const cut = try cutPoint(std.testing.allocator, &events, &sizes, args.budget);
+            return cut == 0 or cut >= 5;
+        }
+    }.prop, .{ .iterations = 256 });
+}
+
+test "cutPoint rejects orphan results and keeps pending calls" {
+    const alloc = std.testing.allocator;
+    const orphan = [_]schema.Event{.{ .data = .{ .tool_result = .{ .id = "missing", .output = "bad" } } }};
+    try std.testing.expectError(error.OrphanToolResult, cutPoint(alloc, &orphan, &.{1}, 0));
+    const pending = [_]schema.Event{
+        .{ .data = .{ .prompt = .{ .text = "goal" } } },
+        .{ .data = .{ .tool_call = .{ .id = "a", .name = "read", .args = "{}" } } },
+    };
+    try std.testing.expectEqual(@as(usize, 0), try cutPoint(alloc, &pending, &.{ 1, 1 }, 0));
+    const duplicate = pending ++ [_]schema.Event{pending[1]};
+    try std.testing.expectError(error.DuplicateToolCall, cutPoint(alloc, &duplicate, &.{ 1, 1, 1 }, 0));
+}
+
+test "summary projection bounds UTF8 output and labels binary attachments" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .thinking = .{ .text = "PRIVATE_THINKING" } } },
+        .{ .data = .{ .prompt = .{ .text = "inspect image", .attachments = &.{.{ .data = "BINARY_BASE64", .media_type = "image/png" }} } } },
+        .{ .data = .{ .tool_result = .{ .id = "call", .output = "HEAD" ++ "Ж" ** 5000 ++ "TAIL", .is_err = true } } },
+    };
+    const generated = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
+    defer freeGeneratedSummary(alloc, generated);
+    const attachment = generated.event_jsons[0];
+    const output = generated.event_jsons[1];
+    const got = try std.fmt.allocPrint(alloc,
+        "events={d} binary_hidden={any} attachment_label={any} utf8={any} bounded={any} head={any} tail={any} omission={any} error={any}",
+        .{ generated.event_jsons.len, std.mem.indexOf(u8, attachment, "BINARY_BASE64") == null,
+           std.mem.indexOf(u8, attachment, "binary attachment: image/png") != null,
+           std.unicode.utf8ValidateSlice(output), output.len < 5000,
+           std.mem.indexOf(u8, output, "HEAD") != null, std.mem.indexOf(u8, output, "TAIL") != null,
+           std.mem.indexOf(u8, output, "full output remains in session journal") != null,
+           std.mem.indexOf(u8, output, "\"is_err\":true") != null });
+    defer alloc.free(got);
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "events=2 binary_hidden=true attachment_label=true utf8=true bounded=true head=true tail=true omission=true error=true", got);
 }
 
 test "compaction rewrites stream and preserves semantic events" {
@@ -1524,7 +1722,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
         fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             _ = self;
             try std.testing.expect(req.opts.thinking == .off);
-            try std.testing.expectEqual(@as(?u32, 1024), req.opts.max_out);
+            try std.testing.expectEqual(@as(?u32, 4096), req.opts.max_out);
             try std.testing.expectEqual(@as(usize, 2), req.msgs.len);
             try std.testing.expectEqual(@as(usize, 2), req.msgs[0].parts.len);
             try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, "<conversation>") != null);
@@ -1548,19 +1746,9 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
     var provider = TestProvider{};
     const got = (try generateSummaryWithProvider(std.testing.allocator, &provider.provider, "m", &events, null)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(got.summary);
-    const meta_snap = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "outcome={s} input={d}/{d} limit={d}/{d} kept={d} dropped={d}",
-        .{
-            @tagName(got.meta.outcome),
-            got.meta.input_bytes,
-            got.meta.input_tokens,
-            got.meta.max_bytes,
-            got.meta.max_input_tokens,
-            got.meta.kept_events,
-            got.meta.dropped_events,
-        },
-    );
+    const meta_snap = try std.fmt.allocPrint(std.testing.allocator,
+        "outcome={s} within_budget={any} token_estimate={any} kept={d} dropped={d}",
+        .{ @tagName(got.meta.outcome), metaWithinBudget(got.meta), got.meta.input_tokens > 0 and got.meta.input_tokens < got.meta.input_bytes, got.meta.kept_events, got.meta.dropped_events });
     defer std.testing.allocator.free(meta_snap);
 
     try oh.snap(@src(),
@@ -1575,75 +1763,26 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
     ).expectEqual(got.summary);
     try oh.snap(@src(),
         \\[]u8
-        \\  "outcome=fit input=1315/1315 limit=65536/65536 kept=2 dropped=0"
+        \\  "outcome=fit within_budget=true token_estimate=true kept=2 dropped=0"
     ).expectEqual(meta_snap);
 }
 
-test "buildSummaryCall scales oversized compaction input deterministically" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
+test "buildSummaryCall rejects oversized input without dropping old context" {
     const alloc = std.testing.allocator;
-
     const events = [_]schema.Event{
-        .{ .at_ms = 1, .data = .{ .text = .{ .text = "old context that should be dropped first" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "middle context that should also be dropped" } } },
-        .{ .at_ms = 3, .data = .{ .text = .{ .text = "latest context that must survive compaction" } } },
+        .{ .data = .{ .prompt = .{ .text = "original user constraints" } } },
+        .{ .data = .{ .text = .{ .text = "latest response" } } },
     };
-
     const generated = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
     defer freeGeneratedSummary(alloc, generated);
-
-    const one_ev = summaryInputMeta(generated.req.events_json[2..], generated.req.file_ops, .{
-        .max_bytes = std.math.maxInt(u64),
-        .max_input_tokens = std.math.maxInt(u32),
-    });
-
     var req = generated.req;
-    req.budget = .{
-        .max_bytes = one_ev.input_bytes,
-        .max_input_tokens = one_ev.input_tokens,
-    };
-
-    const call_a = try buildSummaryCall(alloc, "m", req);
-    defer freeSummaryCall(alloc, call_a);
-    const call_b = try buildSummaryCall(alloc, "m", req);
-    defer freeSummaryCall(alloc, call_b);
-
-    try std.testing.expectEqualStrings(call_a.prompt, call_b.prompt);
-
-    const prompt_snap = try std.fmt.allocPrint(
-        alloc,
-        "old={any} middle={any} latest={any}",
-        .{
-            std.mem.indexOf(u8, call_a.prompt, "old context") != null,
-            std.mem.indexOf(u8, call_a.prompt, "middle context") != null,
-            std.mem.indexOf(u8, call_a.prompt, "latest context") != null,
-        },
-    );
-    defer alloc.free(prompt_snap);
-    const meta_snap = try std.fmt.allocPrint(
-        alloc,
-        "outcome={s} input={d}/{d} limit={d}/{d} kept={d} dropped={d}",
-        .{
-            @tagName(call_a.meta.outcome),
-            call_a.meta.input_bytes,
-            call_a.meta.input_tokens,
-            call_a.meta.max_bytes,
-            call_a.meta.max_input_tokens,
-            call_a.meta.kept_events,
-            call_a.meta.dropped_events,
-        },
-    );
-    defer alloc.free(meta_snap);
-
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "outcome=scaled input=1065/1065 limit=1065/1065 kept=1 dropped=2"
-    ).expectEqual(meta_snap);
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "old=false middle=false latest=true"
-    ).expectEqual(prompt_snap);
+    const last_only = summaryInputMeta(req.events_json[1..], req.file_ops, req.budget);
+    req.budget = .{ .max_bytes = last_only.input_bytes, .max_input_tokens = last_only.input_tokens };
+    try std.testing.expectError(error.SummaryInputOverBudget, buildSummaryCall(alloc, "m", req));
+    const meta = fitSummaryReq(req).meta;
+    const got = try std.fmt.allocPrint(alloc, "outcome={s} kept={d} dropped={d}", .{ @tagName(meta.outcome), meta.kept_events, meta.dropped_events });
+    defer alloc.free(got);
+    try @import("../../test/helpers.zig").expectSnapText(@src(), "outcome=over_budget kept=2 dropped=0", got);
 }
 
 test "generateSummaryWithProvider stops before provider when input cannot fit budget" {

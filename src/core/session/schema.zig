@@ -13,6 +13,7 @@ pub const Event = struct {
 
     pub const Data = union(Tag) {
         model: Model,
+        checkpoint: Checkpoint,
         message: @import("../providers/api.zig").Message,
         noop: void,
         prompt: Prompt,
@@ -27,6 +28,7 @@ pub const Event = struct {
 
     pub const Tag = enum {
         model,
+        checkpoint,
         message,
         noop,
         prompt,
@@ -46,6 +48,11 @@ pub const Event = struct {
 
     pub const Text = struct {
         text: []const u8,
+    };
+
+    pub const Checkpoint = struct {
+        text: []const u8,
+        keep_from: u64,
     };
 
     pub const Prompt = struct {
@@ -109,6 +116,7 @@ pub const Event = struct {
 
     fn dupeData(alloc: std.mem.Allocator, data: Data) error{OutOfMemory}!Data {
         return switch (data) {
+            .checkpoint => |ck| .{ .checkpoint = .{ .text = try alloc.dupe(u8, ck.text), .keep_from = ck.keep_from } },
             .model => |m| blk: {
                 const id = try alloc.dupe(u8, m.id);
                 errdefer alloc.free(id);
@@ -154,6 +162,7 @@ pub const Event = struct {
 
     fn freeData(alloc: std.mem.Allocator, data: Data) void {
         switch (data) {
+            .checkpoint => |ck| alloc.free(ck.text),
             .model => |m| {
                 alloc.free(m.id);
                 alloc.free(m.provider);
@@ -219,6 +228,7 @@ pub fn encodeAlloc(alloc: std.mem.Allocator, ev: Event) error{OutOfMemory}![]u8 
 
 fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!Event.Data {
     return switch (data) {
+        .checkpoint => |ck| .{ .checkpoint = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, ck.text), .keep_from = ck.keep_from } },
         .model => |m| .{ .model = .{
             .id = try utf8.sanitizeMaybeAlloc(alloc, m.id),
             .provider = try utf8.sanitizeMaybeAlloc(alloc, m.provider),
@@ -589,6 +599,7 @@ test "schema property: event encode/decode roundtrip across tags" {
     const pbt = @import("../prop_test.zig");
     const Text = pbt.Utf8(24);
     const Tag = enum {
+        checkpoint,
         noop,
         prompt,
         text,
@@ -637,6 +648,7 @@ test "schema property: event encode/decode roundtrip across tags" {
             return .{
                 .at_ms = args.at_ms,
                 .data = switch (args.tag) {
+                    .checkpoint => .{ .checkpoint = .{ .text = pbt.utf8Slice(args.text, &store.a), .keep_from = args.in_tok } },
                     .noop => .{
                         .noop = {},
                     },
@@ -725,6 +737,7 @@ test "schema property: Event.dupe preserves encode across tags" {
     const pbt = @import("../prop_test.zig");
     const Text = pbt.Utf8(24);
     const Tag = enum {
+        checkpoint,
         noop,
         prompt,
         text,
@@ -773,6 +786,7 @@ test "schema property: Event.dupe preserves encode across tags" {
             return .{
                 .at_ms = args.at_ms,
                 .data = switch (args.tag) {
+                    .checkpoint => .{ .checkpoint = .{ .text = pbt.utf8Slice(args.text, &store.a), .keep_from = args.in_tok } },
                     .noop => .{
                         .noop = {},
                     },

@@ -45,9 +45,11 @@ pub const Store = struct {
         const owned = try self.alloc.create(OwnedReplay);
         errdefer self.alloc.destroy(owned);
 
+        var opts = self.replay_opts;
+        opts.context = true;
         owned.* = .{
             .alloc = self.alloc,
-            .rdr = try reader.ReplayReader.init(self.alloc, self.dir, sid, self.replay_opts),
+            .rdr = try reader.ReplayReader.init(self.alloc, self.dir, sid, opts),
         };
 
         return &owned.reader;

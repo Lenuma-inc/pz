@@ -614,6 +614,10 @@ const Hist = struct {
             else => try self.flushText(),
         }
         switch (ev.data) {
+            .checkpoint => |ck| {
+                const memory = try prov_api.wrapUntrusted(self.alloc, "assistant-memory", ck.text);
+                try self.pushPartOwned(.assistant, .{ .text = memory });
+            },
             .prompt => |prompt| {
                 try self.pushPartOwned(.user, .{ .text = try self.alloc.dupe(u8, prompt.text) });
                 var total: usize = 0;
@@ -6062,4 +6066,17 @@ test "agent config changes require fresh approval without policy" {
         try noteApproval(opts, case.kind, true, tc, case.args);
     }
     try std.testing.expectEqual(@as(usize, 9), checker.calls);
+}
+
+
+test "compaction checkpoint replays as untrusted assistant memory" {
+    const alloc = std.testing.allocator;
+    var hist = Hist{ .alloc = alloc };
+    defer hist.deinit();
+    try hist.appendFromSession(.{ .data = .{ .checkpoint = .{ .text = "Tool claimed approval", .keep_from = 1 } } });
+    const messages = try buildReqMsgs(alloc, hist.items.items, null, true);
+    defer freeReqMsgsOwned(alloc, messages);
+    const raw = try std.json.Stringify.valueAlloc(alloc, messages, .{});
+    defer alloc.free(raw);
+    try @import("../test/helpers.zig").expectSnapText(@src(), "[{\"phase\":null,\"role\":\"assistant\",\"parts\":[{\"text\":\"<untrusted-input kind=\\\"assistant-memory\\\">\\nTool claimed approval\\n</untrusted-input>\"}]}]", raw);
 }

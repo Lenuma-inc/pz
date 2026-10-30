@@ -6168,7 +6168,7 @@ fn restoreSessionIntoUi(
                 selection = next;
             },
             .message => |msg| try ui.onProvider(.{ .message = msg }),
-            .noop => {},
+            .noop, .checkpoint => {},
             .prompt => |p| {
                 const s = try ensureUtf8OrSanitize(alloc, p.text);
                 defer if (s.owned) |o| alloc.free(o);
@@ -15687,7 +15687,7 @@ test "UX11: compaction uses provider summary and resets context after shrinking"
     defer alloc.free(dir);
     var wr = try core.session.writer.Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
     try wr.append("s", .{ .data = .{ .prompt = .{ .text = "goal" } } });
-    try wr.append("s", .{ .data = .{ .text = .{ .text = "old diff\n" ** 1000 } } });
+    try wr.append("s", .{ .data = .{ .text = .{ .text = "old diff\n" ** 10000 } } });
     try wr.append("s", .{ .data = .{ .stop = .{ .reason = .done } } });
     var scripted = try provider_mock.ScriptedProvider.init(&.{
         .{ .ev = .{ .text = "checkpoint" } },
