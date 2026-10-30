@@ -127,9 +127,11 @@ test "jsonl append preserves event order" {
         \\    .version: u16 = 1
         \\    .at_ms: i64 = 1
         \\    .data: core.session.schema.Event.Data
-        \\      .prompt: core.session.schema.Event.Text
+        \\      .prompt: core.session.schema.Event.Prompt
         \\        .text: []const u8
         \\          "alpha"
+        \\        .attachments: []const core.session.schema.Event.Attachment
+        \\          (empty)
         \\  [1]: core.session.schema.Event
         \\    .version: u16 = 1
         \\    .at_ms: i64 = 2

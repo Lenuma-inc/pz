@@ -3766,11 +3766,13 @@ test "swarm PTY keyboard drives live peer debate and parent synthesis" {
     const alloc = std.testing.allocator;
     var ctx = try setupInteractiveEnv(alloc);
     defer ctx.deinit();
+    try ctx.tmp.dir.createDirPath(std.testing.io, "files");
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notes.txt", .data = "Swarm attachment regression" });
     try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "provider.py", .data = @embedFile("swarm_provider.py") });
     try ctx.env.put("PZ_PROVIDER_CMD", "python3 provider.py");
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
-        .{ .inject = "SWARM_PARENT\n" },
+        .{ .inject = "SWARM_PARENT ./files notes.txt\n" },
         .{ .wait_for = .{ .text = "SWARM_COMPLETE", .timeout_ms = 20000 } },
         .{ .snapshot = "swarm-debate" },
         .{ .inject = "\x03\x03" },

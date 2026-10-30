@@ -529,7 +529,8 @@ pub const Panels = struct {
 
     fn writeLabel(self: *Panels, s: []const u8) void {
         const max = self.tool_label_buf.len;
-        const len = @min(s.len, max);
+        var len = @min(s.len, max);
+        while (len > 0 and len < s.len and s[len] & 0xc0 == 0x80) len -= 1;
         @memcpy(self.tool_label_buf[0..len], s[0..len]);
         self.tool_label_len = @intCast(len);
     }

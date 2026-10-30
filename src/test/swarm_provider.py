@@ -9,11 +9,15 @@ results = {}
 for part in parts:
     if part["type"] == "tool_result":
         assert not part["is_err"], part
-        results[part["id"]] = json.loads(part["out"].removeprefix("stdout:\n"))
+        out = part["out"]
+        if out.startswith('<untrusted-input kind="tool-result" '):
+            assert out.endswith("\n</untrusted-input>"), out
+            out = out.split("\n", 1)[1].removesuffix("\n</untrusted-input>")
+        results[part["id"]] = json.loads(out.removeprefix("stdout:\n"))
 
 assert req["model"] == "test-model", req["model"]
 assert req["opts"]["thinking"] == "budget", req["opts"]
-assert req["opts"]["thinking_budget"] == 16384, req["opts"]
+assert req["opts"]["thinking_budget"] == 32768, req["opts"]
 
 
 def call(call_id, op, **args):

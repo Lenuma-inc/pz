@@ -2,6 +2,17 @@
 
 Hard-won patterns and anti-patterns from building pz. **Update this file at the end of every session** with new discoveries.
 
+## Session Notes (2026-10-31)
+
+### Do More
+- Persist admitted attachment contents in session prompts; replay recorded data instead of reopening temporary source paths.
+- Cut display previews at UTF-8 boundaries, including small byte limits and footer buffers.
+- Correlate child errors and replay stages with the user's actual session before changing swarm scheduling.
+
+### Do Not Do
+- Treat ordinary directory context in delegated tasks as a file attachment, or fabricate content for attachments absent from old sessions.
+- Assume deterministic provider fixtures match current reasoning budgets or guarded tool-result framing.
+
 ## Session Notes (2026-10-30)
 
 ### Do More

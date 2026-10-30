@@ -10,7 +10,7 @@ const Dir = std.Io.Dir;
 const File = std.Io.File;
 
 pub const Opts = struct {
-    max_line_bytes: usize = 1024 * 1024,
+    max_line_bytes: usize = 32 * 1024 * 1024,
 };
 
 pub const ReplayReader = struct {

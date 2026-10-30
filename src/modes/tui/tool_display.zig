@@ -13,10 +13,11 @@ pub fn makeAlloc(a: std.mem.Allocator, name: []const u8, args: []const u8, max_b
     defer a.free(flat);
 
     if (flat.len <= max_bytes) return try a.dupe(u8, flat);
-    if (max_bytes <= 3) return try a.dupe(u8, "...");
+    if (max_bytes <= 3) return try a.dupe(u8, "..."[0..max_bytes]);
 
-    const keep = max_bytes - 3;
-    const out = try a.alloc(u8, max_bytes);
+    var keep = max_bytes - 3;
+    while (keep > 0 and flat[keep] & 0xc0 == 0x80) keep -= 1;
+    const out = try a.alloc(u8, keep + 3);
     @memcpy(out[0..keep], flat[0..keep]);
     @memcpy(out[keep..], "...");
     return out;
@@ -138,6 +139,16 @@ test "property: flattenAlloc strips line-breaking control whitespace" {
             return true;
         }
     }.prop, .{ .iterations = 300 });
+}
+
+test "tool previews preserve UTF-8 at every byte limit" {
+    const alloc = testing.allocator;
+    for (0..180) |limit| {
+        const out = try makeAlloc(alloc, "bash", "{\"cmd\":\"Проверь русские имена файлов и команды 🐧\"}", limit);
+        defer alloc.free(out);
+        try testing.expect(out.len <= limit);
+        try testing.expect(std.unicode.utf8ValidateSlice(out));
+    }
 }
 
 test "property: makeAlloc renders bounded single-line bash previews" {

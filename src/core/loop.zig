@@ -614,7 +614,32 @@ const Hist = struct {
             else => try self.flushText(),
         }
         switch (ev.data) {
-            .prompt => |prompt| try self.pushTextDup(.user, prompt.text),
+            .prompt => |prompt| {
+                try self.pushPartOwned(.user, .{ .text = try self.alloc.dupe(u8, prompt.text) });
+                var total: usize = 0;
+                if (prompt.attachments.len > attach.max_files * 2) return error.TooManyAttachments;
+                for (prompt.attachments) |part| {
+                    if (part.media_type) |mime| {
+                        const media_type = std.StaticStringMap([]const u8).initComptime(.{
+                            .{ "image/png", "image/png" }, .{ "image/jpeg", "image/jpeg" },
+                            .{ "image/gif", "image/gif" }, .{ "image/webp", "image/webp" },
+                        }).get(mime) orelse return error.UnsupportedBinaryAttachment;
+                        const len = try std.base64.standard.Decoder.calcSizeForSlice(part.data);
+                        total += len;
+                        if (total > attach.max_bytes * 2) return error.AttachmentsTooLarge;
+                        const bytes = try self.alloc.alloc(u8, len);
+                        std.base64.standard.Decoder.decode(bytes, part.data) catch |err| {
+                            self.alloc.free(bytes);
+                            return err;
+                        };
+                        try self.pushPartOwned(.user, .{ .image = .{ .media_type = media_type, .data = bytes } });
+                    } else {
+                        total += part.data.len;
+                        if (total > attach.max_bytes * 2) return error.AttachmentsTooLarge;
+                        try self.pushPartOwned(.user, .{ .text = try self.alloc.dupe(u8, part.data) });
+                    }
+                }
+            },
             .message => |msg| try self.message(msg),
             .text => |text| try self.text.appendSlice(self.alloc, text.text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, .{
@@ -701,7 +726,7 @@ pub const LoopCtx = struct {
             }
         }
 
-        const prompt_ev = session.Event{
+        var prompt_ev = session.Event{
             .at_ms = nowMs(opts),
             .data = .{
                 .prompt = .{ .text = opts.prompt },
@@ -709,9 +734,26 @@ pub const LoopCtx = struct {
         };
         hist.flushText() catch |hist_err| return failWithReport(opts, .store_append, hist_err);
         hist.phase = null;
+        const prompt_start = hist.items.items.len;
         hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
             return failWithReport(opts, .store_append, hist_err);
         };
+        var prompt_arena = std.heap.ArenaAllocator.init(opts.alloc);
+        defer prompt_arena.deinit();
+        const pa = prompt_arena.allocator();
+        const entries = hist.items.items[prompt_start + 1 ..];
+        const attachments = pa.alloc(session.Event.Attachment, entries.len) catch |err| return failWithReport(opts, .store_append, err);
+        for (entries, attachments) |entry, *part| {
+            part.* = switch (entry.item.part) {
+                .text => |text| .{ .data = pa.dupe(u8, text) catch |err| return failWithReport(opts, .store_append, err) },
+                .image => |image| blk: {
+                    const encoded = pa.alloc(u8, std.base64.standard.Encoder.calcSize(image.data.len)) catch |err| return failWithReport(opts, .store_append, err);
+                    break :blk .{ .data = std.base64.standard.Encoder.encode(encoded, image.data), .media_type = image.media_type };
+                },
+                else => return error.InvalidArgs,
+            };
+        }
+        prompt_ev.data.prompt.attachments = attachments;
         const prompt_stored = blk: {
             opts.store.append(opts.sid, prompt_ev) catch |append_err| {
                 try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
@@ -5778,6 +5820,48 @@ test "files property arbitrary path tokens terminate without out-of-bounds acces
             return false;
         }
     }.prop, .{ .iterations = 200 });
+}
+
+test "files history replays saved attachments without reading old paths" {
+    const alloc = std.testing.allocator;
+    const ev: session.Event = .{ .data = .{ .prompt = .{
+        .text = "Review /nonexistent/pz-history.png",
+        .attachments = &.{
+            .{ .data = "original document" },
+            .{ .data = "iVBORw0KGgoAcGl4ZWxz", .media_type = "image/png" },
+        },
+    } } };
+    const raw = try session.encodeEventAlloc(alloc, ev);
+    defer alloc.free(raw);
+    const parsed = try session.decodeEventSlice(alloc, raw);
+    defer parsed.deinit();
+    const owned = try parsed.value.dupe(alloc);
+    defer owned.free(alloc);
+    var hist = Hist{ .alloc = alloc };
+    defer hist.deinit();
+    try hist.appendFromSession(owned);
+    const Snapshot = struct { text: []const u8, mime: []const u8, bytes: []const u8 };
+    try @import("ohsnap").default.snap(@src(),
+        \\core.loop.test.files history replays saved attachments without reading old paths.Snapshot
+        \\  .text: []const u8
+        \\    "original document"
+        \\  .mime: []const u8
+        \\    "image/png"
+        \\  .bytes: []const u8
+        \\    "\x89PNG\r\n\x1a\n\x00pixels"
+    ).expectEqual(Snapshot{
+        .text = hist.items.items[1].item.part.text,
+        .mime = hist.items.items[2].item.part.image.media_type,
+        .bytes = hist.items.items[2].item.part.image.data,
+    });
+    try hist.appendFromSession(.{ .data = .{ .prompt = .{ .text = "Old /nonexistent/pz-history.png" } } });
+    try std.testing.expectEqual(@as(usize, 4), hist.items.items.len);
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: std.mem.Allocator, event: session.Event) !void {
+            const copy = try event.dupe(a);
+            defer copy.free(a);
+        }
+    }.run, .{ev});
 }
 
 test "Responses history preserves phases and message boundaries across replay" {

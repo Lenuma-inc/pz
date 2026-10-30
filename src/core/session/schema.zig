@@ -15,7 +15,7 @@ pub const Event = struct {
         model: Model,
         message: @import("../providers/api.zig").Message,
         noop: void,
-        prompt: Text,
+        prompt: Prompt,
         text: Text,
         thinking: Text,
         tool_call: ToolCall,
@@ -46,6 +46,17 @@ pub const Event = struct {
 
     pub const Text = struct {
         text: []const u8,
+    };
+
+    pub const Prompt = struct {
+        text: []const u8,
+        attachments: []const Attachment = &.{},
+    };
+
+    pub const Attachment = struct {
+        // Images use base64 so arbitrary bytes survive JSON encoding.
+        data: []const u8,
+        media_type: ?[]const u8 = null,
     };
 
     pub const ToolCall = struct {
@@ -107,8 +118,10 @@ pub const Event = struct {
             .noop => .{
                 .noop = {},
             },
-            .prompt => |t| .{
-                .prompt = .{ .text = try alloc.dupe(u8, t.text) },
+            .prompt => |t| blk: {
+                const text = try alloc.dupe(u8, t.text);
+                errdefer alloc.free(text);
+                break :blk .{ .prompt = .{ .text = text, .attachments = try dupeAttachments(alloc, t.attachments) } };
             },
             .text => |t| .{
                 .text = .{ .text = try alloc.dupe(u8, t.text) },
@@ -146,7 +159,11 @@ pub const Event = struct {
                 alloc.free(m.provider);
             },
             .noop, .message, .usage, .stop => {},
-            .prompt, .text, .thinking, .err => |t| alloc.free(t.text),
+            .prompt => |t| {
+                alloc.free(t.text);
+                freeAttachments(alloc, t.attachments);
+            },
+            .text, .thinking, .err => |t| alloc.free(t.text),
             .tool_call => |tc| {
                 alloc.free(tc.id);
                 alloc.free(tc.name);
@@ -159,6 +176,33 @@ pub const Event = struct {
         }
     }
 };
+
+fn freeAttachments(alloc: std.mem.Allocator, attachments: []const Event.Attachment) void {
+    for (attachments) |part| {
+        alloc.free(part.data);
+        if (part.media_type) |mime| alloc.free(mime);
+    }
+    alloc.free(attachments);
+}
+
+fn dupeAttachments(alloc: std.mem.Allocator, attachments: []const Event.Attachment) error{OutOfMemory}![]Event.Attachment {
+    const parts = try alloc.alloc(Event.Attachment, attachments.len);
+    var n: usize = 0;
+    errdefer {
+        for (parts[0..n]) |part| {
+            alloc.free(part.data);
+            if (part.media_type) |mime| alloc.free(mime);
+        }
+        alloc.free(parts);
+    }
+    for (attachments, parts) |src, *dst| {
+        const data = try alloc.dupe(u8, src.data);
+        errdefer alloc.free(data);
+        dst.* = .{ .data = data, .media_type = if (src.media_type) |mime| try alloc.dupe(u8, mime) else null };
+        n += 1;
+    }
+    return parts;
+}
 
 pub const DecodeError = std.json.ParseError(std.json.Scanner) || error{
     UnsupportedVersion,
@@ -183,7 +227,7 @@ fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!E
             .noop = {},
         },
         .prompt => |t| .{
-            .prompt = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
+            .prompt = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text), .attachments = t.attachments },
         },
         .text => |t| .{
             .text = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },

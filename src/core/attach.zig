@@ -78,6 +78,13 @@ pub const Paths = struct {
                 path = path[1..];
             }
             if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
+            if (!uri and !std.mem.startsWith(u8, self.buf[0..len], "@")) {
+                if (std.Io.Dir.cwd().statFile(sys.io, path, .{})) |st| {
+                    if (st.kind == .directory) continue;
+                } else |_| {
+                    // Missing file references are validated by readAlloc.
+                }
+            }
             // A bare slash command is not a file reference.
             if (path[0] == '/' and std.mem.indexOfScalar(u8, path[1..], '/') == null and std.fs.path.extension(path).len == 0) continue;
             return path;
@@ -206,6 +213,23 @@ test "attachment paths handle quoted, escaped, URI and multiple files" {
     try std.testing.expect(!isPrompt("/skill argument"));
     var invalid = Paths{ .text = "file:///tmp/x%00.png" };
     try std.testing.expectError(error.InvalidAttachmentPath, invalid.next());
+}
+
+test "attachment paths skip directory context and preserve explicit directory attachments" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    var paths = Paths{ .text = root };
+    try std.testing.expect(try paths.next() == null);
+    for ([_][]const u8{ "@", "file://" }) |prefix| {
+        const text = try std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, root });
+        defer alloc.free(text);
+        paths = .{ .text = text };
+        try std.testing.expectEqualStrings(root, (try paths.next()).?);
+        try std.testing.expectError(error.AttachmentNotRegular, readAlloc(alloc, root));
+    }
 }
 
 test "attachment content sniffing rejects renamed binaries and accepts text without extension" {
