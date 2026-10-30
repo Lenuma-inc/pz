@@ -2750,6 +2750,7 @@ fn runTui(
 
     const stdin_fd = tui_hooks.stdin_fd;
     const is_tty = tui_hooks.live orelse isTty(stdin_fd);
+    if (run_cmd.session == .picker and !is_tty) return error.InteractiveTerminalRequired;
 
     // Enable raw mode early so the InputWatcher's poll() works for -p prompts
     if (is_tty and tui_hooks.raw_mode) {
@@ -2829,7 +2830,7 @@ fn runTui(
     // Startup info matching pi's display
     const is_resumed = switch (run_cmd.session) {
         .cont, .resm, .explicit => true,
-        .auto => false,
+        .auto, .picker => false,
     };
     if (is_resumed) {
         const restored = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
@@ -2839,6 +2840,12 @@ fn runTui(
     }
 
     if (run_cmd.thinking_note) |note| try ui.tr.infoText(note);
+
+    var startup_picker = run_cmd.session == .picker;
+    if (startup_picker) {
+        if (!(try showResumeOverlay(alloc, &ui, session_dir_path))) return error.SessionNotFound;
+        ui.ov.?.hint = "Up/Down select, Enter resume, Esc quit";
+    }
 
     // Set terminal title (OSC 0)
     try out.writeAll("\x1b]0;pz\x07");
@@ -3152,6 +3159,7 @@ fn runTui(
                                         }
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
+                                        startup_picker = false;
                                     },
                                     .settings => {
                                         // Toggle the selected setting
@@ -3208,6 +3216,7 @@ fn runTui(
                                 }
                             },
                             .esc, .ctrl_c, .ctrl_l => {
+                                if (startup_picker) return;
                                 ui.ov.?.deinit(alloc);
                                 ui.ov = null;
                             },
@@ -6414,7 +6423,7 @@ fn newSid(alloc: std.mem.Allocator) ![]u8 {
 
 fn resolveSessionPlan(alloc: std.mem.Allocator, run_cmd: cli.Run) !core.session.selector.Plan {
     return switch (run_cmd.session) {
-        .auto => .{
+        .auto, .picker => .{
             .sid = try newSid(alloc),
             .dir_path = try alloc.dupe(u8, run_cmd.cfg.session_dir),
         },
@@ -7430,7 +7439,7 @@ fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: [
 
 fn showResumeOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, session_dir_path: ?[]const u8) !bool {
     const sdp = session_dir_path orelse return false;
-    const rows = listSessionRows(alloc, sdp) catch return false;
+    const rows = try listSessionRows(alloc, sdp);
     if (rows.len == 0) {
         alloc.free(rows);
         return false;
@@ -10159,7 +10168,7 @@ test "runtime continue reuses latest session id and appends new turn" {
     try expectLatestSessionReused(.cont);
 }
 
-test "runtime resume (-r) reuses latest session id and appends new turn" {
+test "runtime resume --last reuses latest session id and appends new turn" {
     try expectLatestSessionReused(.resm);
 }
 

@@ -105,6 +105,7 @@ pub const SessionSel = union(enum) {
     auto,
     cont,
     resm,
+    picker,
     explicit: []const u8,
 };
 
@@ -183,6 +184,7 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
         upgrade,
         cont,
         resm,
+        last,
         session,
         no_session,
         tui,
@@ -216,6 +218,7 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
         .{ "--continue", .cont },
         .{ "-r", .resm },
         .{ "--resume", .resm },
+        .{ "--last", .last },
         .{ "--session", .session },
         .{ "--no-session", .no_session },
         .{ "--tui", .tui },
@@ -241,7 +244,12 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
         .{ "--changelog", .changelog },
         .{ "--max-turns", .max_turns },
     });
-    var i: usize = 0;
+    const resume_cmd = argv.len > 0 and std.mem.eql(u8, argv[0], "resume");
+    if (resume_cmd) {
+        try setMode(&out, &mode_seen, .tui);
+        try setSession(&out, &session_seen, .picker);
+    }
+    var i: usize = if (resume_cmd) 1 else 0;
     while (i < argv.len) : (i += 1) {
         const tok = argv[i];
 
@@ -262,7 +270,12 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
                 .upgrade => out.show_upgrade = true,
                 .changelog => out.show_changelog = true,
                 .cont => try setSession(&out, &session_seen, .cont),
-                .resm => try setSession(&out, &session_seen, .resm),
+                .resm => try setSession(&out, &session_seen, .picker),
+                .last => {
+                    if (!resume_cmd or eq_val != null) return error.UnknownArg;
+                    if (out.session != .picker) return error.SessionConflict;
+                    out.session = .resm;
+                },
                 .session => {
                     const val = eq_val orelse takeVal(argv, &i) orelse return error.MissingSessionValue;
                     if (val.len == 0) return error.MissingSessionValue;
@@ -346,6 +359,10 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
                 try setMode(&out, &mode_seen, try parseMode(tok));
                 continue;
             }
+            if (resume_cmd and out.session == .picker) {
+                out.session = .{ .explicit = tok };
+                continue;
+            }
             // Collect positional args as prompt (like pi does)
             if (out.prompt == null) {
                 try setPrompt(&out, tok);
@@ -358,6 +375,12 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
     }
 
     if (out.show_help or out.show_version or out.show_upgrade) return out;
+    if (out.session == .picker) {
+        if (out.mode_set and out.mode != .tui) return error.ModeConflict;
+        if (out.prompt != null) return error.SessionConflict;
+        out.mode = .tui;
+        out.mode_set = true;
+    }
     if (mode_seen and out.mode == .print and out.prompt == null) return error.MissingPrintPrompt;
     return out;
 }
@@ -673,7 +696,7 @@ test "parse accepts session control flags" {
     try std.testing.expect(std.meta.activeTag(cont.session) == .cont);
 
     const res = try parse(&.{"-r"});
-    try std.testing.expect(std.meta.activeTag(res.session) == .resm);
+    try std.testing.expect(std.meta.activeTag(res.session) == .picker);
 
     const sel = try parse(&.{ "--session", "abc123" });
     switch (sel.session) {
@@ -745,4 +768,31 @@ test "parse max-turns flag" {
 
     try std.testing.expectError(error.MissingMaxTurnsValue, parse(&.{"--max-turns"}));
     try std.testing.expectError(error.InvalidMaxTurns, parse(&.{ "--max-turns", "abc" }));
+}
+
+test "resume subcommand selects picker last or explicit session" {
+    const picker = try parse(&.{"resume"});
+    try std.testing.expectEqual(Mode.tui, picker.mode);
+    try std.testing.expect(picker.mode_set);
+    try std.testing.expect(std.meta.activeTag(picker.session) == .picker);
+    const last = try parse(&.{ "resume", "--last" });
+    try std.testing.expect(std.meta.activeTag(last.session) == .resm);
+    const explicit = try parse(&.{ "resume", "123", "hello" });
+    const oh = @import("ohsnap").default;
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "123"
+    ).expectEqual(explicit.session.explicit);
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "hello"
+    ).expectEqual(explicit.prompt.?);
+    try std.testing.expectError(error.UnknownArg, parse(&.{"--last"}));
+    try std.testing.expectError(error.UnknownArg, parse(&.{ "resume", "--last=true" }));
+    try std.testing.expectError(error.SessionConflict, parse(&.{ "resume", "123", "--last" }));
+    try std.testing.expectError(error.SessionConflict, parse(&.{ "resume", "--last", "--last" }));
+    try std.testing.expectError(error.SessionNoSessionConflict, parse(&.{ "resume", "--no-session" }));
+    try std.testing.expectError(error.ModeConflict, parse(&.{ "resume", "--print" }));
+    try std.testing.expectError(error.ModeConflict, parse(&.{ "--print", "--resume", "hello" }));
+    try std.testing.expectError(error.SessionConflict, parse(&.{ "resume", "--prompt", "hello" }));
 }

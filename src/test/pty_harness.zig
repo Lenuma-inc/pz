@@ -900,6 +900,59 @@ test "real pz PTY renders slash help over the live terminal path" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/changelog") != null);
 }
 
+test "resume CLI PTY selects cancels and continues sessions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    try tmp.dir.createDirPath(std.testing.io, "sess");
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "RESUME_OLDER" } } },
+    };
+    try writeSessionEventsFile(tmp.dir, "sess/100.jsonl", &events);
+    const newer = [_]core.session.Event{
+        .{ .at_ms = 2, .data = .{ .prompt = .{ .text = "RESUME_NEWER" } } },
+    };
+    try writeSessionEventsFile(tmp.dir, "sess/200.jsonl", &newer);
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const sess = try tmp.dir.realPathFileAlloc(std.testing.io, "sess", std.testing.allocator);
+    defer std.testing.allocator.free(sess);
+    var env = try baseEnv(std.testing.allocator, home);
+    defer env.deinit();
+
+    const pick = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "Resume Session", .timeout_ms = 8000 } },
+        .{ .wait_for = .{ .text = "Enter resume" } },
+        .{ .inject = "\x1b[B\r" },
+        .{ .wait_for = .{ .text = "resumed session 200" } },
+        .{ .inject = "\x03\x03" },
+    };
+    const cancel = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "Resume Session", .timeout_ms = 8000 } },
+        .{ .inject = "\x1b" },
+    };
+    const direct = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "RESUME_NEWER", .timeout_ms = 8000 } },
+        .{ .inject = "\x03\x03" },
+    };
+    const cases = [_]struct { args: []const []const u8, steps: []const InteractiveStep }{
+        .{ .args = &.{ "resume", "--session-dir", sess }, .steps = &pick },
+        .{ .args = &.{ "-r", "--session-dir", sess }, .steps = &pick },
+        .{ .args = &.{ "resume", "--session-dir", sess }, .steps = &cancel },
+        .{ .args = &.{ "resume", "--last", "--session-dir", sess }, .steps = &direct },
+        .{ .args = &.{ "-c", "--session-dir", sess }, .steps = &direct },
+        .{ .args = &.{ "resume", "200", "--session-dir", sess }, .steps = &direct },
+    };
+    for (cases) |case| {
+        var out = try runPtyInteractive(std.testing.allocator, cwd, &env, case.args, case.steps);
+        defer out.deinit(std.testing.allocator);
+        try std.testing.expect(out.term == .exited);
+        try std.testing.expectEqual(@as(u8, 0), out.term.exited);
+    }
+}
+
 test "real pz PTY walkthrough opens command settings login and resume surfaces" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

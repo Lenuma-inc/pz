@@ -97,6 +97,11 @@ pz
 # Explicit provider and model
 pz --provider anthropic --model claude-sonnet-4-20250514
 
+# Resume a session
+pz resume          # picker (also: pz -r)
+pz resume --last   # most recent (also: pz -c)
+pz resume 123      # specific session ID
+
 # Headless
 pz --print "explain this codebase"
 echo '{"prompt":"hello"}' | pz --json

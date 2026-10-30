@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Keep session continuation (`-c`, `resume --last`) separate from interactive selection (`-r`, `resume`); exercise both through the real binary.
 - Keep forge adapters on the shared HTTP policy path; infer only known hosts and require an explicit API for self-hosted repository URLs.
 - Treat Gitea/Forgejo tree `truncated` as pagination, unlike GitHub's incomplete-tree error; test second pages against real servers.
 - Project API metadata into compact text for model tools; preserve commit identifiers, readable patches, pagination and explicit missing-patch warnings.
@@ -25,6 +26,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Trace concurrency through production dispatch: loop.runTool blocks on PolicySpawnCtx.runReqStreaming; BgPool exists but is not wired into the agent tool.
 
 ### Do Not Do
+- Silently turn session-list read failures into an empty picker; propagate storage errors.
 - Assume every repository has README.md; select an actual file from its directory listing (Cassette uses README.en.md and README.ru.md).
 - Omit OpenAI reasoning options to implement off: omission leaves the server default active.
 - Infer reasoning capabilities from model-name prefixes or advertise effort levels absent from the selected model's catalog.

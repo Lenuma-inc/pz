@@ -97,6 +97,11 @@ pub fn selectMode(parsed: Args.Parsed, cfg: config.Config) Args.Mode {
 
 pub const help_text =
     \\Usage: pz [OPTIONS] [tui|interactive|print|json|rpc]
+    \\       pz resume [--last | ID] [OPTIONS]
+    \\
+    \\Commands:
+    \\  resume [ID]                 Resume a session (picker by default)
+    \\      --last                  Continue the most recent session
     \\
     \\Modes:
     \\  tui                         Interactive terminal mode (default)
@@ -112,7 +117,7 @@ pub const help_text =
     \\  -C, --config <PATH>         Config file path
     \\      --no-config             Disable config file loading
     \\  -c, --continue              Continue most recent session
-    \\  -r, --resume                Resume most recent session
+    \\  -r, --resume                Select a session to resume
     \\      --session <ID|PATH>     Use a specific session ID or .jsonl path
     \\      --no-session            Disable session persistence
     \\      --model <MODEL>         Override model id
