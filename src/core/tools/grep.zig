@@ -200,7 +200,7 @@ fn grepFile(
     const count = std.fmt.allocPrint(self.alloc, "{d}", .{args.max_results - hit_ct.*}) catch return error.OutOfMemory;
     defer self.alloc.free(count);
     const result = shared.runFile(self.alloc, file, &.{
-        "rg",                                                          "--no-config", "--line-number", "--no-heading", "--color", "never", "--max-count", count,
+        "rg",                                                          "--no-config", "--line-number", "--no-heading", "--color", "never", "--max-columns", "240", "--max-columns-preview", "--max-count", count,
         if (args.ignore_case) "--ignore-case" else "--case-sensitive", "--regexp",    args.pattern,
     }, self.max_bytes + 4096) catch |err| return shared.mapFsErr(err);
     defer self.alloc.free(result.stdout);

@@ -60,7 +60,7 @@ pub const Handler = struct {
 
         const diff = try shared.formatDiffAlloc(self.alloc, args.path, full, args.old, args.new);
         defer self.alloc.free(diff);
-        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, self.max_bytes));
+        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, @min(self.max_bytes, shared.max_diff_bytes)));
         errdefer shared.deinitResult(self.alloc, result);
 
         var file = path_guard.openFile(args.path, .{ .mode = .write_only }) catch |open_err| {

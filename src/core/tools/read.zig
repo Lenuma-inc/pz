@@ -52,7 +52,8 @@ pub const Handler = struct {
             if (to_line < from_line) return error.InvalidArgs;
         }
 
-        const selected = try readSelected(self, args.path, from_line, args.to_line);
+        const to_line = args.to_line orelse shared.satAdd(u32, from_line, 19);
+        const selected = try readSelected(self, args.path, from_line, to_line);
         errdefer self.alloc.free(selected.chunk);
 
         return shared.buildResult(self.alloc, call.id, self.now_ms, selected.chunk, self.max_bytes, selected.full_bytes) catch return error.OutOfMemory;
@@ -163,6 +164,33 @@ test "read handler returns selected lines with deterministic timestamps" {
         \\final=ok|0
         \\"
     ).expectEqual(snap);
+}
+
+test "read handler defaults to twenty lines and honors explicit expansion" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "first\n" ** 20 ++ "next\n" ** 20 ++ "tail\n" ** 20 });
+    const handler = Handler.init(.{ .alloc = alloc, .max_bytes = 4096 });
+    const cases = [_]struct { from: ?u32, to: ?u32, expected: []const u8 }{
+        .{ .from = null, .to = null, .expected = "first\n" ** 20 },
+        .{ .from = 21, .to = null, .expected = "next\n" ** 20 },
+        .{ .from = 1, .to = 40, .expected = "first\n" ** 20 ++ "next\n" ** 20 },
+        .{ .from = std.math.maxInt(u32), .to = null, .expected = "" },
+    };
+    for (cases) |case| {
+        const res = try handler.run(.{
+            .id = "range",
+            .kind = .read,
+            .args = .{ .read = .{ .path = "a", .from_line = case.from, .to_line = case.to } },
+            .src = .model,
+            .at_ms = 0,
+        }, noop.sink());
+        defer handler.deinitResult(res);
+        try std.testing.expectEqualStrings(case.expected, res.out[0].chunk);
+    }
 }
 
 test "read handler returns invalid args on reversed line range" {

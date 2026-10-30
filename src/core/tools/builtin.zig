@@ -24,6 +24,7 @@ const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
 
 const default_max_bytes: usize = 64 * 1024;
+const text_max_bytes: usize = 8 * 1024;
 pub const mask_read: u16 = 1 << 0;
 pub const mask_write: u16 = 1 << 1;
 pub const mask_bash: u16 = 1 << 2;
@@ -56,7 +57,7 @@ pub const mask_all: u16 =
 const read_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File path" },
     .{ .name = "from_line", .ty = .int, .required = false, .desc = "Start line (1-based)" },
-    .{ .name = "to_line", .ty = .int, .required = false, .desc = "End line (inclusive)" },
+    .{ .name = "to_line", .ty = .int, .required = false, .desc = "End line inclusive; defaults to 20 lines from from_line" },
 };
 
 const write_params = [_]tools.Tool.Param{
@@ -85,14 +86,14 @@ const grep_params = [_]tools.Tool.Param{
     .{ .name = "pattern", .ty = .string, .required = true, .desc = "Regular expression to match in file lines" },
     .{ .name = "path", .ty = .string, .required = false, .desc = "File or root directory to search" },
     .{ .name = "ignore_case", .ty = .bool, .required = false, .desc = "Case-insensitive matching" },
-    .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum matches to return" },
+    .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum matches to return (default 40); narrow searches before increasing" },
 };
 
 const find_params = [_]tools.Tool.Param{
     .{ .name = "pattern", .ty = .string, .required = false, .desc = "File glob, e.g. **/*.zig; use either pattern or name" },
     .{ .name = "name", .ty = .string, .required = false, .desc = "Literal name substring; use either name or pattern" },
     .{ .name = "path", .ty = .string, .required = false, .desc = "Root directory to walk" },
-    .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum paths to return" },
+    .{ .name = "max_results", .ty = .int, .required = false, .desc = "Maximum paths to return (default 40)" },
 };
 
 const ls_params = [_]tools.Tool.Param{
@@ -291,7 +292,7 @@ pub const Runtime = struct {
                 .kind = .read,
                 .spec = .{
                     .kind = .read,
-                    .desc = "Read file contents",
+                    .desc = "Read a file range; defaults to 20 lines, not the whole file. Locate symbols with grep first and expand the range only when needed.",
                     .params = read_params[0..],
                     .out = .{
                         .max_bytes = @intCast(self.max_bytes),
@@ -339,7 +340,7 @@ pub const Runtime = struct {
                 .kind = .edit,
                 .spec = .{
                     .kind = .edit,
-                    .desc = "Edit file by string replacement",
+                    .desc = "Replace an exact text fragment in a file; read only the relevant line range first, not the whole file. Returns a diff capped at 4 KiB with truncation metadata.",
                     .params = edit_params[0..],
                     .out = .{
                         .max_bytes = @intCast(self.max_bytes),
@@ -598,7 +599,7 @@ pub const Runtime = struct {
     fn runRead(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = read.Handler.init(.{
             .alloc = self.alloc,
-            .max_bytes = self.max_bytes,
+            .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);
@@ -619,7 +620,7 @@ pub const Runtime = struct {
         if (escalated) try self.approveBash(call);
         const h = bash.Handler.init(.{
             .alloc = self.alloc,
-            .max_bytes = self.max_bytes,
+            .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
             .allow_escalation = escalated,
         });
@@ -672,7 +673,7 @@ pub const Runtime = struct {
     fn runGrep(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = grep.Handler.init(.{
             .alloc = self.alloc,
-            .max_bytes = self.max_bytes,
+            .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);
@@ -681,7 +682,7 @@ pub const Runtime = struct {
     fn runFind(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = find.Handler.init(.{
             .alloc = self.alloc,
-            .max_bytes = self.max_bytes,
+            .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);
@@ -690,7 +691,7 @@ pub const Runtime = struct {
     fn runLs(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = ls.Handler.init(.{
             .alloc = self.alloc,
-            .max_bytes = self.max_bytes,
+            .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);
@@ -843,7 +844,7 @@ pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]c
     const guides = .{
         .{ "github", "For source inspection, use github before cloning: list/tree paths, read selected files (from_line/to_line), history by path/ref, branches/tags, info; compare with base and ref or commit with ref (GitHub-only patches). owner/repo means GitHub; HTTPS URLs infer GitHub/GitLab/Codeberg/Gitea, other hosts require api:gitlab/gitea/forgejo. Omit ref for default branch. Paged results show page/next; continue until empty. GitHub rejects truncated trees; compare files cap 300 (page 1), commit 3000; absent patch does not mean unchanged. Public read-only; report access/rate errors. Clone only for builds/execution. commit/compare are GitHub-only." },
         .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC; transform rotates or mirrors; speed=0.5–2 changes playback with audio pitch preserved; mute drops audio and copies video. For speed, duration_seconds measures output time. Generated files are ffprobe-checked, which does not prove visual quality or full decodability; use read on the result for a contact sheet. Report measured metadata and name unverified properties. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
-        .{ "grep", "Use grep for regex content searches in a file or directory; glob filters files. It uses rg and honors ignore files." },
+        .{ "grep", "Search exact symbols in known paths first; use repository-wide search only to locate files. glob narrows scope. Returns matching lines via rg, not whole files; long lines show a 240-column preview. Read surrounding lines only when needed." },
         .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },
         .{ "skill", "Call skill with no name to list available skills, then load an existing name." },
         .{ "patch", "Use patch with an explicit path and unified diff to update or create one file. Context must match; no renames or file deletion." },

@@ -3,6 +3,7 @@ const std = @import("std");
 const tools = @import("../tools.zig");
 
 pub const max_file_bytes: usize = 16 * 1024 * 1024;
+pub const max_diff_bytes: usize = 4 * 1024;
 
 pub fn formatDiffAlloc(alloc: std.mem.Allocator, path: []const u8, full: []const u8, old: []const u8, new: []const u8) ![]u8 {
     // Whole-file replacements should report only the lines that changed.

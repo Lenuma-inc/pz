@@ -90,7 +90,7 @@ test "basic tools: edit and patch large files with compact diffs" {
     const patched = try run(&rt, .patch, .{ .patch = .{ .path = "large.py", .patch = "@@ -2 +2 @@\n-EDIT\n+PATCH\n" } });
     defer rt.deinitResult(patched);
     try snap(@src(), "• Edited large.py (+1 -1)\n@@ -2,1 +2,1 @@\n-EDIT\n+PATCH\n", patched.out[0].chunk);
-    const got = try tmp.dir.readFileAlloc(std.testing.io, "large.py", alloc, .limited(text.len + 2));
+    const got = try tmp.dir.readFileAlloc(std.testing.io, "large.py", alloc, .limited(text.len + 64));
     defer alloc.free(got);
     try std.testing.expectEqualStrings(text[0 .. 128 * 1024], got[0 .. 128 * 1024]);
     try std.testing.expectEqualStrings("PATCH\n", got[128 * 1024 ..]);
@@ -129,6 +129,76 @@ test "basic tools: patch preserves missing final newline and validates counts" {
     try snap(@src(), "new", text);
     try std.testing.expectError(error.InvalidPatch, patch.applyAlloc(alloc, "old\n", "@@ -1,2 +1 @@\n-old\n+new\n", 100));
     try std.testing.expectError(error.TooLarge, patch.applyAlloc(alloc, "", "@@ -0,0 +1 @@\n+long\n", 2));
+}
+
+test "basic tools: bounded source output and search defaults avoid context dumps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    var rt = builtin.Runtime.init(.{ .alloc = alloc });
+    defer rt.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large", .data = "long line " ** 2000 ++ "\n" });
+    const read = try run(&rt, .read, .{ .read = .{ .path = "large" } });
+    defer rt.deinitResult(read);
+    try std.testing.expectEqual(@as(usize, 8192), read.out[0].chunk.len);
+    try std.testing.expect(read.out[0].truncated);
+    try std.testing.expect(read.out[1].stream == .meta);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "matches", .data = "needle\n" ** 60 });
+    const found = try run(&rt, .grep, .{ .grep = .{ .path = "matches", .pattern = "needle" } });
+    defer rt.deinitResult(found);
+    try std.testing.expectEqual(@as(usize, 40), std.mem.count(u8, found.out[0].chunk, "\n"));
+    const expanded = try run(&rt, .grep, .{ .grep = .{ .path = "matches", .pattern = "needle", .max_results = 60 } });
+    defer rt.deinitResult(expanded);
+    try std.testing.expectEqual(@as(usize, 60), std.mem.count(u8, expanded.out[0].chunk, "\n"));
+}
+
+test "basic tools: grep previews long matching lines without dumping files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    var rt = builtin.Runtime.init(.{ .alloc = alloc });
+    defer rt.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "needle " ++ "x" ** 10000 ++ "\nunrelated\n" });
+    const res = try run(&rt, .grep, .{ .grep = .{ .path = "a", .pattern = "needle" } });
+    defer rt.deinitResult(res);
+    try snap(@src(), "a:1:needle " ++ "x" ** 233 ++ " [... omitted end of long line]\n", res.out[0].chunk);
+}
+
+test "basic tools: default edit write and patch diffs stay within 4 KiB" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    var rt = builtin.Runtime.init(.{ .alloc = alloc });
+    defer rt.deinit();
+    const text = "changed\n" ** 1000;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "old\n" });
+    const edited = try run(&rt, .edit, .{ .edit = .{ .path = "a", .old = "old\n", .new = text } });
+    defer rt.deinitResult(edited);
+    const written = try run(&rt, .write, .{ .write = .{ .path = "b", .text = text } });
+    defer rt.deinitResult(written);
+    const diff = "@@ -1 +1,1000 @@\n-old\n" ++ "+changed\n" ** 1000;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "c", .data = "old\n" });
+    const patched = try run(&rt, .patch, .{ .patch = .{ .path = "c", .patch = diff } });
+    defer rt.deinitResult(patched);
+    for ([_]tools.Result{ edited, written, patched }) |res| {
+        try std.testing.expect(res.out[0].truncated);
+        try std.testing.expectEqual(@as(usize, 4096), res.out[0].chunk.len);
+        const meta = try std.json.parseFromSlice(std.json.Value, alloc, res.out[1].chunk, .{});
+        defer meta.deinit();
+        const fields = meta.value.object;
+        try std.testing.expectEqualStrings("trunc", fields.get("type").?.string);
+        try std.testing.expectEqual(@as(i64, 4096), fields.get("limit_bytes").?.integer);
+        try std.testing.expectEqual(@as(i64, 4096), fields.get("kept_bytes").?.integer);
+        try std.testing.expectEqual(fields.get("full_bytes").?.integer - 4096, fields.get("dropped_bytes").?.integer);
+    }
+    for ([_][]const u8{ "a", "b", "c" }) |path| {
+        const got = try tmp.dir.readFileAlloc(std.testing.io, path, alloc, .limited(text.len + 64));
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(text, got);
+    }
 }
 
 test "basic tools: todo persists within runtime and rejects multiple active tasks" {

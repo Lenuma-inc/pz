@@ -5,6 +5,10 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-31)
 
 ### Do More
+- Search exact symbols in known paths before repository-wide scans; preview long matching lines rather than sending them whole.
+- Reduce repeated agent instructions and model-visible output before trading away reasoning quality; stop exploration and verification once task evidence is sufficient.
+- Default model-visible source reads to bounded line windows; internal edit reads are not prompt context.
+- Distinguish internal file reads from model-visible context; cap edit/write/patch diffs independently and request narrow source ranges.
 - Preserve sentinel slice types when returning allocated real paths from helpers; keep ffmpeg time arguments in distinct argv slots.
 - Separate edit input-file limits from output budgets; correlate tool failures and appended bash diffs with recorded token growth before changing prompts.
 - Distinguish punctuation outside a quoted path in pasted diagnostics from punctuation inside an attachment filename.

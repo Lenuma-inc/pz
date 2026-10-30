@@ -158,14 +158,14 @@ pub const Call = struct {
         path: []const u8 = ".",
         ignore_case: bool = false,
         glob: []const u8 = "*",
-        max_results: u32 = 200,
+        max_results: u32 = 40,
     };
 
     pub const FindArgs = struct {
         name: []const u8 = "",
         pattern: ?[]const u8 = null,
         path: []const u8 = ".",
-        max_results: u32 = 200,
+        max_results: u32 = 40,
     };
 
     pub const LsArgs = struct {

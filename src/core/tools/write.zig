@@ -51,7 +51,7 @@ pub const Handler = struct {
         else
             try std.fmt.allocPrint(self.alloc, "• Edited {s} (diff omitted: existing file exceeds {d} bytes)\n", .{ std.fs.path.basename(args.path), self.max_bytes });
         defer self.alloc.free(diff);
-        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, self.max_bytes));
+        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, @min(self.max_bytes, shared.max_diff_bytes)));
         errdefer shared.deinitResult(self.alloc, result);
 
         var file = path_guard.createFile(args.path, .{
