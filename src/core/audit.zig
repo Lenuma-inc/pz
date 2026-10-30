@@ -1079,8 +1079,12 @@ fn detectPubRedact(txt: []const u8) ?[]const u8 {
 /// Used by callers of `redactTextAlloc` that lack session context.
 var proc_rkey: RedactKey = undefined;
 var proc_rkey_init = false;
+var proc_rkey_mu: std.Io.Mutex = .init;
 
 fn procKey() RedactKey {
+    const io = @import("pz_io").io;
+    proc_rkey_mu.lockUncancelable(io);
+    defer proc_rkey_mu.unlock(io);
     if (!proc_rkey_init) {
         var seed: [signing.rkey_len]u8 = undefined;
         std.c.arc4random_buf(&seed, seed.len);

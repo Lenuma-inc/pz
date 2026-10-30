@@ -1,5 +1,6 @@
 //! Aggregated test imports for `zig build test`.
 test {
+    _ = @import("test/swarm.zig");
     _ = @import("test/basic_tools.zig");
     _ = @import("core/fs_secure.zig");
     _ = @import("core/tools/read.zig");

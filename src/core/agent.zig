@@ -51,6 +51,8 @@ pub const hash_hex_len: usize = 64;
 pub const version_mismatch_exit_code: u8 = 78;
 
 pub fn driverPathAlloc(alloc: std.mem.Allocator) ![:0]u8 {
+    // Re-exec the running image even after an update unlinks its on-disk path.
+    if (@import("builtin").os.tag == .linux) return alloc.dupeZ(u8, "/proc/self/exe");
     return std.process.executablePathAlloc(sys.io, alloc);
 }
 
@@ -700,8 +702,18 @@ pub const ChildProc = struct {
             if (remain <= 0) return error.Timeout;
             self.waitRpcMs(@intCast(@min(remain, std.math.maxInt(i32)))) catch {}; // cleanup: propagation impossible
         }
-        const line = self.rpc_reader.interface.takeDelimiter('\n') catch |err| {
-            if (err == error.StreamTooLong) return error.FrameTooLarge;
+        var large = std.Io.Writer.Allocating.init(self.alloc);
+        defer large.deinit();
+        const line = self.rpc_reader.interface.takeDelimiter('\n') catch |err| long: {
+            if (err == error.StreamTooLong) {
+                _ = self.rpc_reader.interface.streamDelimiterLimit(&large.writer, '\n', .limited(max_frame_len)) catch |read_err| switch (read_err) {
+                    error.StreamTooLong => return error.FrameTooLarge,
+                    error.WriteFailed => return error.OutOfMemory,
+                    error.ReadFailed => return error.ReadFailed,
+                };
+                if (self.rpc_reader.interface.bufferedLen() > 0) self.rpc_reader.interface.toss(1);
+                break :long large.written();
+            }
             // If no data available and we're past deadline, surface timeout.
             if (core_time.milliTimestamp() >= deadline) return error.Timeout;
             return err;

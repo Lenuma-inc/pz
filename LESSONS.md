@@ -11,6 +11,11 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Read allowed reasoning efforts and defaults from credential-scoped model metadata; a global off default can be invalid, and API and subscription catalogs can differ.
 - Distinguish unsupported levels from wire-value mappings: Pi marks GPT-6.1 Sol off as null, while its Codex minimal level maps to low; direct OpenAI marks minimal unsupported too.
 - Scan shared ~/.agents/skills before pz-specific roots; keep deduplication map keys alive when replacing skill metadata.
+- Preserve and redact child provider diagnostics before sending failure frames; test missing error text and long escaped messages through the real child.
+- On Linux, re-exec /proc/self/exe rather than its resolved path: a running executable may have been unlinked by a rebuild/update.
+- Keep RPC frame limits independent of the small read buffer; stream long frames with the protocol limit and test oversize rejection.
+- Distinguish successful delegation from concurrency: the two-child live retest returned both results, but calls ran sequentially.
+- Trace concurrency through production dispatch: loop.runTool blocks on PolicySpawnCtx.runReqStreaming; BgPool exists but is not wired into the agent tool.
 
 ### Do Not Do
 - Omit OpenAI reasoning options to implement off: omission leaves the server default active.
@@ -254,3 +259,11 @@ Detecting ESC during streaming requires a dedicated InputWatcher thread (mirrors
 - Don't assume `generateSummary` can be reused for different output shapes — verify the actual struct
 - Don't use `tool_result` events for non-tool data — Anthropic API validates tool_use pairing
 - Don't claim proofs verify "existing code" when they model planned code — label clearly
+
+## E2E audit (2026-10-30)
+
+### Do More
+- Report a capped test run ending in exit 124 as inconclusive, not passed; this audit's single 60-second run produced no test summary.
+
+### Do Not Do
+- Treat successful `--version` and `--help` checks of an older existing binary as verification of current sources, or API tests that skip network errors as proof of live-provider success.

@@ -3579,23 +3579,100 @@ test "basic tools agent delegates through the real child entry point" {
         \\elif printf '%s' "$req" | grep -q CHILD_REQUEST; then
         \\ printf 'text:CHILD_OK\nstop:done\n'
         \\else
+        \\ if [ -n "$PZ_TEST_EXE" ]; then rm -- "$PZ_TEST_EXE" || exit 1; fi
         \\ printf '%s\n' 'tool_call:c1|agent|{"agent_id":"worker","prompt":"CHILD_REQUEST"}' 'stop:tool'
         \\fi
     ;
     try env.put("PZ_PROVIDER_CMD", provider);
     const pz = try pzBinAlloc(alloc);
     defer alloc.free(pz);
-    const result = try std.process.run(alloc, std.testing.io, .{
-        .argv = &.{ pz, "print", "--no-config", "--no-session", "--model", "test-model", "--prompt", "PARENT_REQUEST" },
-        .cwd = .{ .path = cwd },
-        .environ_map = &env,
-        .stdout_limit = .limited(65536),
-        .stderr_limit = .limited(4096),
-    });
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-    try std.testing.expect(result.term == .exited and result.term.exited == 0);
-    try @import("helpers.zig").expectSnapText(@src(), "PARENT_OK\n", result.stdout);
+    const copy = try std.fs.path.join(alloc, &.{ cwd, "pz-copy" });
+    defer alloc.free(copy);
+    inline for (.{ false, true }) |remove_exe| {
+        if (remove_exe and @import("builtin").os.tag != .linux) continue;
+        try env.put("PZ_TEST_EXE", if (remove_exe) copy else "");
+        const argv: []const []const u8 = if (remove_exe)
+            &.{ "sh", "-c", "cp -- \"$1\" \"$2\" && shift && exec \"$@\"", "sh", pz, copy, "print", "--no-config", "--no-session", "--model", "test-model", "--prompt", "PARENT_REQUEST" }
+        else
+            &.{ pz, "print", "--no-config", "--no-session", "--model", "test-model", "--prompt", "PARENT_REQUEST" };
+        const result = try std.process.run(alloc, std.testing.io, .{
+            .argv = argv,
+            .cwd = .{ .path = cwd },
+            .environ_map = &env,
+            .stdout_limit = .limited(65536),
+            .stderr_limit = .limited(4096),
+        });
+        defer alloc.free(result.stdout);
+        defer alloc.free(result.stderr);
+        try std.testing.expect(result.term == .exited and result.term.exited == 0);
+        try @import("helpers.zig").expectSnapText(@src(), "PARENT_OK\n", result.stdout);
+        if (remove_exe) try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "pz-copy", .{}));
+    }
+}
+
+test "swarm PTY keyboard drives live peer debate and parent synthesis" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "provider.py", .data = @embedFile("swarm_provider.py") });
+    try ctx.env.put("PZ_PROVIDER_CMD", "python3 provider.py");
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "SWARM_PARENT\n" },
+        .{ .wait_for = .{ .text = "SWARM_COMPLETE", .timeout_ms = 20000 } },
+        .{ .snapshot = "swarm-debate" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session", "--model", "test-model", "--thinking", "high" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "SWARM_COMPLETE") != null);
+}
+
+test "basic tools agent preserves child provider errors" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const pz = try pzBinAlloc(alloc);
+    defer alloc.free(pz);
+    const cases = .{
+        .{ "printf 'err:CHILD_PROVIDER_CAUSE\\nstop:err\\n'", "grep -q CHILD_PROVIDER_CAUSE" },
+        .{ "printf 'stop:err\\n'", "grep -q ProviderStopped" },
+        .{ "printf 'err:sk-CHILD_PRIVATE_KEY\\nstop:err\\n'", "grep -q '\\[secret:' && ! printf '%s' \"$req\" | grep -q CHILD_PRIVATE_KEY" },
+        .{ "printf 'err:CHILD_PROVIDER_CAUSE'; head -c 150000 /dev/zero | tr '\\000' '\"'; printf '\\nstop:err\\n'", "grep -q CHILD_PROVIDER_CAUSE && printf '%s' \"$req\" | grep -q '\\[truncated\\]'" },
+    };
+    inline for (cases) |case| {
+        const provider = try std.fmt.allocPrint(alloc,
+            \\req=$(cat)
+            \\if printf '%s' "$req" | grep -q tool_result; then
+            \\ if printf '%s' "$req" | {s}; then printf 'text:DIAG_OK\nstop:done\n'; else printf 'text:DIAG_LOST\nstop:done\n'; fi
+            \\elif printf '%s' "$req" | grep -q CHILD_REQUEST; then
+            \\ {s}
+            \\else
+            \\ printf '%s\n' 'tool_call:c1|agent|{{"agent_id":"worker","prompt":"CHILD_REQUEST"}}' 'stop:tool'
+            \\fi
+        , .{ case[1], case[0] });
+        defer alloc.free(provider);
+        try env.put("PZ_PROVIDER_CMD", provider);
+        const result = try std.process.run(alloc, std.testing.io, .{
+            .argv = &.{ pz, "print", "--no-config", "--no-session", "--model", "test-model", "--prompt", "PARENT_REQUEST" },
+            .cwd = .{ .path = cwd },
+            .environ_map = &env,
+            .stdout_limit = .limited(65536),
+            .stderr_limit = .limited(4096),
+        });
+        defer alloc.free(result.stdout);
+        defer alloc.free(result.stderr);
+        try std.testing.expect(result.term == .exited and result.term.exited == 0);
+        try @import("helpers.zig").expectSnapText(@src(), "DIAG_OK\n", result.stdout);
+    }
 }
 
 test "Responses PTY keyboard resume preserves commentary and final boundaries" {

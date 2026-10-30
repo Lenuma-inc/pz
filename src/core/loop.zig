@@ -1501,6 +1501,9 @@ fn parseCallArgs(
         .agent => .{
             .agent = try parseArgs(tools.Call.AgentArgs, alloc, raw),
         },
+        .swarm => .{
+            .swarm = try parseArgs(@import("swarm.zig").Args, alloc, raw),
+        },
         .web => .{
             .web = try parseArgs(tools.Call.WebArgs, alloc, raw),
         },

@@ -31,6 +31,7 @@ pub const Kind = enum {
     patch,
     todo,
     github,
+    swarm,
 };
 
 pub const Tool = struct {
@@ -120,6 +121,7 @@ pub const Call = struct {
         patch: PatchArgs,
         todo: TodoArgs,
         github: GithubArgs,
+        swarm: @import("swarm.zig").Args,
     };
 
     pub const ReadArgs = struct {
