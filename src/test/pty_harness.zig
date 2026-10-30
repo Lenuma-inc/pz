@@ -372,6 +372,204 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
     try std.testing.expect(std.mem.indexOf(u8, out.output, "drop files") != null);
 }
 
+test "thinking levels PTY keyboard changes the footer and the next provider request" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const provider =
+        \\req=$(cat)
+        \\printf '%s\n' "$req" >> thinking-requests.jsonl
+        \\case "$req" in
+        \\*'"thinking_budget":65536'*) printf 'text:XHIGH_APPLIED\nstop:done\n';;
+        \\*'"thinking_budget":32768'*) printf 'text:HIGH_APPLIED\nstop:done\n';;
+        \\*'"thinking":"off"'*) printf 'text:OFF_APPLIED\nstop:done\n';;
+        \\*) printf 'text:WRONG_THINKING\nstop:done\n';;
+        \\esac
+    ;
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 off", .timeout_ms = 8000 } },
+        .{ .snapshot = "default-off" },
+        .{ .inject = "first\n" },
+        .{ .wait_for = .{ .text = "OFF_APPLIED" } },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 minimal" } },
+        .{ .inject = "\x1b[Z" },
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 low" } },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 medium" } },
+        .{ .inject = "\x1b[Z" },
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 high" } },
+        .{ .inject = "second\n" },
+        .{ .wait_for = .{ .text = "HIGH_APPLIED" } },
+        .{ .snapshot = "high" },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .wait_for = .{ .text = "test-model \xe2\x80\xa2 xhigh" } },
+        .{ .inject = "third\n" },
+        .{ .wait_for = .{ .text = "XHIGH_APPLIED" } },
+        .{ .snapshot = "xhigh" },
+        .{ .inject = "\x1b[Z" },
+        .{ .sleep = 100 },
+        .{ .snapshot = "off" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 200 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--model", "test-model", "--provider-cmd", provider,
+    }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(out.term == .exited and out.term.exited == 0);
+    const labels = [_][]const u8{ "test-model \xe2\x80\xa2 off", "test-model \xe2\x80\xa2 high", "test-model \xe2\x80\xa2 xhigh", "test-model \xe2\x80\xa2 off" };
+    try std.testing.expectEqual(labels.len, out.snapshots.len);
+    for (out.snapshots, labels) |snap, label| {
+        try std.testing.expect(std.mem.indexOf(u8, snap.grid, label) != null);
+    }
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "thinking-requests.jsonl", alloc, .limited(1024 * 1024));
+    defer alloc.free(requests);
+    var lines = std.mem.tokenizeScalar(u8, requests, '\n');
+    inline for ([_][]const u8{
+        "{\"stop\":[],\"thinking\":\"off\"}",
+        "{\"stop\":[],\"thinking\":\"budget\",\"thinking_budget\":32768}",
+        "{\"stop\":[],\"thinking\":\"budget\",\"thinking_budget\":65536}",
+    }) |want| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, lines.next() orelse return error.MissingRequest, .{});
+        defer parsed.deinit();
+        const opts = try std.json.Stringify.valueAlloc(alloc, parsed.value.object.get("opts").?, .{});
+        defer alloc.free(opts);
+        try @import("helpers.zig").expectSnapText(@src(), want, opts);
+    }
+    try std.testing.expect(lines.next() == null);
+}
+
+test "catalog thinking PTY starts at low and cycles only supported levels" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const provider =
+        \\req=$(cat)
+        \\printf '%s\n' "$req" > received.json
+        \\printf 'text:LOW_APPLIED\nstop:done\n'
+    ;
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "gpt-6.1-sol \xe2\x80\xa2 low", .timeout_ms = 8000 } },
+        .{ .wait_for = .{ .text = "does not support thinking off; using low" } },
+        .{ .inject = "first\n" },
+        .{ .wait_for = .{ .text = "LOW_APPLIED" } },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .wait_for = .{ .text = "gpt-6.1-sol \xe2\x80\xa2 medium" } },
+        .{ .inject = "\x1b[Z" },
+        .{ .wait_for = .{ .text = "gpt-6.1-sol \xe2\x80\xa2 high" } },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .wait_for = .{ .text = "gpt-6.1-sol \xe2\x80\xa2 xhigh" } },
+        .{ .inject = "\x1b[Z" },
+        .{ .wait_for = .{ .text = "gpt-6.1-sol \xe2\x80\xa2 max" } },
+        .{ .inject = "\x1b[9;2u" },
+        .{ .sleep = 100 },
+        .{ .snapshot = "wrapped-low" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 200 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--model", "gpt-6.1-sol", "--provider-cmd", provider,
+    }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(out.term == .exited and out.term.exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "gpt-6.1-sol \xe2\x80\xa2 low") != null);
+    const raw = try tmp.dir.readFileAlloc(std.testing.io, "received.json", alloc, .limited(1024 * 1024));
+    defer alloc.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    const opts = try std.json.Stringify.valueAlloc(alloc, parsed.value.object.get("opts").?, .{});
+    defer alloc.free(opts);
+    try @import("helpers.zig").expectSnapText(@src(), "{\"stop\":[],\"thinking\":\"budget\",\"thinking_budget\":4096}", opts);
+}
+
+test "compact startup PTY shows context and twenty skill names at 80x24" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "Workspace context" });
+    for (0..20) |i| {
+        const dir = try std.fmt.allocPrint(alloc, "home/.agents/skills/skill-{d:0>2}", .{i});
+        defer alloc.free(dir);
+        try tmp.dir.createDirPath(std.testing.io, dir);
+        const path = try std.fmt.allocPrint(alloc, "{s}/SKILL.md", .{dir});
+        defer alloc.free(path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "---\nname: skill\ndescription: Long description should not appear on startup\n---\nBody\n" });
+    }
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "skill-19", .timeout_ms = 8000 } },
+        .{ .resize = .{ .cols = 80, .rows = 24 } },
+        .{ .sleep = 200 },
+        .{ .snapshot = "startup" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 200 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session" }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(out.term == .exited and out.term.exited == 0);
+    const grid = out.snapshots[0].grid;
+    for ([_][]const u8{ "pz v", "/hotkeys", "[Context]", "AGENTS.md", "[Skills]", "skill-00, skill-01", "skill-19" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, grid, needle) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, grid, "Long description") == null);
+}
+
+test "catalog thinking print json and rpc send low with an explicit notice" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const pz = try pzBinAlloc(alloc);
+    defer alloc.free(pz);
+    const provider = "cat > received.json; printf 'text:LOW_APPLIED\\nstop:done\\n'";
+    for ([_][]const u8{ "print", "json", "rpc" }) |mode| {
+        var argv = std.ArrayList([]const u8).empty;
+        defer argv.deinit(alloc);
+        try argv.appendSlice(alloc, &.{ pz, mode, "--no-config", "--no-session", "--model", "gpt-6.1-sol", "--provider-cmd", provider });
+        if (std.mem.eql(u8, mode, "print")) try argv.appendSlice(alloc, &.{ "--prompt", "first" });
+        const input = if (std.mem.eql(u8, mode, "rpc")) "{\"cmd\":\"prompt\",\"text\":\"first\"}\n{\"cmd\":\"exit\"}\n" else "first\n";
+        var out = try runProc(alloc, cwd, &env, argv.items, input);
+        defer out.deinit(alloc);
+        try std.testing.expect(out.term == .exited and out.term.exited == 0);
+        try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does not support thinking off; using low") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out.stdout, "LOW_APPLIED") != null);
+        const raw = try tmp.dir.readFileAlloc(std.testing.io, "received.json", alloc, .limited(1024 * 1024));
+        defer alloc.free(raw);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+        defer parsed.deinit();
+        const opts = try std.json.Stringify.valueAlloc(alloc, parsed.value.object.get("opts").?, .{});
+        defer alloc.free(opts);
+        try @import("helpers.zig").expectSnapText(@src(), "{\"stop\":[],\"thinking\":\"budget\",\"thinking_budget\":4096}", opts);
+    }
+}
+
 test "real pz PTY startup survives live version check" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1159,7 +1357,7 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
 
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
-        .{ .wait_for = .{ .text = "claude-opus-4-6", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "startup-model", .timeout_ms = 5000 } },
         .{ .inject = "\x03" }, // ctrl-c once (clear)
         .{ .sleep = 400 },
         .{ .inject = "\x03" }, // ctrl-c again (quit)
@@ -1170,7 +1368,7 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
         std.testing.allocator,
         cwd_abs,
         &env,
-        &.{"--no-session"},
+        &.{ "--no-session", "--model", "startup-model", "--provider-cmd", fake_provider_cmd },
         &steps,
     );
     defer out.deinit(std.testing.allocator);

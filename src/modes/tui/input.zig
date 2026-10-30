@@ -589,6 +589,7 @@ fn parseKittyKey(params: []const u8) ?editor.Key {
 
     if (shift and !alt and !ctrl) {
         return switch (cp) {
+            '\t' => .shift_tab,
             '\r', '\n' => .ctrl_j,
             else => null,
         };
@@ -806,6 +807,15 @@ test "parse shift-tab" {
     @memcpy(r.buf[0..3], "\x1b[Z");
     r.len = 3;
     try expectKey(r.parseOne().?, .shift_tab);
+}
+
+test "thinking levels accept Kitty shift-tab across fragmented input" {
+    var r = Reader.init(-1);
+    r.inject("\x1b[9;");
+    try std.testing.expect(r.parseOne() == null);
+    r.inject("2u");
+    try expectKey(r.parseOne().?, .shift_tab);
+    try std.testing.expect(r.parseOne() == null);
 }
 
 test "parse ctrl-g" {

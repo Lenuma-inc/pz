@@ -282,10 +282,8 @@ fn writeReq(alloc: std.mem.Allocator, js: *std.json.Stringify, req: providers.Re
     }
     try js.endArray();
 
-    if (req.opts.thinking != .adaptive) {
-        try js.objectField("thinking");
-        try js.write(@tagName(req.opts.thinking));
-    }
+    try js.objectField("thinking");
+    try js.write(@tagName(req.opts.thinking));
     if (req.opts.thinking_budget != 0) {
         try js.objectField("thinking_budget");
         try js.write(req.opts.thinking_budget);
@@ -433,7 +431,7 @@ test "buildReq emits request fixture JSON" {
     defer std.testing.allocator.free(raw);
     try expectSnap(@src(), raw,
         \\[]u8
-        \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"]}}"
+        \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"],"thinking":"off"}}"
     );
 }
 
@@ -465,7 +463,7 @@ test "buildReq includes provider field when set" {
     defer std.testing.allocator.free(raw);
     try expectSnap(@src(), raw,
         \\[]u8
-        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[]}}"
+        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[],"thinking":"off"}}"
     );
 }
 
@@ -487,20 +485,17 @@ test "buildReq emits thinking budget mode" {
     );
 }
 
-test "buildReq omits thinking when adaptive (default)" {
+test "buildReq thinking defaults off" {
     const req: providers.Request = .{
         .model = "m1",
         .msgs = &.{},
-        .opts = .{
-            .thinking = .adaptive,
-        },
     };
 
     const raw = try buildReq(std.testing.allocator, req);
     defer std.testing.allocator.free(raw);
     try expectSnap(@src(), raw,
         \\[]u8
-        \\  "{"model":"m1","msgs":[],"tools":[],"opts":{"stop":[]}}"
+        \\  "{"model":"m1","msgs":[],"tools":[],"opts":{"stop":[],"thinking":"off"}}"
     );
 }
 

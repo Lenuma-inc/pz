@@ -27,7 +27,7 @@ Startup timing includes process creation. RSS is resident memory reported by Lin
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
-- **Thinking modes** — adaptive and budget-capped extended thinking
+- **Thinking levels** — prefer off when supported; OpenAI model metadata determines the available levels through max. Shift+Tab skips unsupported levels. Any adjustment is shown explicitly; Anthropic uses token budgets for enabled levels.
 - **Prompt caching** — automatic cache_control on system messages
 - **Headless modes** — `--print`, `--json`, and `rpc` for scripting and integration
 - **Agent tool** — spawn subagents with dedicated RPC fd, progress streaming, process group isolation
@@ -122,7 +122,7 @@ Canonical `pz` state lives under `.pz/`:
 - `~/.pz/state.json` — local machine state
 - `~/.pz/sessions/` and `./.pz/sessions/` — persisted sessions
 - `~/.pz/policy.json` and `./.pz/policy.json` — authoritative signed policy bundles
-- `~/.pz/skills/` and `./.pz/skills/` — skill definitions
+- `~/.agents/skills/`, `~/.pz/skills/` and `./.pz/skills/` — skill definitions, with later directories overriding earlier ones by directory name
 - `AGENTS.md` — policy-controlled context files
 
 ## License
@@ -139,6 +139,12 @@ files. Missing executables fail explicitly. HTTP tools require installed `curl`.
 writing. It updates or creates files; file deletion and renaming are separate
 operations. `todo` keeps a task list for the current runtime session. `skill`
 without a name lists the available model-invocable skills.
+
+The OpenAI picker and thinking controls use a generated catalog from Codex model
+metadata. Refresh it with `python3 tools/update-openai-models.py`, then run
+`zig build`. This updates the bundled snapshot; pz does not fetch it at startup.
+The startup screen shows short hints and skill names; `/hotkeys` lists the full
+keyboard help.
 
 `github` browses public repositories one directory or file at a time using the
 GitHub Contents API, following the approach in

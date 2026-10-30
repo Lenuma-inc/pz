@@ -71,7 +71,7 @@ pub const Handler = struct {
                 if (item.meta.disable_model_invocation) continue;
                 list.writer.print("{s}: {s}\n", .{ item.dir_name, item.meta.description }) catch return error.OutOfMemory;
             }
-            return okWithResult(self, call, if (list.written().len == 0) "No model-invocable skills found in .pz/skills or ~/.pz/skills." else list.written());
+            return okWithResult(self, call, if (list.written().len == 0) "No model-invocable skills found in .pz/skills, ~/.pz/skills or ~/.agents/skills." else list.written());
         }
 
         const info = self.cache.find(self.alloc, args.name) catch |err| switch (err) {

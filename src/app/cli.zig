@@ -25,7 +25,8 @@ pub const Run = struct {
     session: Args.SessionSel = .auto,
     no_session: bool = false,
     tool_mask: u16 = @import("../core.zig").tools.builtin.mask_all,
-    thinking: Args.ThinkingLevel = .adaptive,
+    thinking: Args.ThinkingLevel = .off,
+    thinking_note: ?[]const u8 = null,
     verbose: bool = false,
     system_prompt: ?[]const u8 = null,
     append_system_prompt: ?[]const u8 = null,
@@ -120,7 +121,7 @@ pub const help_text =
     \\      --provider-cmd <CMD>    Override provider transport command
     \\      --tools <LIST>          Enable tool subset (read,write,bash,edit,grep,find,ls,agent,ask,skill,web,patch,todo,github)
     \\      --no-tools              Disable all built-in tools
-    \\      --thinking <LEVEL>      Thinking mode (off,minimal,low,medium,high,xhigh,adaptive)
+    \\      --thinking <LEVEL>      Thinking level (off,minimal,low,medium,high,xhigh,max; default: off when supported)
     \\      --max-turns <N>          Limit agent loop turns (0=unlimited)
     \\      --verbose               Show metadata in print mode
     \\      --system-prompt <TEXT>   Override system prompt

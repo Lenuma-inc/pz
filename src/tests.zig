@@ -11,6 +11,7 @@ test {
     _ = @import("core/session/reader.zig");
     _ = @import("core/session/retry_state.zig");
     _ = @import("app/cli.zig");
+    _ = @import("app/args.zig");
     _ = @import("app/changelog.zig");
     _ = @import("app/tls.zig");
     _ = @import("app/version.zig");

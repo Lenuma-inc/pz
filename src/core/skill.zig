@@ -180,13 +180,11 @@ pub fn discoverAndRead(alloc: std.mem.Allocator, home: ?[]const u8) ![]SkillInfo
     var seen = std.StringHashMap(usize).init(alloc);
     defer seen.deinit();
 
-    // Global: ~/.pz/skills/*/SKILL.md
+    // Shared skills first; pz global and project skills override them.
     if (home) |h| {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pz/skills", .{h}) catch continue_label: {
-            break :continue_label "";
-        };
-        if (skills_path.len > 0) {
+        for ([_][]const u8{ ".agents/skills", ".pz/skills" }) |root| {
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const skills_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ h, root });
             try scanDir(alloc, &skills, &seen, skills_path, .global);
         }
     }
@@ -253,8 +251,10 @@ fn scanDir(
             .source = source,
         };
 
-        if (seen.get(entry.name)) |idx| {
-            // Replace: project wins over global
+        if (seen.getEntry(entry.name)) |existing| {
+            const idx = existing.value_ptr.*;
+            // The map borrows dir_name; replace its key before freeing it.
+            existing.key_ptr.* = dir_name;
             freeSkill(alloc, skills.items[idx]);
             skills.items[idx] = info;
         } else {
@@ -362,6 +362,33 @@ test "isValidDirName: valid" {
     try std.testing.expect(isValidDirName("skill_v2.0"));
     try std.testing.expect(isValidDirName("ABC123"));
     try std.testing.expect(isValidDirName("a"));
+}
+
+test "skill discovery reads agents skills and preserves override precedence" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Guard = @import("tools/path_guard.zig").CwdGuard;
+    var cwd = try Guard.enter(tmp.dir);
+    defer cwd.deinit();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    const paths = [_][]const u8{ "home/.agents/skills/probe", "home/.pz/skills/probe", ".pz/skills/probe" };
+    const bodies = [_][]const u8{ "shared", "global", "project" };
+    const home_dir = try std.fs.path.join(alloc, &.{ home, "home" });
+    defer alloc.free(home_dir);
+    for (paths, bodies) |path, body| {
+        try tmp.dir.createDirPath(std.testing.io, path);
+        var dir = try tmp.dir.openDir(std.testing.io, path, .{});
+        defer dir.close(std.testing.io);
+        const content = try std.fmt.allocPrint(alloc, "---\nname: probe\ndescription: probe\n---\n{s}", .{body});
+        defer alloc.free(content);
+        try dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = content });
+        const skills = try discoverAndRead(alloc, home_dir);
+        defer freeSkills(alloc, skills);
+        try std.testing.expectEqual(@as(usize, 1), skills.len);
+        try std.testing.expectEqualStrings(body, skills[0].meta.body);
+    }
 }
 
 test "isValidDirName: invalid" {

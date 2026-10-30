@@ -324,7 +324,6 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request, is_oauth: boo
     // Thinking configuration
     switch (req.opts.thinking) {
         .off => {},
-        .adaptive => {},
         .budget => if (supportsThinking(req.model)) {
             const budget = if (req.opts.thinking_budget > 0) req.opts.thinking_budget else 4096;
             try js.objectField("thinking");
@@ -952,14 +951,13 @@ test "buildBody with tools" {
     );
 }
 
-test "buildBody thinking adaptive" {
+test "buildBody thinking defaults off" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
     const body = try testBuildBody(testing.allocator, .{
         .model = "claude-opus-4-20250514",
         .msgs = &msgs,
-        .opts = .{ .thinking = .adaptive },
     });
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,

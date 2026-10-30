@@ -359,14 +359,15 @@ fn callIdFromToolId(id: []const u8) []const u8 {
 
 fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
     return switch (opts.thinking) {
-        .off => null,
-        .adaptive => "medium",
+        .off => "none",
         .budget => blk: {
             const b = opts.thinking_budget;
             if (b <= 1024) break :blk "minimal";
             if (b <= 4096) break :blk "low";
             if (b <= 16384) break :blk "medium";
-            break :blk "high";
+            if (b <= 32768) break :blk "high";
+            if (b <= 65536) break :blk "xhigh";
+            break :blk "max";
         },
     };
 }
@@ -445,6 +446,13 @@ fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bo
     }
 
     if (reasoningEffort(req.opts)) |effort| {
+        if (@import("openai_models.zig").find(req.model)) |model| {
+            var supported = false;
+            for (model.efforts) |value| {
+                if (std.mem.eql(u8, effort, value)) supported = true;
+            }
+            if (!supported) return error.UnsupportedThinkingLevel;
+        }
         try js.objectField("reasoning");
         try js.beginObject();
         try js.objectField("effort");
@@ -864,7 +872,7 @@ test "callIdFromToolId strips item suffix" {
 
 test "ChatGPT OAuth body uses instructions without API token limits" {
     const body = try Cfg.buildBody(testing.allocator, .{
-        .model = "gpt-6.1-sol",
+        .model = "gpt-5.4",
         .msgs = &.{
             .{ .role = .system, .parts = &.{.{ .text = "rules" }} },
             .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
@@ -874,7 +882,7 @@ test "ChatGPT OAuth body uses instructions without API token limits" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-6.1-sol","stream":true,"store":false,"instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5.4","stream":true,"store":false,"instructions":"rules","reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 }
 
@@ -921,23 +929,22 @@ test "buildBody minimal request has model stream and input" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 }
 
-test "buildBody includes reasoning for adaptive and budget" {
+test "buildBody thinking defaults off and supports explicit budget" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const adaptive = try buildBodyImpl(testing.allocator, .{
+    const default = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
-        .opts = .{ .thinking = .adaptive },
     });
-    defer testing.allocator.free(adaptive);
-    try expectSnap(@src(), adaptive,
+    defer testing.allocator.free(default);
+    try expectSnap(@src(), default,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"medium","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 
     const budget = try buildBodyImpl(testing.allocator, .{
@@ -950,6 +957,57 @@ test "buildBody includes reasoning for adaptive and budget" {
         \\[]u8
         \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"minimal","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
+}
+
+test "thinking levels reach API and OAuth requests without collapsing levels" {
+    const ThinkingLevel = @import("../../app/args.zig").ThinkingLevel;
+    const Case = struct { level: ThinkingLevel, effort: []const u8 };
+    const cases = [_]Case{
+        .{ .level = .off, .effort = "none" },
+        .{ .level = .minimal, .effort = "minimal" },
+        .{ .level = .low, .effort = "low" },
+        .{ .level = .medium, .effort = "medium" },
+        .{ .level = .high, .effort = "high" },
+        .{ .level = .xhigh, .effort = "xhigh" },
+        .{ .level = .max, .effort = "max" },
+    };
+    for ([_]bool{ false, true }) |is_sub| {
+        inline for (cases) |case| {
+            const body = try Cfg.buildBody(testing.allocator, .{
+                .model = "gpt-5.4",
+                .msgs = &.{},
+                .opts = case.level.toProviderOpts(),
+            }, is_sub);
+            defer testing.allocator.free(body);
+            const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+            defer parsed.deinit();
+            const reasoning = try std.json.Stringify.valueAlloc(testing.allocator, parsed.value.object.get("reasoning").?, .{});
+            defer testing.allocator.free(reasoning);
+            try @import("../../test/helpers.zig").expectSnapText(@src(), comptime std.fmt.comptimePrint("{{\"effort\":\"{s}\",\"summary\":\"auto\"}}", .{case.effort}), reasoning);
+        }
+    }
+}
+
+test "catalog thinking resolves off to low and validates API and OAuth requests" {
+    const Level = @import("../../app/args.zig").ThinkingLevel;
+    for ([_]bool{ false, true }) |is_sub| {
+        try testing.expectError(error.UnsupportedThinkingLevel, Cfg.buildBody(testing.allocator, .{
+            .model = "gpt-6.1-sol",
+            .msgs = &.{},
+            .opts = .{ .thinking = .off },
+        }, is_sub));
+        const body = try Cfg.buildBody(testing.allocator, .{
+            .model = "gpt-6.1-sol",
+            .msgs = &.{},
+            .opts = Level.off.forModel("gpt-6.1-sol").toProviderOpts(),
+        }, is_sub);
+        defer testing.allocator.free(body);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+        defer parsed.deinit();
+        const reasoning = try std.json.Stringify.valueAlloc(testing.allocator, parsed.value.object.get("reasoning").?, .{});
+        defer testing.allocator.free(reasoning);
+        try @import("../../test/helpers.zig").expectSnapText(@src(), "{\"effort\":\"low\",\"summary\":\"auto\"}", reasoning);
+    }
 }
 
 test "buildBody includes system assistant tool history and tool definitions" {
@@ -978,7 +1036,7 @@ test "buildBody includes system assistant tool history and tool definitions" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
     );
 }
 
@@ -1003,7 +1061,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"o?k?"}]}"
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"o?k?"}]}"
     );
 }
 

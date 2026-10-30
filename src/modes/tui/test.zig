@@ -472,9 +472,9 @@ test "e2e editor border visible" {
     try renderToVs(&ui, &vs);
 
     // h=8: tx_h=3, border row 3, editor row 4, border row 5, footer 6-7
-    // Border should be ─ (U+2500) in default border_fg (thinking_med / adaptive)
+    // Border should be ─ (U+2500) in the default harness border_fg.
     try vs.expectText(3, 0, "\xe2\x94\x80"); // ─
-    try vs.expectFg(3, 0, .{ .rgb = 0x81a2be }); // thinking_med (adaptive default)
+    try vs.expectFg(3, 0, .{ .rgb = 0x81a2be });
     try vs.expectText(5, 0, "\xe2\x94\x80"); // bottom border too
     try vs.expectFg(5, 0, .{ .rgb = 0x81a2be });
 }

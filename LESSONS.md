@@ -2,6 +2,21 @@
 
 Hard-won patterns and anti-patterns from building pz. **Update this file at the end of every session** with new discoveries.
 
+## Session Notes (2026-10-30)
+
+### Do More
+- Test both legacy and Kitty key encodings through the real PTY; enabling Kitty changes how Shift+Tab arrives.
+- Verify thinking levels in serialized provider requests, including explicit off and distinct high/xhigh efforts.
+- Keep CLI, runtime, and provider defaults aligned; test startup without a thinking flag and reject removed mode names.
+- Read allowed reasoning efforts and defaults from credential-scoped model metadata; a global off default can be invalid, and API and subscription catalogs can differ.
+- Distinguish unsupported levels from wire-value mappings: Pi marks GPT-6.1 Sol off as null, while its Codex minimal level maps to low; direct OpenAI marks minimal unsupported too.
+- Scan shared ~/.agents/skills before pz-specific roots; keep deduplication map keys alive when replacing skill metadata.
+
+### Do Not Do
+- Omit OpenAI reasoning options to implement off: omission leaves the server default active.
+- Infer reasoning capabilities from model-name prefixes or advertise effort levels absent from the selected model's catalog.
+- Run PTY regressions against stale build_options.pz_bin_path; rebuild the executable and use its generated test options.
+
 ## Session Notes (2026-10-29)
 
 ### Do More

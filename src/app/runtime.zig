@@ -2058,6 +2058,13 @@ fn execWithIoTuiHooks(
     }
     run_cmd.runtime_provider = provider_name;
     run_cmd.runtime_model = model_name;
+    run_cmd.thinking = run_cmd.thinking.forModel(model_name);
+    const thinking_note = if (run_cmd.thinking != run_cmd_in.thinking)
+        try thinkingNote(alloc, model_name, run_cmd_in.thinking, run_cmd.thinking)
+    else
+        null;
+    defer if (thinking_note) |note| alloc.free(note);
+    run_cmd.thinking_note = thinking_note;
 
     var missing_provider = MissingProvider{
         .alloc = alloc,
@@ -2245,6 +2252,19 @@ fn execWithIoTuiHooks(
         const sess_store = store.?;
         const sys_prompt = try buildSystemPrompt(alloc, run_cmd, home);
         defer if (sys_prompt) |sp| alloc.free(sp);
+
+        if (thinking_note) |note| {
+            switch (run_cmd.mode) {
+                .tui => {},
+                .print => try writer.print("[thinking] {s}\n", .{note}),
+                .json, .rpc => try writeJsonLine(alloc, writer, .{
+                    .type = "thinking",
+                    .model = model_name,
+                    .level = @tagName(run_cmd.thinking),
+                    .message = note,
+                }),
+            }
+        }
 
         switch (run_cmd.mode) {
             .print => try runPrint(
@@ -2734,6 +2754,8 @@ fn runTui(
         try showStartup(alloc, run_cmd.io, &ui, false, home);
     }
 
+    if (run_cmd.thinking_note) |note| try ui.tr.infoText(note);
+
     // Set terminal title (OSC 0)
     try out.writeAll("\x1b]0;pz\x07");
     defer out.writeAll("\x1b]0;\x07") catch {}; // cleanup: propagation impossible
@@ -2870,6 +2892,7 @@ fn runTui(
                 ui.tr.scrollToBottom();
             }
             try syncBgFooter(alloc, &ui, &bg_mgr);
+            try syncThinking(alloc, &ui, model, &thinking, &popts);
             try ui.setModel(model);
             try ui.setProvider(provider_label);
         }
@@ -2890,6 +2913,7 @@ fn runTui(
             if (is_tty and watcher.isCanceled()) try ui.tr.infoText("[canceled]");
             ui.panels.run_state = .idle;
         } else {
+            try syncThinking(alloc, &ui, model, &thinking, &popts);
             try ui.setModel(model);
             try ui.setProvider(provider_label);
             try ui.draw(out);
@@ -3017,6 +3041,7 @@ fn runTui(
                                         };
                                         try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                                         ui.panels.ctx_limit = modelCtxWindow(model);
+                                        try syncThinking(alloc, &ui, model, &thinking, &popts);
                                         try ui.setModel(model);
                                         try ui.setProvider(provider_label);
                                         ui.ov.?.deinit(alloc);
@@ -3333,6 +3358,7 @@ fn runTui(
                                     ui.tr.scrollToBottom();
                                 }
                                 try syncBgFooter(alloc, &ui, &bg_mgr);
+                                try syncThinking(alloc, &ui, model, &thinking, &popts);
                                 try ui.setModel(model);
                                 try ui.setProvider(provider_label);
                                 try ui.draw(out);
@@ -3381,7 +3407,7 @@ fn runTui(
                         },
                         .cycle_thinking => {
                             if (pre) |p| alloc.free(p);
-                            thinking = cycleThinking(thinking);
+                            thinking = cycleThinking(thinking, model);
                             popts = thinking.toProviderOpts();
                             ui.panels.thinking_label = thinkingLabel(thinking);
                             ui.border_fg = thinkingBorderFg(thinking);
@@ -3391,6 +3417,7 @@ fn runTui(
                             if (pre) |p| alloc.free(p);
                             model = try cycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model);
+                            try syncThinking(alloc, &ui, model, &thinking, &popts);
                             try ui.setModel(model);
                             try ui.draw(out);
                         },
@@ -3490,6 +3517,7 @@ fn runTui(
                             if (pre) |p| alloc.free(p);
                             model = try reverseCycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model);
+                            try syncThinking(alloc, &ui, model, &thinking, &popts);
                             try ui.setModel(model);
                             try ui.draw(out);
                         },
@@ -3754,6 +3782,7 @@ fn runTui(
             if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
                 if (cmd == .compacted) ui.panels.noteCompaction();
                 try syncBgFooter(alloc, &ui, &bg_mgr);
+                try syncThinking(alloc, &ui, model, &thinking, &popts);
                 try ui.setModel(model);
                 try ui.setProvider(provider_label);
                 try ui.draw(out);
@@ -3814,7 +3843,8 @@ fn runRpc(
         .out = out,
     };
 
-    const popts = run_cmd.thinking.toProviderOpts();
+    var thinking = run_cmd.thinking;
+    var popts = thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
     const approval_bind = try loadApprovalBindAlloc(alloc, run_cmd.io, home);
@@ -3926,6 +3956,15 @@ fn runRpc(
                 .msg = policy_denied_msg,
             });
             continue;
+        }
+
+        const selected = thinking.forModel(model);
+        if (selected != thinking) {
+            const note = try thinkingNote(alloc, model, thinking, selected);
+            defer alloc.free(note);
+            try writeJsonLine(alloc, out, .{ .type = "thinking", .model = model, .level = @tagName(selected), .message = note });
+            thinking = selected;
+            popts = selected.toProviderOpts();
         }
 
         switch (resolved) {
@@ -6534,16 +6573,7 @@ const model_cycle = [_][]const u8{
     "claude-haiku-4-5-20251001",
 };
 
-// Pi's OpenAI Codex catalog (packages/ai/scripts/generate-models.ts).
-const openai_models = [_][]const u8{
-    "gpt-6.1-sol",
-    "gpt-6-astra",
-    "gpt-6-sol",
-    "gpt-6-luna",
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-};
+const openai_models = @import("../core/providers/openai_models.zig").ids;
 
 const ModelList = struct {
     buf: [model_cycle.len + openai_models.len][]const u8 = undefined,
@@ -6743,20 +6773,58 @@ fn reverseCycleModel(alloc: std.mem.Allocator, cur: []const u8, model_owned: *?[
     return new;
 }
 
-fn cycleThinking(cur: args_mod.ThinkingLevel) args_mod.ThinkingLevel {
-    return switch (cur) {
-        .adaptive => .off,
-        .off => .minimal,
-        .minimal => .low,
-        .low => .medium,
-        .medium => .high,
-        .high => .xhigh,
-        .xhigh => .adaptive,
-    };
+fn cycleThinking(cur: args_mod.ThinkingLevel, model: []const u8) args_mod.ThinkingLevel {
+    return cur.next(model);
+}
+
+fn thinkingNote(alloc: std.mem.Allocator, model: []const u8, requested: args_mod.ThinkingLevel, selected: args_mod.ThinkingLevel) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{s} does not support thinking {s}; using {s}", .{ model, @tagName(requested), @tagName(selected) });
+}
+
+fn syncThinking(alloc: std.mem.Allocator, ui: *tui_harness.Ui, model: []const u8, thinking: *args_mod.ThinkingLevel, popts: *core.providers.Opts) !void {
+    const selected = thinking.forModel(model);
+    if (selected == thinking.*) return;
+    const note = try thinkingNote(alloc, model, thinking.*, selected);
+    defer alloc.free(note);
+    try ui.tr.infoText(note);
+    thinking.* = selected;
+    popts.* = selected.toProviderOpts();
+    ui.panels.thinking_label = thinkingLabel(selected);
+    ui.border_fg = thinkingBorderFg(selected);
 }
 
 fn thinkingLabel(level: args_mod.ThinkingLevel) []const u8 {
     return @tagName(level);
+}
+
+test "thinking levels cycle from Kitty and legacy keys and render in the footer" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 20, "test-model", "test");
+    defer ui.deinit();
+    var reader = tui_input.Reader.init(-1);
+    var thinking: args_mod.ThinkingLevel = .off;
+    const levels = [_]args_mod.ThinkingLevel{ .minimal, .low, .medium, .high, .xhigh, .off };
+    var vs = try @import("../modes/tui/vscreen.zig").VScreen.init(alloc, 80, 20);
+    defer vs.deinit();
+    for (levels, 0..) |expected, i| {
+        reader.inject(if (i % 2 == 0) "\x1b[9;2u" else "\x1b[Z");
+        const ev = reader.next();
+        try std.testing.expect(ev == .key);
+        try std.testing.expect((try ui.onKey(ev.key)) == .cycle_thinking);
+        thinking = cycleThinking(thinking, "test-model");
+        try std.testing.expectEqual(expected, thinking);
+        ui.panels.thinking_label = thinkingLabel(thinking);
+        ui.border_fg = thinkingBorderFg(thinking);
+        var bytes: [16384]u8 = undefined;
+        var out = @import("../modes/tui/test_buf.zig").TestBuf.init(&bytes);
+        try ui.draw(&out);
+        vs.feed(out.view());
+        const footer = try vs.rowText(alloc, 19);
+        defer alloc.free(footer);
+        const label = try std.fmt.allocPrint(alloc, "test-model \xe2\x80\xa2 {s}", .{@tagName(expected)});
+        defer alloc.free(label);
+        try std.testing.expect(std.mem.endsWith(u8, footer, label));
+    }
 }
 
 fn thinkingBorderFg(level: args_mod.ThinkingLevel) @import("../modes/tui/frame.zig").Color {
@@ -6768,8 +6836,73 @@ fn thinkingBorderFg(level: args_mod.ThinkingLevel) @import("../modes/tui/frame.z
         .medium => t.thinking_med,
         .high => t.thinking_high,
         .xhigh => t.thinking_xhigh,
-        .adaptive => t.thinking_med,
+        .max => t.thinking_xhigh,
     };
+}
+
+test "catalog thinking updates the mock terminal after a model switch" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 20, "gpt-6.1-sol", "openai");
+    defer ui.deinit();
+    var level: args_mod.ThinkingLevel = .off;
+    var opts = level.toProviderOpts();
+    try syncThinking(alloc, &ui, "gpt-6.1-sol", &level, &opts);
+    try std.testing.expectEqual(args_mod.ThinkingLevel.low, level);
+    try std.testing.expectEqual(@as(u32, 4096), opts.thinking_budget);
+    var vs = try @import("../modes/tui/vscreen.zig").VScreen.init(alloc, 80, 20);
+    defer vs.deinit();
+    var bytes: [16384]u8 = undefined;
+    var out = @import("../modes/tui/test_buf.zig").TestBuf.init(&bytes);
+    try ui.draw(&out);
+    vs.feed(out.view());
+    const footer = try vs.rowText(alloc, 19);
+    defer alloc.free(footer);
+    try std.testing.expect(std.mem.endsWith(u8, footer, "gpt-6.1-sol \xe2\x80\xa2 low"));
+    for ([_]args_mod.ThinkingLevel{ .medium, .high, .xhigh, .max, .low }) |expected| {
+        try std.testing.expect((try ui.onKey(.shift_tab)) == .cycle_thinking);
+        level = cycleThinking(level, "gpt-6.1-sol");
+        try std.testing.expectEqual(expected, level);
+    }
+}
+
+test "compact startup keeps context and twenty skills visible at 80x24" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "Workspace context" });
+    for (0..20) |i| {
+        const dir = try std.fmt.allocPrint(alloc, ".agents/skills/skill-{d:0>2}", .{i});
+        defer alloc.free(dir);
+        try tmp.dir.createDirPath(std.testing.io, dir);
+        const path = try std.fmt.allocPrint(alloc, "{s}/SKILL.md", .{dir});
+        defer alloc.free(path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "---\nname: skill\ndescription: This long description should not fill the startup screen\n---\nBody\n" });
+    }
+    var ui = try tui_harness.Ui.init(alloc, 80, 24, "m", "p");
+    defer ui.deinit();
+    try showStartup(alloc, std.testing.io, &ui, true, home);
+    var vs = try @import("../modes/tui/vscreen.zig").VScreen.init(alloc, 80, 24);
+    defer vs.deinit();
+    var bytes: [32768]u8 = undefined;
+    var out = @import("../modes/tui/test_buf.zig").TestBuf.init(&bytes);
+    try ui.draw(&out);
+    vs.feed(out.view());
+    var screen: std.Io.Writer.Allocating = .init(alloc);
+    defer screen.deinit();
+    for (0..19) |i| {
+        const row = try vs.rowText(alloc, i);
+        defer alloc.free(row);
+        try screen.writer.print("{s}\n", .{row});
+    }
+    const text = screen.written();
+    for ([_][]const u8{ "pz v", "/hotkeys", "[Context]", "AGENTS.md", "[Skills]", "skill-00, skill-01", "skill-19" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, text, needle) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, text, "This long description") == null);
 }
 
 fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_resumed: bool, home: ?[]const u8) !void {
@@ -6779,40 +6912,12 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
     const ver_line = " pz v" ++ cli.version ++ " (" ++ cli.git_hash ++ ")";
     try ui.tr.styledText(ver_line, .{ .fg = t.dim });
 
-    // Hotkeys — key in dim, description in muted
-    const keys = [_][2][]const u8{
-        .{ "escape", "to interrupt" },
-        .{ "ctrl+c", "to clear" },
-        .{ "ctrl+c twice", "to exit" },
-        .{ "ctrl+d", "to exit (empty)" },
-        .{ "ctrl+z", "to undo" },
-        .{ "up/down", "for input history" },
-        .{ "ctrl+a/e", "to start/end of line" },
-        .{ "ctrl+j", "to insert newline" },
-        .{ "ctrl+k/u", "to delete to end/all" },
-        .{ "ctrl+w", "to delete word" },
-        .{ "alt+b/f", "to move by word" },
-        .{ "shift+tab", "to cycle thinking level" },
-        .{ "ctrl+p/shift+ctrl+p", "to cycle models" },
-        .{ "ctrl+l", "to select model" },
-        .{ "ctrl+o", "to expand tools" },
-        .{ "ctrl+t", "to expand thinking" },
-        .{ "ctrl+g", "for external editor" },
-        .{ "/", "for commands" },
-        .{ "!", "to run bash" },
-        .{ "!!", "to run bash (no context)" },
-        .{ "alt+enter", "to queue follow-up" },
-        .{ "alt+up", "to restore queued messages" },
-        .{ "ctrl+v", "to paste image" },
-        .{ "drag", "to select and copy text" },
-        .{ "drop files", "to attach" },
-    };
-    for (keys) |kv| {
-        // key in dim, description in muted (matching pi)
-        const line = try std.fmt.allocPrint(alloc, " \x1b[38;2;102;102;102m{s}\x1b[38;2;128;128;128m {s}\x1b[0m", .{ kv[0], kv[1] });
-        defer alloc.free(line);
-        try ui.tr.pushAnsiText(line);
-    }
+    try ui.tr.styledText(
+        " escape interrupt · ctrl+c clear/exit · / commands · ! bash\n" ++
+            " shift+tab thinking · ctrl+l model · /hotkeys full help\n" ++
+            " drag to select · drop files to attach",
+        .{ .fg = t.dim },
+    );
 
     // Context section
     const ctx_paths = try core.context.discoverPaths(alloc, io, home);
@@ -6821,8 +6926,6 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
         alloc.free(ctx_paths);
     }
     if (ctx_paths.len > 0) {
-        try ui.tr.styledText("", .{}); // blank line
-        try ui.tr.styledText("", .{}); // blank line (pi has 2)
         try ui.tr.styledText("[Context]", .{ .fg = t.md_heading });
         const h = home orelse "";
         for (ctx_paths) |p| {
@@ -6842,21 +6945,13 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
     if (skills.len > 0) {
         try ui.tr.styledText("", .{}); // blank line
         try ui.tr.styledText("[Skills]", .{ .fg = t.md_heading });
-        for (skills) |skill| {
-            const display = if (skill.meta.description.len > 0)
-                try std.fmt.allocPrint(alloc, "  {s} [{s}] - {s}", .{
-                    skill.dir_name,
-                    skillSourceName(skill.source),
-                    skill.meta.description,
-                })
-            else
-                try std.fmt.allocPrint(alloc, "  {s} [{s}]", .{
-                    skill.dir_name,
-                    skillSourceName(skill.source),
-                });
-            defer alloc.free(display);
-            try infoTextSafe(alloc, ui, display);
+        var names: std.Io.Writer.Allocating = .init(alloc);
+        defer names.deinit();
+        for (skills, 0..) |skill, i| {
+            if (i > 0) try names.writer.writeAll(", ");
+            try names.writer.writeAll(skill.dir_name);
         }
+        try infoTextSafe(alloc, ui, names.written());
     }
 
     // What's New section (only on fresh sessions)
@@ -6883,10 +6978,6 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
         const new_state = config.PzState{ .last_hash = cli.build_id };
         try new_state.save(alloc, home);
     }
-
-    // Trailing blank lines before prompt (matching pi's spacing)
-    try ui.tr.styledText("", .{});
-    try ui.tr.styledText("", .{});
 }
 
 fn discoverSkills(alloc: std.mem.Allocator, home: ?[]const u8) ![]core_skill.SkillInfo {

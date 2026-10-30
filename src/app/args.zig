@@ -22,7 +22,41 @@ pub const ThinkingLevel = enum {
     medium,
     high,
     xhigh,
-    adaptive,
+    max,
+
+    const levels = [_]ThinkingLevel{ .off, .minimal, .low, .medium, .high, .xhigh, .max };
+
+    pub fn supported(self: ThinkingLevel, model: []const u8) bool {
+        const info = @import("../core/providers/openai_models.zig").find(model) orelse return self != .max;
+        const effort = if (self == .off) "none" else @tagName(self);
+        for (info.efforts) |value| {
+            if (std.mem.eql(u8, effort, value)) return true;
+        }
+        return false;
+    }
+
+    pub fn forModel(self: ThinkingLevel, model: []const u8) ThinkingLevel {
+        if (@import("../core/providers/openai_models.zig").find(model) == null) return self;
+        if (self.supported(model)) return self;
+        const index = @intFromEnum(self);
+        for (levels[index..]) |level| {
+            if (level.supported(model)) return level;
+        }
+        var i = index;
+        while (i > 0) {
+            i -= 1;
+            if (levels[i].supported(model)) return levels[i];
+        }
+        return .off;
+    }
+
+    pub fn next(self: ThinkingLevel, model: []const u8) ThinkingLevel {
+        for (1..levels.len + 1) |offset| {
+            const level = levels[(@intFromEnum(self) + offset) % levels.len];
+            if (level.supported(model)) return level;
+        }
+        return .off;
+    }
 
     const budget_minimal: u32 = 1024;
     const budget_low: u32 = 4096;
@@ -33,12 +67,12 @@ pub const ThinkingLevel = enum {
     pub fn toProviderOpts(self: ThinkingLevel) core.providers.Opts {
         return switch (self) {
             .off => .{ .thinking = .off },
-            .adaptive => .{ .thinking = .adaptive },
             .minimal => .{ .thinking = .budget, .thinking_budget = budget_minimal },
             .low => .{ .thinking = .budget, .thinking_budget = budget_low },
             .medium => .{ .thinking = .budget, .thinking_budget = budget_medium },
             .high => .{ .thinking = .budget, .thinking_budget = budget_high },
             .xhigh => .{ .thinking = .budget, .thinking_budget = budget_xhigh },
+            .max => .{ .thinking = .budget, .thinking_budget = 131072 },
         };
     }
 };
@@ -56,7 +90,7 @@ pub const Parsed = struct {
     provider: ?[]const u8 = null,
     session_dir: ?[]const u8 = null,
     provider_cmd: ?[]const u8 = null,
-    thinking: ThinkingLevel = .adaptive,
+    thinking: ThinkingLevel = .off,
     verbose: bool = false,
     system_prompt: ?[]const u8 = null,
     append_system_prompt: ?[]const u8 = null,
@@ -133,9 +167,7 @@ const thinking_map = std.StaticStringMap(ThinkingLevel).initComptime(.{
     .{ "med", .medium },
     .{ "high", .high },
     .{ "xhigh", .xhigh },
-    .{ "max", .xhigh },
-    .{ "adaptive", .adaptive },
-    .{ "auto", .adaptive },
+    .{ "max", .max },
 });
 
 pub fn parse(argv: []const []const u8) ParseError!Parsed {
@@ -485,6 +517,40 @@ test "parse accepts interactive alias for tui mode" {
 
     const flag = try parse(&.{ "--mode", "interactive" });
     try std.testing.expectEqual(Mode.tui, flag.mode);
+}
+
+test "thinking levels default off and reject removed adaptive names" {
+    const parsed = try parse(&.{});
+    try std.testing.expectEqual(ThinkingLevel.off, parsed.thinking);
+    try std.testing.expectError(error.InvalidThinking, parse(&.{ "--thinking", "adaptive" }));
+    try std.testing.expectError(error.InvalidThinking, parse(&.{ "--thinking", "auto" }));
+    const high = try parse(&.{ "--thinking", "high" });
+    try std.testing.expectEqual(ThinkingLevel.high, high.thinking);
+}
+
+test "catalog thinking matches supported efforts for every generated model" {
+    const catalog = @import("../core/providers/openai_models.zig");
+    for (catalog.entries) |model| {
+        for (ThinkingLevel.levels) |level| {
+            const selected = level.forModel(model.id);
+            try std.testing.expect(selected.supported(model.id));
+        }
+        const initial = ThinkingLevel.off.forModel(model.id);
+        var current = initial;
+        var count: usize = 0;
+        while (true) {
+            current = current.next(model.id);
+            try std.testing.expect(current.supported(model.id));
+            count += 1;
+            if (current == initial) break;
+            try std.testing.expect(count <= model.efforts.len);
+        }
+        try std.testing.expectEqual(model.efforts.len, count);
+    }
+    try std.testing.expectEqual(ThinkingLevel.low, ThinkingLevel.off.forModel("gpt-6.1-sol"));
+    try std.testing.expectEqual(ThinkingLevel.off, ThinkingLevel.off.forModel("custom-model"));
+    const parsed = try parse(&.{ "--thinking", "max" });
+    try std.testing.expectEqual(ThinkingLevel.max, parsed.thinking);
 }
 
 test "parse help and version flags" {
