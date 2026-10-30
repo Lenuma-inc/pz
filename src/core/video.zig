@@ -71,7 +71,7 @@ pub fn isPath(path: []const u8) bool {
 
 pub const ProcessResult = struct { data: ?[]u8, stderr: []u8 };
 
-pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8, start: f64, duration: ?f64, accurate: bool, image_format: []const u8, aspect: []const u8, fit_mode: []const u8, preset: []const u8, audio_format: []const u8) !ProcessResult {
+pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8, start: f64, duration: ?f64, accurate: bool, image_format: []const u8, aspect: []const u8, fit_mode: []const u8, preset: []const u8, audio_format: []const u8, transform: []const u8, speed: f64) !ProcessResult {
     if (std.mem.eql(u8, op, "inspect")) {
         const ffprobe = try resolveTool(alloc, "ffprobe");
         defer alloc.free(ffprobe);
@@ -93,6 +93,7 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
     var len: usize = 0;
     var start_buf: [32]u8 = undefined;
     var duration_buf: [32]u8 = undefined;
+    var tempo_buf: [64]u8 = undefined;
     var filter_buf: ?[]u8 = null;
     defer if (filter_buf) |filter| alloc.free(filter);
     argv[len] = ffmpeg; len += 1;
@@ -106,12 +107,14 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
     if (start > 0) {
         argv[len] = "-ss"; len += 1;
         argv[len] = try std.fmt.bufPrint(&start_buf, "{d:.3}", .{start});
+        len += 1;
     }
     argv[len] = "-i"; len += 1;
     argv[len] = input; len += 1;
     if (duration) |seconds| {
         argv[len] = "-t"; len += 1;
         argv[len] = try std.fmt.bufPrint(&duration_buf, "{d:.3}", .{seconds});
+        len += 1;
     }
     argv[len] = "-y"; len += 1;
     if (std.mem.eql(u8, op, "thumbnail")) {
@@ -136,14 +139,52 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
         }
         argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
         argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
-    } else if (std.mem.eql(u8, op, "fit")) {
-        const dims: [2]u32 = if (std.mem.eql(u8, aspect, "landscape")) .{ 1920, 1080 } else if (std.mem.eql(u8, aspect, "portrait")) .{ 1080, 1920 } else if (std.mem.eql(u8, aspect, "square")) .{ 1080, 1080 } else return error.InvalidVideoOperation;
-        filter_buf = if (std.mem.eql(u8, fit_mode, "crop"))
-            try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=increase,crop={d}:{d},setsar=1", .{ dims[0], dims[1], dims[0], dims[1] })
-        else
-            try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=decrease,pad={d}:{d}:(ow-iw)/2:(oh-ih)/2:black,setsar=1", .{ dims[0], dims[1], dims[0], dims[1] });
+    } else if (std.mem.eql(u8, op, "mute")) {
+        argv[len] = "-map"; len += 1; argv[len] = "0:v:0"; len += 1;
+        argv[len] = "-an";
+        len += 1;
+        argv[len] = "-c:v";
+        len += 1;
+        argv[len] = "copy";
+        len += 1;
+        argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
+        argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
+    } else if (std.mem.eql(u8, op, "fit") or std.mem.eql(u8, op, "transform") or std.mem.eql(u8, op, "speed")) {
+        if (std.mem.eql(u8, op, "transform")) {
+            const filters = std.StaticStringMap([]const u8).initComptime(.{
+                .{ "clockwise", "transpose=clock" },
+                .{ "counterclockwise", "transpose=cclock" },
+                .{ "half", "hflip,vflip" },
+                .{ "horizontal", "hflip" },
+                .{ "vertical", "vflip" },
+            });
+            filter_buf = try alloc.dupe(u8, filters.get(transform) orelse return error.InvalidVideoOperation);
+        } else if (std.mem.eql(u8, op, "speed")) {
+            if (!std.math.isFinite(speed) or speed < 0.5 or speed > 2) return error.InvalidVideoOperation;
+            filter_buf = try std.fmt.allocPrint(alloc, "setpts=(PTS-STARTPTS)/{d:.8}", .{speed});
+        } else {
+            const dims: [2]u32 = if (std.mem.eql(u8, aspect, "landscape")) .{ 1920, 1080 } else if (std.mem.eql(u8, aspect, "portrait")) .{ 1080, 1920 } else if (std.mem.eql(u8, aspect, "square")) .{ 1080, 1080 } else return error.InvalidVideoOperation;
+            filter_buf = if (std.mem.eql(u8, fit_mode, "crop"))
+                try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=increase,crop={d}:{d},setsar=1", .{ dims[0], dims[1], dims[0], dims[1] })
+            else
+                try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=decrease,pad={d}:{d}:(ow-iw)/2:(oh-ih)/2:black,setsar=1", .{ dims[0], dims[1], dims[0], dims[1] });
+        }
         argv[len] = "-map"; len += 1; argv[len] = "0:v:0"; len += 1;
         argv[len] = "-map"; len += 1; argv[len] = "0:a:0?"; len += 1;
+        if (std.mem.eql(u8, op, "speed")) {
+            argv[len] = "-fps_mode";
+            len += 1;
+            argv[len] = "vfr";
+            len += 1;
+            argv[len] = "-bf";
+            len += 1;
+            argv[len] = "0";
+            len += 1;
+            argv[len] = "-af";
+            len += 1;
+            argv[len] = try std.fmt.bufPrint(&tempo_buf, "asetpts=PTS-STARTPTS,atempo={d:.8}", .{speed});
+            len += 1;
+        }
         argv[len] = "-vf"; len += 1; argv[len] = filter_buf.?; len += 1;
         argv[len] = "-c:v"; len += 1; argv[len] = "libx264"; len += 1;
         argv[len] = "-preset"; len += 1; argv[len] = "medium"; len += 1;
@@ -241,4 +282,87 @@ fn resolveTool(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
 
 test "contactSheetAlloc reports a missing video path" {
     try std.testing.expectError(error.VideoNotFound, contactSheetAlloc(std.testing.allocator, "/tmp/pz-no-such-video-4f6b8c.mp4"));
+}
+
+fn testClip(dir: std.Io.Dir) ![]u8 {
+    const a = std.testing.allocator;
+    const root = try dir.realPathFileAlloc(sys.io, ".", a);
+    defer a.free(root);
+    const path = try std.fs.path.join(a, &.{ root, "source.mp4" });
+    errdefer a.free(path);
+    const ffmpeg = try resolveTool(a, "ffmpeg");
+    defer a.free(ffmpeg);
+    const result = try std.process.run(a, sys.io, .{
+        .argv = &.{ ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=red:size=64x48:rate=20:duration=4,drawbox=x=32:y=0:w=32:h=24:color=blue:t=fill,drawbox=x=0:y=24:w=32:h=24:color=yellow:t=fill,drawbox=x=32:y=24:w=32:h=24:color=white:t=fill", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:v", "libx264", "-c:a", "aac", "-shortest", path },
+    });
+    defer a.free(result.stdout);
+    defer a.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return error.FixtureFailed;
+    return path;
+}
+
+test "media trim honors nonzero start and duration" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testClip(tmp.dir);
+    defer a.free(input);
+    const result = try processAlloc(a, "trim", input, 1, 1, true, "jpg", "original", "contain", "h264", "mp3", "clockwise", 1);
+    defer a.free(result.stderr);
+    const data = result.data orelse {
+        std.debug.print("{s}\n", .{result.stderr});
+        return error.RenderFailed;
+    };
+    defer a.free(data);
+    try tmp.dir.writeFile(sys.io, .{ .sub_path = "trim.mp4", .data = data });
+    const output = try tmp.dir.realPathFileAlloc(sys.io, "trim.mp4", a);
+    defer a.free(output);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), try mediaDuration(a, output), 0.15);
+}
+
+fn testRender(dir: std.Io.Dir, input: []const u8, op: []const u8, transform: []const u8, speed: f64) ![:0]u8 {
+    const a = std.testing.allocator;
+    const result = try processAlloc(a, op, input, 0, null, false, "jpg", "original", "contain", "h264", "mp3", transform, speed);
+    defer a.free(result.stderr);
+    const data = result.data orelse {
+        std.debug.print("{s}\n", .{result.stderr});
+        return error.RenderFailed;
+    };
+    defer a.free(data);
+    try dir.writeFile(sys.io, .{ .sub_path = "result.mp4", .data = data });
+    return dir.realPathFileAlloc(sys.io, "result.mp4", a);
+}
+
+test "media transforms speed and mute render real files" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testClip(tmp.dir);
+    defer a.free(input);
+    for ([_][]const u8{ "clockwise", "counterclockwise", "half", "horizontal", "vertical" }) |transform| {
+        const output = try testRender(tmp.dir, input, "transform", transform, 1);
+        defer a.free(output);
+        try std.testing.expectApproxEqAbs(@as(f64, 4), try mediaDuration(a, output), 0.15);
+    }
+    const silent_output = try testRender(tmp.dir, input, "mute", "clockwise", 1);
+    defer a.free(silent_output);
+    try tmp.dir.rename("result.mp4", tmp.dir, "silent.mp4", sys.io);
+    const silent = try tmp.dir.realPathFileAlloc(sys.io, "silent.mp4", a);
+    defer a.free(silent);
+    const ffprobe = try resolveTool(a, "ffprobe");
+    defer a.free(ffprobe);
+    const probe = try std.process.run(a, sys.io, .{
+        .argv = &.{ ffprobe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", silent },
+    });
+    defer a.free(probe.stdout);
+    defer a.free(probe.stderr);
+    try std.testing.expect(probe.term == .exited and probe.term.exited == 0);
+    try std.testing.expectEqual(@as(usize, 0), probe.stdout.len);
+    for ([_][]const u8{ input, silent }) |source| {
+        for ([_]f64{ 0.5, 2 }) |rate| {
+            const output = try testRender(tmp.dir, source, "speed", "clockwise", rate);
+            defer a.free(output);
+            try std.testing.expectApproxEqAbs(4 / rate, try mediaDuration(a, output), 0.2);
+        }
+    }
 }

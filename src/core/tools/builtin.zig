@@ -131,7 +131,7 @@ const github_params = [_]tools.Tool.Param{
     .{ .name = "to_line", .ty = .int, .required = false, .desc = "Last file line, inclusive" },
 };
 const ffmpeg_params = [_]tools.Tool.Param{
-    .{ .name = "op", .ty = .string, .required = true, .desc = "inspect, thumbnail, trim, fit, convert, gif, or audio" },
+    .{ .name = "op", .ty = .string, .required = true, .desc = "inspect, thumbnail, trim, fit, convert, gif, audio, transform, speed, or mute" },
     .{ .name = "input", .ty = .string, .required = true, .desc = "Input video path" },
     .{ .name = "output", .ty = .string, .required = false, .desc = "New output file path; required except for inspect" },
     .{ .name = "start_seconds", .ty = .int, .required = false, .desc = "Start offset in seconds (default 0)" },
@@ -140,10 +140,12 @@ const ffmpeg_params = [_]tools.Tool.Param{
     .{ .name = "aspect", .ty = .string, .required = false, .desc = "fit target: landscape, portrait, or square" },
     .{ .name = "fit_mode", .ty = .string, .required = false, .desc = "fit uses contain or crop" },
     .{ .name = "preset", .ty = .string, .required = false, .desc = "convert codec preset: h264, hevc, prores, or webm" },
+    .{ .name = "transform", .ty = .string, .required = false, .desc = "transform: clockwise/counterclockwise 90 degrees, half turn, horizontal/vertical mirror" },
+    .{ .name = "speed", .ty = .int, .required = false, .desc = "speed multiplier 0.5–2; preserves audio pitch; duration_seconds is output duration" },
     .{ .name = "audio_format", .ty = .string, .required = false, .desc = "audio output: mp3, wav, or flac" },
 };
 const ffmpeg_schema =
-    \\{"type":"object","properties":{"op":{"type":"string","enum":["inspect","thumbnail","trim","fit","convert","gif","audio"]},"input":{"type":"string"},"output":{"type":"string"},"start_seconds":{"type":"number","minimum":0,"maximum":300},"duration_seconds":{"type":"number","exclusiveMinimum":0,"maximum":300},"accurate":{"type":"boolean","default":false},"aspect":{"type":"string","enum":["landscape","portrait","square"]},"fit_mode":{"type":"string","enum":["contain","crop"],"default":"contain"},"preset":{"type":"string","enum":["h264","hevc","prores","webm"]},"audio_format":{"type":"string","enum":["mp3","wav","flac"]}},"required":["op","input"],"additionalProperties":false}
+    \\{"type":"object","properties":{"op":{"type":"string","enum":["inspect","thumbnail","trim","fit","convert","gif","audio","transform","speed","mute"]},"input":{"type":"string"},"output":{"type":"string"},"start_seconds":{"type":"number","minimum":0,"maximum":300},"duration_seconds":{"type":"number","exclusiveMinimum":0,"maximum":300},"accurate":{"type":"boolean","default":false},"aspect":{"type":"string","enum":["landscape","portrait","square"]},"fit_mode":{"type":"string","enum":["contain","crop"],"default":"contain"},"preset":{"type":"string","enum":["h264","hevc","prores","webm"]},"audio_format":{"type":"string","enum":["mp3","wav","flac"]},"transform":{"type":"string","enum":["clockwise","counterclockwise","half","horizontal","vertical"]},"speed":{"type":"number","minimum":0.5,"maximum":2,"default":1}},"required":["op","input"],"additionalProperties":false}
 ;
 
 const patch_params = [_]tools.Tool.Param{
@@ -488,7 +490,7 @@ pub const Runtime = struct {
             .{
                 .name = "ffmpeg",
                 .kind = .ffmpeg,
-                .spec = .{ .kind = .ffmpeg, .desc = "Local video editor: inspect, make JPG/PNG thumbnails, cut, fit landscape/portrait/square, export H.264/HEVC/ProRes/WebM, create palette GIFs, and extract MP3/WAV/FLAC audio. Fixed options only; inputs up to 100 MiB/5 minutes, outputs up to 64 MiB, never overwrite.", .params = &ffmpeg_params, .schema_json = ffmpeg_schema, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 300000, .destructive = true },
+                .spec = .{ .kind = .ffmpeg, .desc = "Local video editor: inspect, make JPG/PNG thumbnails, cut, fit landscape/portrait/square, export H.264/HEVC/ProRes/WebM, create palette GIFs, extract MP3/WAV/FLAC audio, rotate/mirror, change speed with audio pitch preserved, and mute without re-encoding video. Fixed options only; inputs up to 100 MiB/5 minutes, outputs up to 64 MiB, never overwrite.", .params = &ffmpeg_params, .schema_json = ffmpeg_schema, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 300000, .destructive = true },
                 .dispatch = &self.dispatch,
             },
         };
@@ -840,7 +842,7 @@ pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]c
     try out.writer.writeByte('\n');
     const guides = .{
         .{ "github", "For source inspection, use github before cloning: list/tree paths, read selected files (from_line/to_line), history by path/ref, branches/tags, info; compare with base and ref or commit with ref (GitHub-only patches). owner/repo means GitHub; HTTPS URLs infer GitHub/GitLab/Codeberg/Gitea, other hosts require api:gitlab/gitea/forgejo. Omit ref for default branch. Paged results show page/next; continue until empty. GitHub rejects truncated trees; compare files cap 300 (page 1), commit 3000; absent patch does not mean unchanged. Public read-only; report access/rate errors. Clone only for builds/execution. commit/compare are GitHub-only." },
-        .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
+        .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC; transform rotates or mirrors; speed=0.5–2 changes playback with audio pitch preserved; mute drops audio and copies video. For speed, duration_seconds measures output time. Generated files are ffprobe-checked, which does not prove visual quality or full decodability; use read on the result for a contact sheet. Report measured metadata and name unverified properties. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
         .{ "grep", "Use grep for regex content searches in a file or directory; glob filters files. It uses rg and honors ignore files." },
         .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },
         .{ "skill", "Call skill with no name to list available skills, then load an existing name." },

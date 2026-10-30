@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-31)
 
 ### Do More
+- Preserve sentinel slice types when returning allocated real paths from helpers; keep ffmpeg time arguments in distinct argv slots.
 - Separate edit input-file limits from output budgets; correlate tool failures and appended bash diffs with recorded token growth before changing prompts.
 - Distinguish punctuation outside a quoted path in pasted diagnostics from punctuation inside an attachment filename.
 - Sort session pickers by recorded activity; hide sessions without prompts instead of presenting internal IDs as titles.
@@ -13,6 +14,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Correlate child errors and replay stages with the user's actual session before changing swarm scheduling.
 
 ### Do Not Do
+- Treat ffprobe metadata as proof of full decoding or visual quality; keep media regression checks focused when requested.
 - Treat ordinary directory context in delegated tasks as a file attachment, or fabricate content for attachments absent from old sessions.
 - Assume deterministic provider fixtures match current reasoning budgets or guarded tool-result framing.
 

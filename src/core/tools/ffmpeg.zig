@@ -18,6 +18,9 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call) !tools.
     if ((args.op == .trim or args.op == .gif or args.op == .audio) and args.duration_seconds == null) return error.InvalidArgs;
     if (args.op == .fit and args.aspect == .original) return error.InvalidArgs;
     if (args.accurate and args.op != .trim) return error.InvalidArgs;
+    if (!std.math.isFinite(args.speed) or args.speed < 0.5 or args.speed > 2) return error.InvalidArgs;
+    if (args.op != .speed and args.speed != 1) return error.InvalidArgs;
+    if (args.op != .transform and args.transform != .clockwise) return error.InvalidArgs;
     if (args.output) |output| {
         if (output.len == 0 or std.mem.eql(u8, output, args.input)) return error.InvalidArgs;
         const ext = std.fs.path.extension(output);
@@ -25,7 +28,7 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call) !tools.
             .inspect => false,
             .thumbnail => std.ascii.eqlIgnoreCase(ext, ".jpg") or std.ascii.eqlIgnoreCase(ext, ".jpeg") or std.ascii.eqlIgnoreCase(ext, ".png"),
             .trim => std.ascii.eqlIgnoreCase(ext, ".mp4"),
-            .fit => std.ascii.eqlIgnoreCase(ext, ".mp4"),
+            .fit, .transform, .speed, .mute => std.ascii.eqlIgnoreCase(ext, ".mp4"),
             .convert => switch (args.preset) {
                 .h264, .hevc => std.ascii.eqlIgnoreCase(ext, ".mp4"),
                 .prores => std.ascii.eqlIgnoreCase(ext, ".mov"),
@@ -50,9 +53,12 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call) !tools.
     if (args.op != .inspect) {
         const seconds = try video.mediaDuration(alloc, args.input);
         if (seconds > 300 or args.start_seconds >= seconds) return error.VideoTooLong;
-        if (args.duration_seconds) |duration| if (args.start_seconds + duration > seconds + 0.05) return error.InvalidArgs;
+        const rate = if (args.op == .speed) args.speed else 1;
+        if (args.duration_seconds) |duration| {
+            if (args.start_seconds + duration * rate > seconds + 0.05) return error.InvalidArgs;
+        } else if ((seconds - args.start_seconds) / rate > 300) return error.VideoTooLong;
     }
-    const processed = try video.processAlloc(alloc, @tagName(args.op), args.input, args.start_seconds, args.duration_seconds, args.accurate, image_format, @tagName(args.aspect), @tagName(args.fit_mode), @tagName(args.preset), @tagName(args.audio_format));
+    const processed = try video.processAlloc(alloc, @tagName(args.op), args.input, args.start_seconds, args.duration_seconds, args.accurate, image_format, @tagName(args.aspect), @tagName(args.fit_mode), @tagName(args.preset), @tagName(args.audio_format), @tagName(args.transform), args.speed);
     defer alloc.free(processed.stderr);
     const data = processed.data orelse {
         const stderr = std.mem.trim(u8, processed.stderr, " \t\r\n");
@@ -64,7 +70,7 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call) !tools.
         var file = try path_guard.createFile(output, .{ .exclusive = true });
         defer file.close(sys.io);
         try file.writeStreamingAll(sys.io, data);
-        const verified = try video.processAlloc(alloc, "inspect", output, 0, null, false, "jpg", "original", "contain", "h264", "mp3");
+        const verified = try video.processAlloc(alloc, "inspect", output, 0, null, false, "jpg", "original", "contain", "h264", "mp3", "clockwise", 1);
         defer alloc.free(verified.stderr);
         const metadata = verified.data orelse {
             const stderr = std.mem.trim(u8, verified.stderr, " \t\r\n");

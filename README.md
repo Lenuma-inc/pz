@@ -217,11 +217,19 @@ repositories and authenticated API access are not implemented. Requests remain
 subject to egress policy.
 
 `ffmpeg` provides fixed local operations: inspect, thumbnails, trim, fit to
-landscape/portrait/square, codec export, GIF creation and audio extraction.
+landscape/portrait/square, codec export, GIF creation, audio extraction, rotation,
+mirroring, playback speed and muting.
+Use `op=transform` with `transform=clockwise|counterclockwise|half|horizontal|vertical`,
+`op=speed` with a `speed` multiplier from 0.5 to 2 (audio pitch preserved), or
+`op=mute` to drop audio while copying the video stream into MP4. These operations
+write `.mp4`; rotation and speed re-encode H.264/AAC. For speed, `start_seconds`
+is source time and optional `duration_seconds` is output time.
 It requires installed `ffmpeg` and `ffprobe`, checks input/output path policy,
 limits inputs to 100 MiB and generated outputs to 64 MiB, and never overwrites
 an existing output file. Rendering operations also limit input duration to five
-minutes; inspection does not impose that duration limit.
+minutes; slowed output without an explicit duration is also capped at five
+minutes. Inspection does not impose that duration limit. Each generated file is
+checked with ffprobe; this checks metadata, not full decoding or visual quality.
 
 `agent` runs a child agent; `swarm` provides live workers with spawn, send/recv,
 wait, stop and close operations. Spawn peers before waiting when collaboration

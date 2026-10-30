@@ -212,7 +212,7 @@ pub const Call = struct {
     };
 
     pub const FfmpegArgs = struct {
-        op: enum { inspect, thumbnail, trim, fit, convert, gif, audio },
+        op: enum { inspect, thumbnail, trim, fit, convert, gif, audio, transform, speed, mute },
         input: []const u8,
         output: ?[]const u8 = null,
         start_seconds: f64 = 0,
@@ -222,6 +222,8 @@ pub const Call = struct {
         fit_mode: enum { contain, crop } = .contain,
         preset: enum { h264, hevc, prores, webm } = .h264,
         audio_format: enum { mp3, wav, flac } = .mp3,
+        transform: enum { clockwise, counterclockwise, half, horizontal, vertical } = .clockwise,
+        speed: f64 = 1,
     };
 
     pub const PatchArgs = struct {
