@@ -369,21 +369,6 @@ fn callIdFromToolId(id: []const u8) []const u8 {
     return id;
 }
 
-fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
-    return switch (opts.thinking) {
-        .off => "none",
-        .budget => blk: {
-            const b = opts.thinking_budget;
-            if (b <= 1024) break :blk "minimal";
-            if (b <= 4096) break :blk "low";
-            if (b <= 16384) break :blk "medium";
-            if (b <= 32768) break :blk "high";
-            if (b <= 65536) break :blk "xhigh";
-            break :blk "max";
-        },
-    };
-}
-
 fn accountId(alloc: std.mem.Allocator, token: []const u8) ![]const u8 {
     var parts = std.mem.splitScalar(u8, token, '.');
     _ = parts.next() orelse return error.InvalidOAuthToken;
@@ -457,7 +442,8 @@ fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bo
         try js.write(top_p);
     }
 
-    if (reasoningEffort(req.opts)) |effort| {
+    {
+        const effort = req.opts.reasoningEffort();
         if (@import("openai_models.zig").find(req.model)) |model| {
             var supported = false;
             for (model.efforts) |value| {
@@ -985,9 +971,12 @@ test "thinking levels reach API and OAuth requests without collapsing levels" {
     };
     for ([_]bool{ false, true }) |is_sub| {
         inline for (cases) |case| {
+            const instructions = @import("../instructions.zig");
+            const prompt = try instructions.allocPrompt(testing.allocator, "gpt-5.4", case.level.toProviderOpts(), "Project rules");
+            defer testing.allocator.free(prompt);
             const body = try Cfg.buildBody(testing.allocator, .{
                 .model = "gpt-5.4",
-                .msgs = &.{},
+                .msgs = &.{.{ .role = .system, .parts = &.{.{ .text = prompt }} }},
                 .opts = case.level.toProviderOpts(),
             }, is_sub);
             defer testing.allocator.free(body);
@@ -996,6 +985,14 @@ test "thinking levels reach API and OAuth requests without collapsing levels" {
             const reasoning = try std.json.Stringify.valueAlloc(testing.allocator, parsed.value.object.get("reasoning").?, .{});
             defer testing.allocator.free(reasoning);
             try @import("../../test/helpers.zig").expectSnapText(@src(), comptime std.fmt.comptimePrint("{{\"effort\":\"{s}\",\"summary\":\"auto\"}}", .{case.effort}), reasoning);
+            const sent_prompt = if (is_sub)
+                parsed.value.object.get("instructions").?.string
+            else
+                parsed.value.object.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string;
+            try @import("../../test/helpers.zig").expectSnapText(@src(), comptime std.fmt.comptimePrint(
+                "\n\nRuntime identity: model=gpt-5.4; harness=pz; thinking={s}.\n\nProject rules",
+                .{if (case.level == .off) "off" else case.effort},
+            ), sent_prompt[instructions.base.len..]);
         }
     }
 }

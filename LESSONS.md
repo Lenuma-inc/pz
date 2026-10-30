@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Compare Codex's model-specific `model_messages.instructions_template` with pz's assembled context and tool guidance; pin the upstream revision and match effective reasoning levels before attributing behavior to the model.
 - Bind context-file trust to absolute path and exact bytes; keep config-write approvals separate and protect config directories with read-only sandbox mounts.
 - Measure optimized builds for README footprint figures and state whether debug symbols remain; keep Debug comparisons separate.
 - Date footprint measurements and state build mode, line-count scope and measured process mode; do not reuse stale TUI RSS as a fresh result.
@@ -30,6 +31,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Trace concurrency through production dispatch: loop.runTool blocks on PolicySpawnCtx.runReqStreaming; BgPool exists but is not wired into the agent tool.
 
 ### Do Not Do
+- Assume pz's parsed thinking=off reaches every model unchanged: `ThinkingLevel.forModel` selects a supported level before request serialization.
 - Silently turn session-list read failures into an empty picker; propagate storage errors.
 - Assume every repository has README.md; select an actual file from its directory listing (Cassette uses README.en.md and README.ru.md).
 - Omit OpenAI reasoning options to implement off: omission leaves the server default active.

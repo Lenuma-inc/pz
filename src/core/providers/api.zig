@@ -69,6 +69,21 @@ pub const Opts = struct {
     stop: []const []const u8 = &.{},
     thinking: ThinkingMode = .off,
     thinking_budget: u32 = 0, // 0 = default per mode
+
+    pub fn reasoningEffort(self: Opts) []const u8 {
+        return switch (self.thinking) {
+            .off => "none",
+            .budget => blk: {
+                const b = self.thinking_budget;
+                if (b <= 1024) break :blk "minimal";
+                if (b <= 4096) break :blk "low";
+                if (b <= 16384) break :blk "medium";
+                if (b <= 32768) break :blk "high";
+                if (b <= 65536) break :blk "xhigh";
+                break :blk "max";
+            },
+        };
+    }
 };
 
 pub const Aborter = struct {
