@@ -359,6 +359,10 @@ const RuntimePolicy = struct {
     }
 
     fn allowsTool(self: *const RuntimePolicy, name: []const u8, call: core.tools.Call) bool {
+        if (call.args == .ffmpeg) {
+            const args = call.args.ffmpeg;
+            return self.allows(args.input, name) and (if (args.output) |output| self.allows(output, name) else true);
+        }
         var buf: [256]u8 = undefined;
         const path = toolPolicyPath(&buf, name, call) catch return false;
         return self.allows(path, name);
@@ -366,6 +370,11 @@ const RuntimePolicy = struct {
 
     fn allowsToolKind(self: *const RuntimePolicy, name: []const u8, call: core.tools.Call, kind_str: []const u8) bool {
         if (!self.enforced()) return true;
+        if (call.args == .ffmpeg) {
+            const args = call.args.ffmpeg;
+            if (core.policy.evaluateKind(self.resolved.doc.rules, args.input, name, "read") != .allow) return false;
+            return if (args.output) |output| core.policy.evaluateKind(self.resolved.doc.rules, output, name, "write") == .allow else true;
+        }
         var buf: [256]u8 = undefined;
         const path = toolPolicyPath(&buf, name, call) catch return false;
         return core.policy.evaluateKind(self.resolved.doc.rules, path, name, kind_str) == .allow;
@@ -388,6 +397,7 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
         .patch => |args| args.path,
         .todo => "runtime/tool/todo",
         .github => "runtime/tool/github",
+        .ffmpeg => |args| args.input,
         .grep => |args| args.path,
         .find => |args| args.path,
         .ls => |args| args.path,
@@ -536,6 +546,7 @@ fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolA
         .patch => .{ .res_kind = .file, .op = "write", .target = parsed_args.patch.path, .argv = parsed_args.patch.path },
         .todo => .{ .res_kind = .cmd, .op = "run", .target = "todo", .argv = "todo" },
         .github => .{ .res_kind = .net, .op = "request", .target = parsed_args.github.repo, .argv = parsed_args.github.path },
+        .ffmpeg => .{ .res_kind = .file, .op = @tagName(parsed_args.ffmpeg.op), .target = parsed_args.ffmpeg.input, .argv = parsed_args.ffmpeg.output orelse parsed_args.ffmpeg.input },
     };
 }
 
@@ -1662,6 +1673,7 @@ fn auditResMap(kind: core.tools.Kind) AuditResMap {
         .patch => .{ .kind = .file, .op = "write" },
         .todo => .{ .kind = .cmd, .op = "run" },
         .github => .{ .kind = .net, .op = "request" },
+        .ffmpeg => .{ .kind = .file, .op = "process" },
         .ask => .{ .kind = .cfg, .op = "prompt" },
     };
 }

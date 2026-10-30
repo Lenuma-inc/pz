@@ -19,6 +19,7 @@ const web = @import("web.zig");
 const patch = @import("patch.zig");
 const todo = @import("todo.zig");
 const github = @import("github.zig");
+const ffmpeg = @import("ffmpeg.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
 
@@ -38,6 +39,7 @@ pub const mask_patch: u16 = 1 << 11;
 pub const mask_todo: u16 = 1 << 12;
 pub const mask_github: u16 = 1 << 13;
 pub const mask_swarm: u16 = 1 << 14;
+pub const mask_ffmpeg: u16 = 1 << 15;
 pub const mask_all: u16 =
     mask_read |
     mask_write |
@@ -49,7 +51,7 @@ pub const mask_all: u16 =
     mask_agent |
     mask_ask |
     mask_skill |
-    mask_web | mask_patch | mask_todo | mask_github | mask_swarm;
+    mask_web | mask_patch | mask_todo | mask_github | mask_swarm | mask_ffmpeg;
 
 const read_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File path" },
@@ -127,6 +129,21 @@ const github_params = [_]tools.Tool.Param{
     .{ .name = "from_line", .ty = .int, .required = false, .desc = "First file line, inclusive, default 1" },
     .{ .name = "to_line", .ty = .int, .required = false, .desc = "Last file line, inclusive" },
 };
+const ffmpeg_params = [_]tools.Tool.Param{
+    .{ .name = "op", .ty = .string, .required = true, .desc = "inspect, thumbnail, trim, fit, convert, gif, or audio" },
+    .{ .name = "input", .ty = .string, .required = true, .desc = "Input video path" },
+    .{ .name = "output", .ty = .string, .required = false, .desc = "New output file path; required except for inspect" },
+    .{ .name = "start_seconds", .ty = .int, .required = false, .desc = "Start offset in seconds (default 0)" },
+    .{ .name = "duration_seconds", .ty = .int, .required = false, .desc = "Bounded duration in seconds; required for trim, gif, and audio" },
+    .{ .name = "accurate", .ty = .bool, .required = false, .desc = "Re-encode trim for frame-accurate cuts instead of stream-copy" },
+    .{ .name = "aspect", .ty = .string, .required = false, .desc = "fit target: landscape, portrait, or square" },
+    .{ .name = "fit_mode", .ty = .string, .required = false, .desc = "fit uses contain or crop" },
+    .{ .name = "preset", .ty = .string, .required = false, .desc = "convert codec preset: h264, hevc, prores, or webm" },
+    .{ .name = "audio_format", .ty = .string, .required = false, .desc = "audio output: mp3, wav, or flac" },
+};
+const ffmpeg_schema =
+    \\{"type":"object","properties":{"op":{"type":"string","enum":["inspect","thumbnail","trim","fit","convert","gif","audio"]},"input":{"type":"string"},"output":{"type":"string"},"start_seconds":{"type":"number","minimum":0,"maximum":300},"duration_seconds":{"type":"number","exclusiveMinimum":0,"maximum":300},"accurate":{"type":"boolean","default":false},"aspect":{"type":"string","enum":["landscape","portrait","square"]},"fit_mode":{"type":"string","enum":["contain","crop"],"default":"contain"},"preset":{"type":"string","enum":["h264","hevc","prores","webm"]},"audio_format":{"type":"string","enum":["mp3","wav","flac"]}},"required":["op","input"],"additionalProperties":false}
+;
 
 const patch_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File to update or create" },
@@ -226,8 +243,8 @@ pub const Runtime = struct {
     skill_cache: skill.Cache,
     egress: web.RedirectPolicy,
     tasks: todo.State = .{},
-    entries: [15]tools.Entry = undefined,
-    selected: [15]tools.Entry = undefined,
+    entries: [16]tools.Entry = undefined,
+    selected: [16]tools.Entry = undefined,
 
     const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
@@ -467,6 +484,12 @@ pub const Runtime = struct {
                 .spec = .{ .kind = .swarm, .desc = "Run collaborating live workers: spawn returns immediately, send/recv exchange addressed messages, wait collects results. Parent controls stop/close. Spawn all peers before waiting; use peer messages to challenge and revise conclusions.", .params = &swarm_params, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 300000, .destructive = false },
                 .dispatch = &self.dispatch,
             },
+            .{
+                .name = "ffmpeg",
+                .kind = .ffmpeg,
+                .spec = .{ .kind = .ffmpeg, .desc = "Local video editor: inspect, make JPG/PNG thumbnails, cut, fit landscape/portrait/square, export H.264/HEVC/ProRes/WebM, create palette GIFs, and extract MP3/WAV/FLAC audio. Fixed options only; inputs up to 100 MiB/5 minutes, outputs up to 64 MiB, never overwrite.", .params = &ffmpeg_params, .schema_json = ffmpeg_schema, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 300000, .destructive = true },
+                .dispatch = &self.dispatch,
+            },
         };
     }
 
@@ -534,6 +557,10 @@ pub const Runtime = struct {
             self.selected[len] = self.entries[14];
             len += 1;
         }
+        if ((self.tool_mask & mask_ffmpeg) != 0) {
+            self.selected[len] = self.entries[15];
+            len += 1;
+        }
         return self.selected[0..len];
     }
 
@@ -554,6 +581,7 @@ pub const Runtime = struct {
             .todo => self.tasks.run(self.alloc, self.max_bytes, call),
             .github => github.run(self.alloc, self.max_bytes, self.egress, call),
             .swarm => self.runSwarm(call),
+            .ffmpeg => ffmpeg.run(self.alloc, self.max_bytes, call),
         };
     }
 
@@ -811,6 +839,7 @@ pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]c
     try out.writer.writeByte('\n');
     const guides = .{
         .{ "github", "For GitHub repository exploration, use github before cloning: list a directory with {repo,op:\"list\",path}, then read selected files with {repo,op:\"read\",path,from_line,to_line}. Omit ref for the default branch, or set a branch/tag/commit explicitly. Do not clone a repository just to inspect source; use tree for recursive file paths (optional path prefix); history for paginated commits (optional path and ref); commit with ref for metadata and patches; compare with base and ref for changes; branches/tags for refs; info for repository metadata. Use page/per_page to continue history, commit files, comparisons and refs. Tree rejects truncated listings. Compare file lists cap at 300, commit files at 3000; missing patches may mean binary/large files. Clone only when local builds or execution require it. Public repositories only; report access/rate-limit failures." },
+        .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
         .{ "grep", "Use grep for regex content searches in a file or directory; glob filters files. It uses rg and honors ignore files." },
         .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },
         .{ "skill", "Call skill with no name to list available skills, then load an existing name." },
@@ -842,6 +871,7 @@ pub fn maskForName(name: []const u8) ?u16 {
         .{ "todo", mask_todo },
         .{ "github", mask_github },
         .{ "swarm", mask_swarm },
+        .{ "ffmpeg", mask_ffmpeg },
     });
     return map.get(name);
 }

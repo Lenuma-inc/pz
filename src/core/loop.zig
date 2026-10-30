@@ -1366,6 +1366,7 @@ pub fn approvalSummaryAlloc(
         .bash => std.fmt.allocPrint(alloc, "bash `{s}`", .{parsed_args.bash.cmd}),
         .edit => std.fmt.allocPrint(alloc, "edit {s}", .{parsed_args.edit.path}),
         .patch => std.fmt.allocPrint(alloc, "patch {s}", .{parsed_args.patch.path}),
+        .ffmpeg => std.fmt.allocPrint(alloc, "ffmpeg {s}: {s} → {s}", .{ @tagName(parsed_args.ffmpeg.op), parsed_args.ffmpeg.input, parsed_args.ffmpeg.output orelse "(inspect only)" }),
         .agent => std.fmt.allocPrint(alloc, "agent {s}", .{parsed_args.agent.agent_id}),
         .web => tools.web.approvalSummaryAlloc(alloc, parsed_args.web),
         else => std.fmt.allocPrint(alloc, "[unknown tool]", .{}),
@@ -1532,6 +1533,7 @@ fn parseCallArgs(
         .patch => .{ .patch = try parseArgs(tools.Call.PatchArgs, alloc, raw) },
         .todo => .{ .todo = try parseArgs(tools.Call.TodoArgs, alloc, raw) },
         .github => .{ .github = try parseArgs(tools.Call.GithubArgs, alloc, raw) },
+        .ffmpeg => .{ .ffmpeg = try parseArgs(tools.Call.FfmpegArgs, alloc, raw) },
     };
 }
 

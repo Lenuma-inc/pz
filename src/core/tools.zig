@@ -32,6 +32,7 @@ pub const Kind = enum {
     todo,
     github,
     swarm,
+    ffmpeg,
 };
 
 pub const Tool = struct {
@@ -122,6 +123,7 @@ pub const Call = struct {
         todo: TodoArgs,
         github: GithubArgs,
         swarm: @import("swarm.zig").Args,
+        ffmpeg: FfmpegArgs,
     };
 
     pub const ReadArgs = struct {
@@ -206,6 +208,19 @@ pub const Call = struct {
         base: ?[]const u8 = null,
         page: u32 = 1,
         per_page: u32 = 30,
+    };
+
+    pub const FfmpegArgs = struct {
+        op: enum { inspect, thumbnail, trim, fit, convert, gif, audio },
+        input: []const u8,
+        output: ?[]const u8 = null,
+        start_seconds: f64 = 0,
+        duration_seconds: ?f64 = null,
+        accurate: bool = false,
+        aspect: enum { original, landscape, portrait, square } = .original,
+        fit_mode: enum { contain, crop } = .contain,
+        preset: enum { h264, hevc, prores, webm } = .h264,
+        audio_format: enum { mp3, wav, flac } = .mp3,
     };
 
     pub const PatchArgs = struct {

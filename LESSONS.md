@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Expose media processing as a typed built-in tool with fixed ffmpeg operations; enforce read and write policy on both paths, and never overwrite output files.
 - Attach clipboard images to the outgoing editor prompt and retain their source files; terminal preview alone does not send image content.
 - Choose clipboard readers from the active desktop session: wl-paste for Wayland, xclip for X11, osascript for macOS.
 - Sniff image bytes and label text-only document extraction and silent video frames explicitly in model context.
