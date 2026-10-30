@@ -32,6 +32,100 @@ pub const Checkpoint = struct {
     compacted_at_ms: i64 = 0,
 };
 
+pub fn summarize(
+    alloc: Allocator,
+    dir: Dir,
+    sid: []const u8,
+    now: i64,
+    provider: *providers.Provider,
+    model: []const u8,
+) !Checkpoint {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rdr = try reader.ReplayReader.init(alloc, dir, sid, .{});
+    defer rdr.deinit();
+    var events: std.ArrayList(schema.Event) = .empty;
+    var lines: u64 = 0;
+    var last_prompt: usize = 0;
+    var prompts: usize = 0;
+    var last_stop: ?schema.Event.StopReason = null;
+    var last_model: ?schema.Event = null;
+    while (try rdr.next()) |ev| {
+        lines += 1;
+        if (ev.data == .noop) continue;
+        if (ev.data == .prompt) {
+            last_prompt = events.items.len;
+            prompts += 1;
+        }
+        if (ev.data == .stop) last_stop = ev.data.stop.reason;
+        try events.append(a, try ev.dupe(a));
+    }
+    if (events.items.len == 0) return run(alloc, dir, sid, now);
+
+    // Keep the latest user turn intact, including attachments and tool pairs.
+    const end = if (prompts > 1) last_prompt else blk: {
+        if (last_stop == .done) break :blk events.items.len;
+        return error.NoCompactableHistory;
+    };
+    var summary: ?[]const u8 = null;
+    var start: usize = 0;
+    while (start < end) {
+        var batch: std.ArrayList(schema.Event) = .empty;
+        if (summary) |text| try batch.append(a, .{ .data = .{ .prompt = .{ .text = text } } });
+        var bytes: usize = 0;
+        while (start < end) {
+            const ev = events.items[start];
+            const raw = try schema.encodeAlloc(alloc, ev);
+            defer alloc.free(raw);
+            const wrapped = try prov_api.wrapUntrustedNamed(alloc, "session-event", @tagName(ev.data), raw);
+            defer alloc.free(wrapped);
+            if (bytes != 0 and bytes + wrapped.len > 128 * 1024) break;
+            bytes += wrapped.len;
+            try batch.append(a, ev);
+            if (ev.data == .model) last_model = ev;
+            start += 1;
+        }
+        const result = (try generateSummaryWithProvider(alloc, provider, model, batch.items, .{
+            .max_bytes = 256 * 1024,
+            .max_input_tokens = 256 * 1024,
+        })) orelse return error.SummaryFailed;
+        defer alloc.free(result.summary);
+        summary = try a.dupe(u8, result.summary);
+    }
+
+    var kept: std.ArrayList(schema.Event) = .empty;
+    if (last_model) |ev| try kept.append(a, ev);
+    const final_summary = try appendFileOpsFooter(a, summary.?, events.items[0..end]);
+    try kept.append(a, .{ .at_ms = now, .data = .{ .prompt = .{ .text = final_summary } } });
+    try kept.append(a, .{ .at_ms = now, .data = .{ .stop = .{ .reason = .done } } });
+    try kept.appendSlice(a, events.items[end..]);
+
+    const path = try sid_path.sidJsonlAlloc(alloc, sid);
+    defer alloc.free(path);
+    const original = try fs_secure.openConfined(dir, path, .{ .mode = .read_only });
+    defer original.close(sys.io);
+    var ck: Checkpoint = .{ .in_lines = lines, .in_bytes = (try original.stat(sys.io)).size, .compacted_at_ms = now };
+    var tmp = try session_file.createSessionFile(alloc, dir, sid, ".jsonl.compact.tmp");
+    defer tmp.deinit();
+    const file = try fs_secure.createConfined(dir, tmp.path, .{ .truncate = true });
+    defer file.close(sys.io);
+    for (kept.items) |ev| {
+        const raw = try schema.encodeAlloc(alloc, ev);
+        defer alloc.free(raw);
+        try file.writeStreamingAll(sys.io, raw);
+        try file.writeStreamingAll(sys.io, "\n");
+        ck.out_lines += 1;
+        ck.out_bytes += raw.len + 1;
+    }
+    if (ck.out_bytes >= ck.in_bytes) return error.SummaryDidNotShrink;
+    try file.sync(sys.io);
+    try dir.rename(tmp.path, dir, path, sys.io);
+    tmp.close();
+    try saveCheckpoint(alloc, dir, sid, ck);
+    return ck;
+}
+
 pub fn run(
     alloc: std.mem.Allocator,
     dir: Dir,
@@ -580,15 +674,20 @@ fn collectSummaryText(alloc: std.mem.Allocator, provider: *providers.Provider, r
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
+    var done = false;
 
     while (try stream.next()) |ev| switch (ev) {
         .text => |text| try out.appendSlice(alloc, text),
-        .stop => |stop| if (stop.reason != .done) return error.SummaryFailed,
+        .stop => |stop| {
+            if (stop.reason != .done) return error.SummaryFailed;
+            done = true;
+        },
         .err => return error.SummaryFailed,
         .tool_call, .tool_result => return error.SummaryFailed,
         .message, .thinking, .usage => {},
     };
 
+    if (!done) return error.SummaryFailed;
     return try out.toOwnedSlice(alloc);
 }
 
@@ -605,6 +704,8 @@ pub fn generateSummaryWithProvider(
     var req = generated.req;
     if (budget) |cfg| req.budget = cfg;
 
+    if (fitSummaryReq(req).meta.dropped_events != 0) return error.SummaryInputOverBudget;
+
     const call = try buildSummaryCall(alloc, model, req);
     defer freeSummaryCall(alloc, call);
 
@@ -619,6 +720,83 @@ pub fn generateSummaryWithProvider(
         .summary = summary,
         .meta = call.meta,
     };
+}
+
+test "summary compaction shrinks history and preserves recent tool pairs and attachments" {
+    const alloc = std.testing.allocator;
+    const mock = @import("../../test/provider_mock.zig");
+    const snap = @import("../../test/helpers.zig").expectSnapText;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wr = try @import("writer.zig").Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
+    const old = [_]schema.Event{
+        .{ .data = .{ .model = .{ .id = "m", .provider = "p" } } },
+        .{ .data = .{ .prompt = .{ .text = "original goal" } } },
+        .{ .data = .{ .tool_call = .{ .id = "old", .name = "write", .args = "{\"path\":\"a\"}" } } },
+        .{ .data = .{ .tool_result = .{ .id = "old", .output = "large old diff\n" ** 10000 } } },
+        .{ .data = .{ .text = .{ .text = "old response\n" ** 10000 } } },
+        .{ .data = .{ .stop = .{ .reason = .done } } },
+    };
+    const recent = [_]schema.Event{
+        .{ .at_ms = 7, .data = .{ .prompt = .{ .text = "continue", .attachments = &.{.{ .data = "keep attachment" }} } } },
+        .{ .at_ms = 8, .data = .{ .tool_call = .{ .id = "new", .name = "read", .args = "{}" } } },
+        .{ .at_ms = 9, .data = .{ .tool_result = .{ .id = "new", .output = "keep result" } } },
+        .{ .at_ms = 10, .data = .{ .stop = .{ .reason = .tool } } },
+    };
+    for (old ++ recent) |ev| try wr.append("s", ev);
+    var scripted = try mock.ScriptedProvider.init(&.{
+        .{ .ev = .{ .text = "checkpoint" } },
+        .{ .ev = .{ .stop = .{ .reason = .done } } },
+    });
+    defer scripted.deinit();
+    const ck = try summarize(alloc, tmp.dir, "s", 99, &scripted.provider, "m");
+    try std.testing.expect(ck.out_bytes < ck.in_bytes / 10);
+    var rdr = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{});
+    defer rdr.deinit();
+    const model_ev = (try rdr.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(model_ev.data == .model);
+    try std.testing.expectEqualStrings("m", model_ev.data.model.id);
+    const summary_ev = (try rdr.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(summary_ev.data == .prompt);
+    try snap(@src(), "checkpoint\n\n<modified-files>\na\n</modified-files>\n", summary_ev.data.prompt.text);
+    const boundary = (try rdr.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(boundary.data == .stop and boundary.data.stop.reason == .done);
+    for (recent) |expected| {
+        const actual = (try rdr.next()) orelse return error.TestUnexpectedResult;
+        const want = try schema.encodeAlloc(alloc, expected);
+        defer alloc.free(want);
+        const got = try schema.encodeAlloc(alloc, actual);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(want, got);
+    }
+    try std.testing.expect((try rdr.next()) == null);
+}
+
+test "summary compaction leaves journal intact on failed incomplete or growing summaries" {
+    const alloc = std.testing.allocator;
+    const mock = @import("../../test/provider_mock.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wr = try @import("writer.zig").Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
+    try wr.append("s", .{ .data = .{ .prompt = .{ .text = "goal" } } });
+    try wr.append("s", .{ .data = .{ .text = .{ .text = "previous answer" } } });
+    try wr.append("s", .{ .data = .{ .stop = .{ .reason = .done } } });
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(4096));
+    defer alloc.free(before);
+    const cases = [_]struct { steps: []const mock.Step, err: anyerror }{
+        .{ .steps = &.{.{ .ev = .{ .stop = .{ .reason = .max_out } } }}, .err = error.SummaryFailed },
+        .{ .steps = &.{.{ .ev = .{ .text = "incomplete" } }}, .err = error.SummaryFailed },
+        .{ .steps = &.{ .{ .ev = .{ .text = "too long\n" ** 100 } }, .{ .ev = .{ .stop = .{ .reason = .done } } } }, .err = error.SummaryDidNotShrink },
+    };
+    for (cases) |case| {
+        var scripted = try mock.ScriptedProvider.init(case.steps);
+        defer scripted.deinit();
+        try std.testing.expectError(case.err, summarize(alloc, tmp.dir, "s", 99, &scripted.provider, "m"));
+        const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(4096));
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "s.jsonl.compact.tmp", .{}));
+    }
 }
 
 test "compaction rewrites stream and preserves semantic events" {

@@ -48,7 +48,7 @@ pub const Handler = struct {
             return shared.mapFsErr(read_err);
         };
         defer src.close(sys.io);
-        const full = try readAllAlloc(src, self.alloc, self.max_bytes);
+        const full = try readAllAlloc(src, self.alloc, shared.max_file_bytes);
         defer self.alloc.free(full);
 
         const updated = if (args.all)
@@ -56,27 +56,12 @@ pub const Handler = struct {
         else
             try replaceFirstAlloc(self.alloc, full, args.old, args.new);
         defer self.alloc.free(updated);
+        if (updated.len > shared.max_file_bytes) return error.TooLarge;
 
         const diff = try shared.formatDiffAlloc(self.alloc, args.path, full, args.old, args.new);
-        errdefer self.alloc.free(diff);
-        const out = try self.alloc.alloc(tools.Output, 1);
-        errdefer self.alloc.free(out);
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = diff,
-            .owned = true,
-        };
-        const result: tools.Result = .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
-        };
+        defer self.alloc.free(diff);
+        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, self.max_bytes));
+        errdefer shared.deinitResult(self.alloc, result);
 
         var file = path_guard.openFile(args.path, .{ .mode = .write_only }) catch |open_err| {
             return shared.mapFsErr(open_err);

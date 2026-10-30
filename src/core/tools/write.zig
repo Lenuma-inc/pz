@@ -50,25 +50,9 @@ pub const Handler = struct {
             try shared.formatDiffAlloc(self.alloc, args.path, data, data, args.text)
         else
             try std.fmt.allocPrint(self.alloc, "• Edited {s} (diff omitted: existing file exceeds {d} bytes)\n", .{ std.fs.path.basename(args.path), self.max_bytes });
-        errdefer self.alloc.free(diff);
-        const out = try self.alloc.alloc(tools.Output, 1);
-        errdefer self.alloc.free(out);
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = diff,
-            .owned = true,
-        };
-        const result: tools.Result = .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
-        };
+        defer self.alloc.free(diff);
+        const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, self.max_bytes));
+        errdefer shared.deinitResult(self.alloc, result);
 
         var file = path_guard.createFile(args.path, .{
             .truncate = !args.append,

@@ -2,7 +2,22 @@
 const std = @import("std");
 const tools = @import("../tools.zig");
 
+pub const max_file_bytes: usize = 16 * 1024 * 1024;
+
 pub fn formatDiffAlloc(alloc: std.mem.Allocator, path: []const u8, full: []const u8, old: []const u8, new: []const u8) ![]u8 {
+    // Whole-file replacements should report only the lines that changed.
+    var prefix: usize = 0;
+    var common: usize = 0;
+    while (common < @min(old.len, new.len) and old[common] == new[common]) : (common += 1) {
+        if (old[common] == '\n') prefix = common + 1;
+    }
+    var suffix: usize = 0;
+    common = 0;
+    while (common < @min(old.len, new.len) - prefix and old[old.len - common - 1] == new[new.len - common - 1]) : (common += 1) {
+        if (old[old.len - common - 1] == '\n' and common > 0) suffix = common;
+    }
+    const before = old[prefix .. old.len - suffix];
+    const after = new[prefix .. new.len - suffix];
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
     const line = if (old.len == 0)
@@ -11,15 +26,16 @@ pub fn formatDiffAlloc(alloc: std.mem.Allocator, path: []const u8, full: []const
         std.mem.count(u8, full[0..pos], "\n") + 1
     else
         1;
-    const old_lines = lineCount(old);
-    const new_lines = lineCount(new);
+    const start_line = line + std.mem.count(u8, old[0..prefix], "\n");
+    const old_lines = lineCount(before);
+    const new_lines = lineCount(after);
     const header = try std.fmt.allocPrint(alloc, "• Edited {s} (+{d} -{d})\n@@ -{d},{d} +{d},{d} @@\n", .{
-        std.fs.path.basename(path), new_lines, old_lines, line, old_lines, line, new_lines,
+        std.fs.path.basename(path), new_lines, old_lines, start_line, old_lines, start_line, new_lines,
     });
     defer alloc.free(header);
     try out.appendSlice(alloc, header);
-    try appendDiffLines(alloc, &out, '-', old);
-    try appendDiffLines(alloc, &out, '+', new);
+    try appendDiffLines(alloc, &out, '-', before);
+    try appendDiffLines(alloc, &out, '+', after);
     return try out.toOwnedSlice(alloc);
 }
 

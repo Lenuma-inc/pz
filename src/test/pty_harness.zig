@@ -1877,8 +1877,10 @@ test "UX11 PTY compact with active session shows compaction result" {
     defer env.deinit();
 
     const provider_cmd =
-        "cat >/dev/null; " ++
-        "printf 'text:ack\\nstop:done\\n'";
+        "req=$(cat); printf '%s\n' \"$req\" >> summary-requests.jsonl; " ++
+        "case \"$req\" in *'context summarization assistant'*) " ++
+        "printf 'text:checkpoint\\nstop:done\\n';; " ++
+        "*) printf 'text:ack\\nstop:done\\n';; esac";
 
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
@@ -1904,8 +1906,20 @@ test "UX11 PTY compact with active session shows compaction result" {
     );
     defer out.deinit(std.testing.allocator);
 
-    // wait_for steps already proved compaction result rendered
-    try std.testing.expect(out.output.len > 0);
+    const requests = try tmp.dir.readFileAlloc(std.testing.io, "summary-requests.jsonl", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(requests);
+    try std.testing.expect(std.mem.indexOf(u8, requests, "context summarization assistant") != null);
+    var dir = try tmp.dir.openDir(std.testing.io, "sess", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iter = dir.iterate();
+    var found = false;
+    while (try iter.next(std.testing.io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        const journal = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(64 * 1024));
+        defer std.testing.allocator.free(journal);
+        if (std.mem.indexOf(u8, journal, "\"text\":\"checkpoint\"") != null) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "real-env PTY: pz starts and exits without crash" {

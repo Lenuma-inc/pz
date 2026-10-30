@@ -598,6 +598,12 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
     const sink = noop.sink();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path_guard = @import("path_guard.zig");
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "unrelated.txt", .data = "unrelated\n" ** 10000 });
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -609,7 +615,7 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
         .kind = .bash,
         .args = .{
             .bash = .{
-                .cmd = "printf 'out'; printf 'err' 1>&2",
+                .cmd = "printf 'changed' > changed.txt; printf 'out'; printf 'err' 1>&2",
             },
         },
         .src = .system,

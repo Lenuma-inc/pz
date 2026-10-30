@@ -71,6 +71,58 @@ test "basic tools: patch applies multiple hunks and rejects stale context before
     try snap(@src(), "new\n", new);
 }
 
+test "basic tools: edit and patch large files with compact diffs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    const text = try alloc.alloc(u8, 128 * 1024 + 4);
+    defer alloc.free(text);
+    @memset(text, 'x');
+    text[128 * 1024 - 1] = '\n';
+    @memcpy(text[128 * 1024 ..], "old\n");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large.py", .data = text });
+    var rt = builtin.Runtime.init(.{ .alloc = alloc, .max_bytes = 256 });
+    defer rt.deinit();
+    const edited = try run(&rt, .edit, .{ .edit = .{ .path = "large.py", .old = "old\n", .new = "EDIT\n" } });
+    defer rt.deinitResult(edited);
+    try snap(@src(), "• Edited large.py (+1 -1)\n@@ -2,1 +2,1 @@\n-old\n+EDIT\n", edited.out[0].chunk);
+    const patched = try run(&rt, .patch, .{ .patch = .{ .path = "large.py", .patch = "@@ -2 +2 @@\n-EDIT\n+PATCH\n" } });
+    defer rt.deinitResult(patched);
+    try snap(@src(), "• Edited large.py (+1 -1)\n@@ -2,1 +2,1 @@\n-EDIT\n+PATCH\n", patched.out[0].chunk);
+    const got = try tmp.dir.readFileAlloc(std.testing.io, "large.py", alloc, .limited(text.len + 2));
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(text[0 .. 128 * 1024], got[0 .. 128 * 1024]);
+    try std.testing.expectEqualStrings("PATCH\n", got[128 * 1024 ..]);
+}
+
+test "basic tools: edit and write bound responses without truncating files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    var rt = builtin.Runtime.init(.{ .alloc = alloc, .max_bytes = 64 });
+    defer rt.deinit();
+    const text = "changed\n" ** 100;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "old\n" });
+    const edited = try run(&rt, .edit, .{ .edit = .{ .path = "a", .old = "old\n", .new = text } });
+    defer rt.deinitResult(edited);
+    const written = try run(&rt, .write, .{ .write = .{ .path = "b", .text = text } });
+    defer rt.deinitResult(written);
+    for ([_]tools.Result{ edited, written }) |res| {
+        try std.testing.expect(res.out[0].truncated);
+        try std.testing.expectEqual(@as(usize, 64), res.out[0].chunk.len);
+        try std.testing.expectEqual(@as(usize, 2), res.out.len);
+        try std.testing.expect(res.out[1].stream == .meta);
+        try std.testing.expect(std.mem.indexOf(u8, res.out[1].chunk, "\"dropped_bytes\":") != null);
+    }
+    for ([_][]const u8{ "a", "b" }) |path| {
+        const got = try tmp.dir.readFileAlloc(std.testing.io, path, alloc, .limited(1024));
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(text, got);
+    }
+}
+
 test "basic tools: patch preserves missing final newline and validates counts" {
     const text = try patch.applyAlloc(alloc, "old", "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n", 100);
     defer alloc.free(text);

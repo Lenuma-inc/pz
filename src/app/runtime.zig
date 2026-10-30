@@ -2987,7 +2987,7 @@ fn runTui(
             &bg_mgr,
             session_dir_path,
             no_session,
-            sys_prompt,
+            provider,
             &init_cmd_writer,
             audit_hooks,
             &ctl_audit,
@@ -3405,7 +3405,7 @@ fn runTui(
                                 &bg_mgr,
                                 session_dir_path,
                                 no_session,
-                                sys_prompt,
+                                provider,
                                 &cmd_writer,
                                 audit_hooks,
                                 &ctl_audit,
@@ -3752,7 +3752,7 @@ fn runTui(
                         var compact_out: AutoCompactOutcome = .skipped;
 
                         if (shouldRetryOverflow(alloc, &live_turn, model, retried_overflow)) {
-                            compact_out = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, true);
+                            compact_out = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, true, provider, model);
                             if (compact_out == .compacted) {
                                 const retry_req = (try live_turn.cloneReq(alloc)) orelse return error.TestUnexpectedResult;
                                 defer {
@@ -3797,7 +3797,7 @@ fn runTui(
                                 try ui.tr.infoText(msg);
                             }
                         } else if (auto_compact_on) {
-                            _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false);
+                            _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false, provider, model);
                         }
 
                         if (pending.popNext()) |next_turn| {
@@ -3907,7 +3907,7 @@ fn runTui(
                 &bg_mgr,
                 session_dir_path,
                 no_session,
-                sys_prompt,
+                provider,
                 out,
                 audit_hooks,
                 &ctl_audit,
@@ -3970,7 +3970,7 @@ fn runTui(
                 .provider_opts = popts,
                 .system_prompt = sys_prompt,
             });
-            if (auto_compact_on) _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false);
+            if (auto_compact_on) _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false, provider, model);
             turn_ct += 1;
         }
         if (turn_ct == 0 and cmd_ct == 0 and run_cmd.prompt == null) return error.EmptyPrompt;
@@ -4567,7 +4567,7 @@ fn runRpc(
                 };
                 const dir = try openDirPath(session_dir, .{});
                 defer dir.close(sys.io);
-                const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
+                const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms(), provider, model) catch |err| {
                     try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
@@ -4945,7 +4945,7 @@ fn handleSlashCommand(
     bg_mgr: *bg.Manager,
     session_dir_path: ?[]const u8,
     no_session: bool,
-    _: ?[]const u8, // sys_prompt (unused after settings became interactive)
+    summary_provider: ?*core.providers.Provider,
     out: *std.Io.Writer,
     audit_hooks: AuditHooks,
     ctl_audit: *RuntimeCtlAudit,
@@ -5264,7 +5264,7 @@ fn handleSlashCommand(
             };
             const dir = try openDirPath(session_dir, .{});
             defer dir.close(sys.io);
-            const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
+            const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms(), summary_provider orelse return error.ProviderUnavailable, model.*) catch |err| {
                 try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
@@ -7368,14 +7368,20 @@ const CompactFn = *const fn (
     now: i64,
 ) anyerror!CompactRun;
 
+const CompactCtx = struct {
+    provider: *core.providers.Provider,
+    model: []const u8,
+};
+
 fn compactNow(
-    _: ?*anyopaque,
+    ctx: ?*anyopaque,
     alloc: std.mem.Allocator,
     dir: std.Io.Dir,
     sid: []const u8,
     now: i64,
 ) !CompactRun {
-    _ = try core.session.compactSession(alloc, dir, sid, now);
+    const args: *CompactCtx = @ptrCast(@alignCast(ctx.?));
+    _ = try core.session.compactSession(alloc, dir, sid, now, args.provider, args.model);
     return .compacted;
 }
 
@@ -7402,8 +7408,11 @@ fn autoCompact(
     session_dir_path: ?[]const u8,
     no_session: bool,
     force: bool,
+    provider: *core.providers.Provider,
+    model: []const u8,
 ) !AutoCompactOutcome {
-    return autoCompactWith(alloc, ui, out, sid, session_dir_path, no_session, force, null, compactNow);
+    var ctx: CompactCtx = .{ .provider = provider, .model = model };
+    return autoCompactWith(alloc, ui, out, sid, session_dir_path, no_session, force, &ctx, compactNow);
 }
 
 fn autoCompactWith(
@@ -15668,6 +15677,35 @@ test "UX11: compaction preserves history after compact" {
     // Verify original history still present.
     try std.testing.expectEqualStrings("turn 1", ui.tr.blocks.items[0].buf.items);
     try std.testing.expectEqualStrings("turn 2", ui.tr.blocks.items[1].buf.items);
+}
+
+test "UX11: compaction uses provider summary and resets context after shrinking" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(dir);
+    var wr = try core.session.writer.Writer.init(alloc, tmp.dir, .{ .flush = .{ .always = {} } });
+    try wr.append("s", .{ .data = .{ .prompt = .{ .text = "goal" } } });
+    try wr.append("s", .{ .data = .{ .text = .{ .text = "old diff\n" ** 1000 } } });
+    try wr.append("s", .{ .data = .{ .stop = .{ .reason = .done } } });
+    var scripted = try provider_mock.ScriptedProvider.init(&.{
+        .{ .ev = .{ .text = "checkpoint" } },
+        .{ .ev = .{ .stop = .{ .reason = .done } } },
+    });
+    defer scripted.deinit();
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 95;
+    ui.panels.has_usage = true;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    defer out.deinit();
+    try std.testing.expectEqual(AutoCompactOutcome.compacted, try autoCompact(alloc, &ui, &out.writer, "s", dir, false, false, &scripted.provider, "m"));
+    try std.testing.expectEqual(@as(u64, 0), ui.panels.cum_tok);
+    const ck = (try core.session.compact.loadCheckpoint(alloc, tmp.dir, "s")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(ck.out_bytes < ck.in_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "[session compacted]") != null);
 }
 
 test "UX11: compaction failure is non-fatal" {

@@ -5,6 +5,7 @@ const tools = @import("../tools.zig");
 const path_guard = @import("path_guard.zig");
 const edit = @import("edit.zig");
 const write = @import("write.zig");
+const shared = @import("shared.zig");
 
 pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call, sink: *tools.Sink) !tools.Result {
     const args = call.args.patch;
@@ -13,13 +14,13 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call, sink: *
         defer file.close(sys.io);
         var buf: [4096]u8 = undefined;
         var reader = file.readerStreaming(sys.io, &buf);
-        break :blk try reader.interface.allocRemaining(alloc, .limited(max_bytes));
+        break :blk try reader.interface.allocRemaining(alloc, .limited(shared.max_file_bytes));
     } else |err| switch (err) {
         error.FileNotFound => try alloc.dupe(u8, ""),
         else => return err,
     };
     defer alloc.free(old);
-    const updated = try applyAlloc(alloc, old, args.patch, max_bytes);
+    const updated = try applyAlloc(alloc, old, args.patch, shared.max_file_bytes);
     defer alloc.free(updated);
     if (old.len == 0) {
         return write.Handler.init(.{ .alloc = alloc, .max_bytes = max_bytes, .now_ms = call.at_ms }).run(.{
