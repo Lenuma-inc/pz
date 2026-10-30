@@ -12,6 +12,23 @@ fn run(rt: *builtin.Runtime, kind: tools.Kind, args: tools.Call.Args) !tools.Res
     return rt.registry().run(@tagName(kind), .{ .id = "basic", .kind = kind, .args = args, .src = .model, .at_ms = 1 }, noop.sink());
 }
 
+test "shell edits via Python produce a diff even when the command fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "probe.txt", .data = "before\n" });
+    var rt = builtin.Runtime.init(.{ .alloc = alloc });
+    defer rt.deinit();
+    const result = try run(&rt, .bash, .{ .bash = .{
+        .cmd = "python3 -c 'from pathlib import Path; Path(\"probe.txt\").write_text(\"after\\n\")'; exit 7",
+    } });
+    defer rt.deinitResult(result);
+    try std.testing.expect(result.final == .failed);
+    const text = result.out[result.out.len - 1].chunk;
+    try snap(@src(), "diff --git a/probe.txt b/probe.txt\n• Edited probe.txt (+1 -1)\n@@ -1,1 +1,1 @@\n-before\n+after\n[diff scope: visible, non-ignored files in the command workspace; 1 MiB/file, 16 MiB total]\n", text);
+}
+
 test "basic tools: regex searches a single file and rejects invalid patterns" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

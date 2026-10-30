@@ -17,6 +17,7 @@ const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
 const web = @import("web.zig");
 const patch = @import("patch.zig");
+const changes = @import("changes.zig");
 const todo = @import("todo.zig");
 const github = @import("github.zig");
 const ffmpeg = @import("ffmpeg.zig");
@@ -621,7 +622,42 @@ pub const Runtime = struct {
             .now_ms = call.at_ms,
             .allow_escalation = escalated,
         });
-        return h.run(call, sink);
+        const root = call.args.bash.cwd orelse ".";
+        var before = changes.Snapshot.capture(self.alloc, root) catch |err| {
+            const note = try std.fmt.allocPrint(self.alloc, "[diff unavailable before command: {s}]\n", .{@errorName(err)});
+            defer self.alloc.free(note);
+            var result = try h.run(call, sink);
+            errdefer self.deinitResult(result);
+            try self.appendChanges(&result, call, sink, note);
+            return result;
+        };
+        defer before.deinit(self.alloc);
+        var result = try h.run(call, sink);
+        errdefer self.deinitResult(result);
+        var after = changes.Snapshot.capture(self.alloc, root) catch |err| {
+            const note = try std.fmt.allocPrint(self.alloc, "[diff unavailable after command: {s}]\n", .{@errorName(err)});
+            defer self.alloc.free(note);
+            try self.appendChanges(&result, call, sink, note);
+            return result;
+        };
+        defer after.deinit(self.alloc);
+        const diff = try changes.diff(self.alloc, before, after, self.max_bytes);
+        defer self.alloc.free(diff);
+        if (diff.len != 0) try self.appendChanges(&result, call, sink, diff);
+        return result;
+    }
+
+    fn appendChanges(self: *Runtime, result: *tools.Result, call: tools.Call, sink: *tools.Sink, text: []const u8) !void {
+        const chunk = try self.alloc.dupe(u8, text);
+        errdefer self.alloc.free(chunk);
+        const out = try self.alloc.alloc(tools.Output, result.out.len + 1);
+        errdefer self.alloc.free(out);
+        @memcpy(out[0..result.out.len], result.out);
+        out[result.out.len] = .{ .call_id = call.id, .seq = @intCast(result.out.len), .at_ms = call.at_ms, .stream = .stdout, .chunk = chunk, .owned = true };
+        if (result.out_streamed) try sink.push(.{ .output = out[result.out.len] });
+        if (result.out_owned) self.alloc.free(result.out);
+        result.out = out;
+        result.out_owned = true;
     }
 
     fn approveBash(self: *Runtime, call: tools.Call) !void {

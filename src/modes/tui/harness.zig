@@ -1126,6 +1126,18 @@ test "basic tools UI renders patch todo and github calls" {
     try std.testing.expectEqual(@as(usize, 0), ui.panels.runningCount());
 }
 
+test "shell edit diff remains visible in the mock terminal" {
+    var ui = try Ui.init(std.testing.allocator, 100, 30, "test", "mock");
+    defer ui.deinit();
+    try ui.onProvider(.{ .tool_call = .{ .id = "shell", .name = "bash", .args = "{\"cmd\":\"python3 rewrite.py\"}" } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "shell", .output = "stdout line\ndiff --git a/probe.txt b/probe.txt\n• Edited probe.txt (+1 -1)\n@@ -1,1 +1,1 @@\n-BEFORE_EDIT\n+AFTER_EDIT\n", .is_err = false } });
+    var raw: [32768]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try ui.draw(&out);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "-BEFORE_EDIT") != null);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "+AFTER_EDIT") != null);
+}
+
 test "Responses mock terminal separates commentary from final answer" {
     var ui = try Ui.init(std.testing.allocator, 60, 12, "test", "openai");
     defer ui.deinit();

@@ -3726,6 +3726,7 @@ test "basic tools agent delegates through the real child entry point" {
     defer env.deinit();
     const provider =
         \\req=$(cat)
+        \\printf '%s' "$req" | grep -q 'Runtime identity: model=' || { printf 'text:IDENTITY_MISSING\nstop:done\n'; exit; }
         \\if printf '%s' "$req" | grep -q tool_result; then
         \\ if printf '%s' "$req" | grep -q CHILD_OK; then printf 'text:PARENT_OK\nstop:done\n'; else printf 'text:CHILD_FAILED\nstop:done\n'; fi
         \\elif printf '%s' "$req" | grep -q CHILD_REQUEST; then
@@ -3760,6 +3761,43 @@ test "basic tools agent delegates through the real child entry point" {
         try @import("helpers.zig").expectSnapText(@src(), "PARENT_OK\n", result.stdout);
         if (remove_exe) try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "pz-copy", .{}));
     }
+}
+
+test "shell edit diff appears after Python from the real PTY keyboard" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home/.pz");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "probe.txt", .data = "BEFORE_EDIT\n" });
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+    const provider =
+        \\req=$(cat)
+        \\if printf '%s' "$req" | grep -q tool_result; then
+        \\ printf 'text:SHELL_EDIT_DONE\nstop:done\n'
+        \\else
+        \\ printf '%s\n' 'tool_call:c1|bash|{"cmd":"python3 -c '\''from pathlib import Path; Path(\"probe.txt\").write_text(\"AFTER_EDIT\\n\")'\''"}' 'stop:tool'
+        \\fi
+    ;
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "rewrite the file with Python\n" },
+        .{ .wait_for = .{ .text = "SHELL_EDIT_DONE", .timeout_ms = 10000 } },
+        .{ .snapshot = "shell-edit" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{ "--no-config", "--no-session", "--model", "test-model", "--provider-cmd", provider }, &steps);
+    defer out.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "-BEFORE_EDIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "+AFTER_EDIT") != null);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "probe.txt", alloc, .limited(64));
+    defer alloc.free(data);
+    try @import("helpers.zig").expectSnapText(@src(), "AFTER_EDIT\n", data);
 }
 
 test "swarm PTY keyboard drives live peer debate and parent synthesis" {
