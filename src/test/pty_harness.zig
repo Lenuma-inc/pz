@@ -3884,3 +3884,119 @@ test "Responses PTY stream failure explains incomplete answer and quits cleanly"
     try std.testing.expectEqual(@as(u8, 0), out.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "answer is incomplete") != null);
 }
+
+test "context trust PTY denies injection then remembers exact approval and rejects edits" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    const attack = @embedFile("fixtures/context-injection.txt");
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = attack });
+    const provider = "cat > provider-request; printf 'text:TRUSTREPLY\\nstop:done\\n'";
+    const args = [_][]const u8{ "--no-config", "--no-session", "--model", "test-model", "--provider-cmd", provider };
+    const reject = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "Trust AGENTS.md?", .timeout_ms = 8000 } },
+        .{ .inject = "\r" },
+        .{ .wait_for = .{ .text = "drop files" } },
+        .{ .inject = "hello\r" },
+        .{ .wait_for = .{ .text = "TRUSTREPLY" } },
+        .{ .inject = "\x03\x03" },
+    };
+    const accept = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "Trust AGENTS.md?", .timeout_ms = 8000 } },
+        .{ .inject = "\x1b[B\r" },
+        .{ .wait_for = .{ .text = "drop files" } },
+        .{ .inject = "hello\r" },
+        .{ .wait_for = .{ .text = "TRUSTREPLY" } },
+        .{ .inject = "\x03\x03" },
+    };
+    const cached = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "hello\r" },
+        .{ .wait_for = .{ .text = "TRUSTREPLY" } },
+        .{ .inject = "\x03\x03" },
+    };
+    const cases = [_]struct { steps: []const InteractiveStep, included: bool }{
+        .{ .steps = &reject, .included = false },
+        .{ .steps = &accept, .included = true },
+        .{ .steps = &cached, .included = true },
+    };
+    for (cases) |case| {
+        var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &args, case.steps);
+        defer out.deinit(alloc);
+        try std.testing.expect(out.term == .exited and out.term.exited == 0);
+        const request = try ctx.tmp.dir.readFileAlloc(std.testing.io, "provider-request", alloc, .limited(1024 * 1024));
+        defer alloc.free(request);
+        try std.testing.expectEqual(case.included, std.mem.indexOf(u8, request, "function-color") != null);
+        try std.testing.expectEqual(case.included, std.mem.indexOf(u8, request, "ANTHROPIC_BASE_URL") != null);
+    }
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "CHANGED_CONTEXT_CANARY" });
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &args, &reject);
+    defer out.deinit(alloc);
+    const request = try ctx.tmp.dir.readFileAlloc(std.testing.io, "provider-request", alloc, .limited(1024 * 1024));
+    defer alloc.free(request);
+    try std.testing.expect(std.mem.indexOf(u8, request, "CHANGED_CONTEXT_CANARY") == null);
+}
+
+test "context trust PTY reload requires approval for changed bytes" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+    try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "ORIGINAL_CONTEXT_CANARY" });
+    const provider = "cat > provider-request; printf CHANGED_CONTEXT_CANARY > AGENTS.md; printf 'text:RELOADREPLY\\nstop:done\\n'";
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "Trust AGENTS.md?", .timeout_ms = 8000 } },
+        .{ .inject = "\x1b[B\r" },
+        .{ .wait_for = .{ .text = "drop files" } },
+        .{ .inject = "first\r" },
+        .{ .wait_for = .{ .text = "RELOADREPLY" } },
+        .{ .inject = "/reload\r" },
+        .{ .wait_for = .{ .text = "CHANGED_CONTEXT_CANARY" } },
+        .{ .inject = "\x1b" },
+        .{ .wait_for = .{ .text = "context reloaded" } },
+        .{ .inject = "second\r" },
+        .{ .sleep = 350 },
+        .{ .inject = "\x03\x03" },
+    };
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session", "--model", "test-model", "--provider-cmd", provider }, &steps);
+    defer out.deinit(alloc);
+    const request = try ctx.tmp.dir.readFileAlloc(std.testing.io, "provider-request", alloc, .limited(1024 * 1024));
+    defer alloc.free(request);
+    try std.testing.expect(std.mem.indexOf(u8, request, "second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "CHANGED_CONTEXT_CANARY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "ORIGINAL_CONTEXT_CANARY") == null);
+}
+
+test "config approval PTY remains separate from context trust" {
+    const alloc = std.testing.allocator;
+    for ([_]bool{ false, true }) |accept| {
+        var ctx = try setupInteractiveEnv(alloc);
+        defer ctx.deinit();
+        try ctx.tmp.dir.createDirPath(std.testing.io, ".claude");
+        try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".claude/settings.json", .data = "original" });
+        try ctx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "INERT_CONTEXT_FOR_APPROVAL_TEST" });
+        const provider =
+            \\cat >/dev/null
+            \\if test -e provider-step; then
+            \\ printf 'text:CONFIGDONE\nstop:done\n'
+            \\else
+            \\ touch provider-step
+            \\ printf '%s\n' 'tool_call:c0|write|{"path":".claude/settings.json","text":"approved"}' 'stop:tool'
+            \\fi
+        ;
+        const steps = [_]InteractiveStep{
+            .{ .wait_for = .{ .text = "Trust AGENTS.md?", .timeout_ms = 8000 } },
+            .{ .inject = "\x1b[B\r" },
+            .{ .wait_for = .{ .text = "drop files" } },
+            .{ .inject = "change config\r" },
+            .{ .wait_for = .{ .text = "Approve config change?" } },
+            .{ .inject = if (accept) "\x1b[B\r" else "\r" },
+            .{ .wait_for = .{ .text = "CONFIGDONE" } },
+            .{ .inject = "\x03\x03" },
+        };
+        var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{ "--no-config", "--no-session", "--model", "test-model", "--provider-cmd", provider }, &steps);
+        defer out.deinit(alloc);
+        const data = try ctx.tmp.dir.readFileAlloc(std.testing.io, ".claude/settings.json", alloc, .limited(64));
+        defer alloc.free(data);
+        try std.testing.expectEqualStrings(if (accept) "approved" else "original", data);
+    }
+}

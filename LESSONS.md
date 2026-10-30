@@ -5,6 +5,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Bind context-file trust to absolute path and exact bytes; keep config-write approvals separate and protect config directories with read-only sandbox mounts.
 - Measure optimized builds for README footprint figures and state whether debug symbols remain; keep Debug comparisons separate.
 - Date footprint measurements and state build mode, line-count scope and measured process mode; do not reuse stale TUI RSS as a fresh result.
 - Reconcile README tool inventories and CLI examples with the registry and parser; separate attachment dependencies from repository-tool behavior.

@@ -86,6 +86,14 @@ pub const AskUiCtx = struct {
 
     fn runWithReader(self: *AskUiCtx, reader: *tui_input.Reader, args: core.tools.Call.AskArgs) anyerror![]u8 {
         if (args.questions.len == 0) return error.InvalidArgs;
+        if (args.questions.len == 1 and std.mem.eql(u8, args.questions[0].id, "pz-config-approval")) {
+            const q = args.questions[0];
+            const parsed = try std.json.parseFromSlice(struct { path: []const u8 }, self.alloc, q.question, .{ .ignore_unknown_fields = true });
+            defer parsed.deinit();
+            const allowed = try @import("context_trust.zig").run(self.alloc, self.ui, self.out, reader, parsed.value.path, q.question, "Approve config change?", "Approve this exact change");
+            const answers = [_]Answer{.{ .id = q.id, .answer = if (allowed) "Approve" else "Deny", .index = if (allowed) 1 else 0 }};
+            return buildAskResult(self.alloc, false, &answers);
+        }
 
         for (args.questions) |q| {
             if (q.review) |text| try self.ui.tr.infoText(text);

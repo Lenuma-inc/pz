@@ -16,6 +16,8 @@ const clipboard = @import("clipboard.zig");
 const summary_types = @import("../core/session/summary.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
+const agent_config = @import("../core/agent_config.zig");
+const tui_context_trust = @import("../modes/tui/context_trust.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
 const tui_render = @import("../modes/tui/render.zig");
 const tui_term = @import("../modes/tui/term.zig");
@@ -1774,10 +1776,14 @@ fn reloadContextWithAudit(
     sys_prompt_owned: *?[]u8,
     audit: *RuntimeCtlAudit,
     load_fn: *const fn (std.mem.Allocator, std.Io, ?[]const u8) anyerror!?[]u8,
+    approval: ?core.context.Approval,
     home: ?[]const u8,
 ) !ReloadRes {
     try runtimeCtlAudit(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, .start, null, &.{});
-    const next_ctx = load_fn(alloc, sys.io, home) catch |err| {
+    const next_ctx = (if (approval) |hook|
+        core.context.loadWithApproval(alloc, sys.io, home, hook)
+    else
+        load_fn(alloc, sys.io, home)) catch |err| {
         try runtimeCtlAudit(
             audit,
             alloc,
@@ -2331,7 +2337,7 @@ fn execWithIoTuiHooks(
     // Dispatch
     {
         const sess_store = store.?;
-        const sys_prompt = try buildSystemPrompt(alloc, run_cmd, home);
+        const sys_prompt = if (run_cmd.mode == .tui) null else try buildSystemPrompt(alloc, run_cmd, home);
         defer if (sys_prompt) |sp| alloc.free(sp);
 
         if (thinking_note) |note| {
@@ -2491,6 +2497,34 @@ fn runPrint(
     }
 }
 
+const ContextApproval = struct {
+    alloc: std.mem.Allocator,
+    ui: *tui_harness.Ui,
+    out: *std.Io.Writer,
+    reader: *tui_input.Reader,
+    pause: *tui_ask.PauseCtl,
+    interactive: bool,
+
+    fn hook(self: *@This()) core.context.Approval {
+        return .{ .ctx = self, .check = check };
+    }
+
+    fn check(ptr: *anyopaque, path: []const u8, content: []const u8) !bool {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (!self.interactive) return error.ContextTrustRequired;
+        const allowed = try self.review(path, content, "Trust AGENTS.md?", "Trust this exact file");
+        if (!allowed) try self.ui.tr.infoText("[AGENTS.md skipped: not trusted]");
+        return allowed;
+    }
+
+    fn review(self: *@This(), path: []const u8, content: []const u8, title: []const u8, action: []const u8) !bool {
+        if (!self.interactive) return error.ApprovalRequired;
+        self.pause.setPaused(true);
+        defer self.pause.setPaused(false);
+        return tui_context_trust.run(self.alloc, self.ui, self.out, self.reader, path, content, title, action);
+    }
+};
+
 const PromptAskCtx = struct {
     ask_hook: core.tools.builtin.AskHook = .{ .vt = &AskBind.vt },
     ask_ui: *AskUiCtx,
@@ -2518,10 +2552,18 @@ const HookApprover = struct {
 
     fn check(self: *@This(), key: core.loop.CmdCache.Key, cached: bool) !void {
         if (cached) return;
+        const config_change = switch (key.tool) {
+            .write, .edit, .patch => blk: {
+                const parsed_path = try std.json.parseFromSlice(struct { path: []const u8 }, self.alloc, key.cmd, .{ .ignore_unknown_fields = true });
+                defer parsed_path.deinit();
+                break :blk agent_config.isPath(parsed_path.value.path);
+            },
+            else => false,
+        };
 
         const summary = try approvalSummaryFromKeyAlloc(self.alloc, key);
         defer self.alloc.free(summary);
-        const question = try std.fmt.allocPrint(
+        const question = if (config_change) try self.alloc.dupe(u8, key.cmd) else try std.fmt.allocPrint(
             self.alloc,
             "Run {s}? This action was derived from untrusted input.",
             .{summary},
@@ -2529,13 +2571,13 @@ const HookApprover = struct {
         defer self.alloc.free(question);
 
         const options = [_]core.tools.Call.AskArgs.Option{
-            .{ .label = "Approve" },
-            .{ .label = "Deny" },
+            .{ .label = if (config_change) "Deny" else "Approve" },
+            .{ .label = if (config_change) "Approve this exact change" else "Deny" },
         };
         const questions = [_]core.tools.Call.AskArgs.Question{
             .{
-                .id = "approve",
-                .header = "Approval required",
+                .id = if (config_change) "pz-config-approval" else "approve",
+                .header = if (config_change) "Approve config change?" else "Approval required",
                 .question = question,
                 .options = options[0..],
                 .allow_other = false,
@@ -2553,8 +2595,8 @@ const HookApprover = struct {
 
         if (parsed.value.cancelled) return error.ApprovalDenied;
         if (parsed.value.answers.len == 0) return error.ApprovalDenied;
-        if (parsed.value.answers[0].index != 0) return error.ApprovalDenied;
-        try self.cache.add(key);
+        if (parsed.value.answers[0].index != @as(usize, if (config_change) 1 else 0)) return error.ApprovalDenied;
+        if (!config_change) try self.cache.add(key);
     }
 };
 
@@ -2789,11 +2831,25 @@ fn runTui(
         .ask_ui = &ask_ui_ctx,
         .reader = &prompt_reader,
     };
+    var context_approval = ContextApproval{
+        .alloc = alloc,
+        .ui = &ui,
+        .out = out,
+        .reader = &prompt_reader,
+        .pause = &watcher.pause_ctl,
+        .interactive = is_tty,
+    };
     var prompt_approver_impl = HookApprover{
         .alloc = alloc,
         .hook = &prompt_ask_ctx.ask_hook,
         .cache = &cmd_cache,
     };
+
+    if (sys_prompt == null) {
+        const loaded = try buildSystemPromptWithApproval(alloc, run_cmd, home, context_approval.hook());
+        sys_prompt = loaded;
+        sys_prompt_owned = loaded;
+    }
 
     var tctx = TurnCtx{
         .alloc = alloc,
@@ -2950,7 +3006,7 @@ fn runTui(
             try showCost(alloc, &ui);
         }
         if (cmd == .reload) {
-            const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
+            const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, context_approval.hook(), home);
             switch (reloaded) {
                 .loaded => try ui.tr.infoText("[context reloaded]"),
                 .empty => try ui.tr.infoText("[context reloaded (no files)]"),
@@ -3374,7 +3430,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .reload) {
-                                const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
+                                const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, context_approval.hook(), home);
                                 switch (reloaded) {
                                     .loaded => try ui.tr.infoText("[context reloaded]"),
                                     .empty => try ui.tr.infoText("[context reloaded (no files)]"),
@@ -3879,7 +3935,7 @@ fn runTui(
                 continue;
             }
             if (cmd == .reload) {
-                _ = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
+                _ = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, context_approval.hook(), home);
                 try ui.draw(out);
                 cmd_ct += 1;
                 continue;
@@ -6701,6 +6757,10 @@ fn isPathLike(raw: []const u8) bool {
 }
 
 fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const u8) !?[]u8 {
+    return buildSystemPromptWithApproval(alloc, run_cmd, home, null);
+}
+
+fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const u8, approval: ?core.context.Approval) !?[]u8 {
     if (run_cmd.cfg.policy_lock.system_prompt and
         (run_cmd.system_prompt != null or run_cmd.append_system_prompt != null))
     {
@@ -6721,7 +6781,7 @@ fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const 
         return try alloc.dupe(u8, sp);
     }
 
-    const ctx = try core.context.load(alloc, run_cmd.io, home);
+    const ctx = try core.context.loadWithApproval(alloc, run_cmd.io, home, approval);
     if (run_cmd.append_system_prompt) |ap| {
         if (ctx) |c| {
             defer alloc.free(c);
@@ -13704,6 +13764,7 @@ test "runtime reload audit snapshots start success and failure" {
             }
         }.f,
         null,
+        null,
     );
     try std.testing.expectEqual(ReloadRes.loaded, loaded);
 
@@ -13717,6 +13778,7 @@ test "runtime reload audit snapshots start success and failure" {
                 return null;
             }
         }.f,
+        null,
         null,
     );
     try std.testing.expectEqual(ReloadRes.empty, empty);
@@ -13733,6 +13795,7 @@ test "runtime reload audit snapshots start success and failure" {
                     return error.AccessDenied;
                 }
             }.f,
+            null,
             null,
         ),
     );
@@ -13958,6 +14021,7 @@ test "UX8 walkthrough: bg run spawns job, bg list shows it, bg show shows detail
                 return try alloc.dupe(u8, "refreshed context");
             }
         }.f,
+        null,
         null,
     );
     try std.testing.expectEqual(ReloadRes.loaded, res);

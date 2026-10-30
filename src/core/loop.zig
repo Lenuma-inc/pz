@@ -1,6 +1,7 @@
 //! Agent loop: provider request / tool dispatch cycle.
 const sys = @import("pz_io");
 const std = @import("std");
+const agent_config = @import("agent_config.zig");
 const policy = @import("policy.zig");
 const providers = @import("providers.zig");
 const prov_api = @import("providers/api.zig");
@@ -1337,6 +1338,28 @@ fn noteApproval(
     tc: providers.ToolCall,
     parsed_args: tools.Call.Args,
 ) !void {
+    const config_path: ?[]const u8 = switch (kind) {
+        .write => parsed_args.write.path,
+        .edit => parsed_args.edit.path,
+        .patch => parsed_args.patch.path,
+        else => null,
+    };
+    if (config_path) |path| {
+        if (agent_config.isPath(path)) {
+            const approver = opts.approver orelse return error.ApprovalRequired;
+            const cwd = try std.process.currentPathAlloc(sys.io, opts.alloc);
+            defer opts.alloc.free(cwd);
+            // Config changes require a fresh decision, independent of tool caches.
+            try approver.check(.{
+                .tool = kind,
+                .cmd = tc.args,
+                .loc = if (opts.approval) |ctx| ctx.loc else .{ .cwd = cwd },
+                .policy = if (opts.approval) |ctx| ctx.policy else .{ .version = 0 },
+                .life = .{ .session = opts.sid },
+            }, false);
+            return;
+        }
+    }
     const needs_approval = switch (kind) {
         .web => tools.web.requiresEscalationApproval(parsed_args.web),
         else => destructive,
@@ -5931,4 +5954,38 @@ test "Responses stream failure clears abort callback before teardown" {
     const snap = try std.fmt.allocPrint(std.testing.allocator, "cleared={} cancels={d}", .{ mock.cleared, mock.cancels });
     defer std.testing.allocator.free(snap);
     try @import("../test/helpers.zig").expectSnapText(@src(), "cleared=true cancels=0", snap);
+}
+
+test "agent config changes require fresh approval without policy" {
+    const a = std.testing.allocator;
+    const Check = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), check).vt },
+        calls: usize = 0,
+        yes: bool = false,
+        fn check(self: *@This(), _: CmdCache.Key, cached: bool) !void {
+            try std.testing.expect(!cached);
+            self.calls += 1;
+            if (!self.yes) return error.ApprovalDenied;
+        }
+    };
+    var checker = Check{};
+    // noteApproval must not access provider, store, registry or mode.
+    var opts = Opts{ .alloc = a, .sid = "config", .prompt = "", .model = "m", .provider = undefined, .store = undefined, .reg = undefined, .mode = undefined };
+    const cases = [_]struct { kind: tools.Kind, args: tools.Call.Args }{
+        .{ .kind = .write, .args = .{ .write = .{ .path = ".claude/settings.json", .text = "new" } } },
+        .{ .kind = .edit, .args = .{ .edit = .{ .path = "/home/user/.codex/config.toml", .old = "old", .new = "new" } } },
+        .{ .kind = .patch, .args = .{ .patch = .{ .path = "./.pz/settings.json", .patch = "patch" } } },
+    };
+    for (cases) |case| {
+        const tc: providers.ToolCall = .{ .id = "config", .name = @tagName(case.kind), .args = "{}" };
+        opts.approver = null;
+        try std.testing.expectError(error.ApprovalRequired, noteApproval(opts, case.kind, true, tc, case.args));
+        opts.approver = &checker.approver;
+        checker.yes = false;
+        try std.testing.expectError(error.ApprovalDenied, noteApproval(opts, case.kind, true, tc, case.args));
+        checker.yes = true;
+        try noteApproval(opts, case.kind, true, tc, case.args);
+        try noteApproval(opts, case.kind, true, tc, case.args);
+    }
+    try std.testing.expectEqual(@as(usize, 9), checker.calls);
 }

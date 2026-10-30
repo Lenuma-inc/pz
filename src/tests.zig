@@ -1,5 +1,8 @@
 //! Aggregated test imports for `zig build test`.
 test {
+    _ = @import("core/context.zig");
+    _ = @import("core/context_trust.zig");
+    _ = @import("modes/tui/context_trust.zig");
     _ = @import("test/swarm.zig");
     _ = @import("test/basic_tools.zig");
     _ = @import("core/fs_secure.zig");

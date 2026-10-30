@@ -2,6 +2,8 @@
 const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
+const agent_config = @import("agent_config.zig");
+const path_guard = @import("tools/path_guard.zig");
 
 pub const Err = error{
     UnsupportedPlatform,
@@ -29,9 +31,11 @@ pub const BashPlan = struct {
     profile: ?[]u8 = null,
     workspace: ?[]u8 = null,
     bwrap: ?[]u8 = null,
+    config_dirs: [6]?[]u8 = @splat(null),
 
     pub fn deinit(self: *BashPlan, alloc: std.mem.Allocator) void {
         alloc.free(self.argv);
+        for (self.config_dirs) |path| if (path) |p| alloc.free(p);
         if (self.profile) |profile| alloc.free(profile);
         if (self.workspace) |workspace| alloc.free(workspace);
         if (self.bwrap) |bwrap| alloc.free(bwrap);
@@ -71,7 +75,7 @@ pub fn prepareBash(
     const exec_roots = try collectExecRoots(alloc, env, root);
     defer freeRoots(alloc, exec_roots);
 
-    const profile = try buildBashProfile(alloc, root, exec_roots, env.get("HOME"));
+    const profile = try buildBashProfile(alloc, root, cwd.?, exec_roots, env.get("HOME"));
     errdefer alloc.free(profile);
 
     const argv = try alloc.alloc([]const u8, 8);
@@ -107,7 +111,29 @@ fn prepareLinuxBash(
     var args: std.ArrayList([]const u8) = .empty;
     errdefer args.deinit(alloc);
     try args.appendSlice(alloc, &.{ bwrap, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp", "--dev", "/dev", "--proc", "/proc" });
-    try args.appendSlice(alloc, &.{ "--bind", workspace, workspace, "--unshare-net", "--chdir", cwd, "--", "/bin/bash", "--noprofile", "--norc", "-lc", cmd });
+    try args.appendSlice(alloc, &.{ "--bind", workspace, workspace });
+    var config_dirs: [6]?[]u8 = @splat(null);
+    errdefer for (config_dirs) |path| if (path) |p| alloc.free(p);
+    var count: usize = 0;
+    const bases = [_][]const u8{ root, cwd };
+    for (bases, 0..) |base, i| {
+        if (i > 0 and std.mem.eql(u8, root, cwd)) continue;
+        const dir = path_guard.openDir(base, .{}) catch |err| return mapFsErr(err);
+        defer dir.close(sys.io);
+        for (agent_config.dirs) |name| {
+            dir.createDir(sys.io, name, .fromMode(0o700)) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return mapFsErr(err),
+            };
+            const path = try std.fs.path.join(alloc, &.{ base, name });
+            config_dirs[count] = path;
+            count += 1;
+            const check = path_guard.openDir(path, .{}) catch |err| return mapFsErr(err);
+            check.close(sys.io);
+            try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
+        }
+    }
+    try args.appendSlice(alloc, &.{ "--unshare-net", "--chdir", cwd, "--", "/bin/bash", "--noprofile", "--norc", "-lc", cmd });
     const argv = try args.toOwnedSlice(alloc);
     errdefer alloc.free(argv);
 
@@ -115,6 +141,7 @@ fn prepareLinuxBash(
         .argv = argv,
         .cwd = cwd,
         .workspace = workspace,
+        .config_dirs = config_dirs,
         .bwrap = bwrap,
     };
 }
@@ -216,6 +243,7 @@ fn freeRoots(alloc: std.mem.Allocator, roots: [][]u8) void {
 fn buildBashProfile(
     alloc: std.mem.Allocator,
     root: []const u8,
+    cwd: []const u8,
     exec_roots: []const []const u8,
     home: ?[]const u8,
 ) Err![]u8 {
@@ -263,6 +291,19 @@ fn buildBashProfile(
         \\
     );
     try appendPathAncestors(&buf, alloc, root);
+    try w.writeAll(
+        \\)
+        \\(deny file-write*
+        \\
+    );
+    const config_bases = [_][]const u8{ root, cwd };
+    for (config_bases) |base| {
+        for (agent_config.dirs) |name| {
+            const path = try std.fs.path.join(alloc, &.{ base, name });
+            defer alloc.free(path);
+            try appendSubpath(&buf, alloc, path);
+        }
+    }
     try w.writeAll(
         \\)
         \\
@@ -358,7 +399,6 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
     defer tmp.cleanup();
     try tmp.dir.createDirPath(sys.io, "sub");
 
-    const path_guard = @import("tools/path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
@@ -399,7 +439,6 @@ test "prepareBash builds a Linux bubblewrap workspace sandbox" {
     const bin = try tmp.dir.realPathFileAlloc(sys.io, "bin", std.testing.allocator);
     defer std.testing.allocator.free(bin);
 
-    const path_guard = @import("tools/path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
@@ -443,7 +482,6 @@ test "prepareBash denies cwd escapes" {
     var outer = std.testing.tmpDir(.{});
     defer outer.cleanup();
 
-    const path_guard = @import("tools/path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 

@@ -3,6 +3,8 @@ const sys = @import("pz_io");
 const std = @import("std");
 const policy = @import("policy.zig");
 const prov_api = @import("providers/api.zig");
+const trust = @import("context_trust.zig");
+pub const Approval = trust.Approval;
 const path_guard = @import("tools/path_guard.zig");
 
 fn chdirPath(path: []const u8) !void {
@@ -20,29 +22,26 @@ pub const max_context_bytes: usize = 256 * 1024;
 /// Returns concatenated content with section headers.
 /// Total output is capped at `max_context_bytes`; excess is truncated.
 pub fn load(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8) !?[]u8 {
-    if ((try loadPolicyLock(alloc, io, home)).context) return null;
+    return loadWithApproval(alloc, io, home, null);
+}
 
+pub fn loadWithApproval(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8, approval: ?Approval) !?[]u8 {
+    const paths = try discoverPaths(alloc, io, home);
+    defer {
+        for (paths) |path| alloc.free(path);
+        alloc.free(paths);
+    }
     var parts: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
-        for (parts.items) |p| alloc.free(p);
+        for (parts.items) |part| alloc.free(part);
         parts.deinit(alloc);
     }
-
-    // Global: ~/.pz/AGENTS.md
-    if (try globalDir(alloc, home)) |gdir| {
-        defer alloc.free(gdir);
-        if (try readContext(alloc, gdir)) |content| {
+    for (paths) |path| {
+        if (try readFile(alloc, std.fs.path.dirname(path).?, "AGENTS.md", home, approval)) |content| {
+            errdefer alloc.free(content);
             try parts.append(alloc, content);
         }
     }
-
-    // Walk cwd upward
-    try walkAncestry(alloc, &parts, struct {
-        fn cb(a: std.mem.Allocator, dir: []const u8, list: *std.ArrayListUnmanaged([]u8)) !void {
-            if (try readContext(a, dir)) |content| try list.append(a, content);
-        }
-    }.cb);
-
     return assembleParts(alloc, parts.items);
 }
 
@@ -135,10 +134,6 @@ fn globalDir(alloc: std.mem.Allocator, home: ?[]const u8) !?[]u8 {
     return try std.fmt.allocPrint(alloc, "{s}/.pz", .{h});
 }
 
-fn readContext(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
-    return readFile(alloc, dir, "AGENTS.md");
-}
-
 fn loadPolicyLock(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8) !policy.Lock {
     const cwd = (try realCwdAlloc(alloc)) orelse return .{};
     defer alloc.free(cwd);
@@ -148,7 +143,7 @@ fn loadPolicyLock(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8) !poli
 /// Read and wrap a context file from `dir/name`.
 /// Returns null when the file is genuinely absent (FileNotFound / symlink rejected).
 /// Returns error for I/O failures (permission denied, corrupt data, OOM).
-fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?[]u8 {
+fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8, home: ?[]const u8, approval: ?Approval) !?[]u8 {
     const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
     defer alloc.free(path);
 
@@ -170,31 +165,28 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?[]u8 
         return null;
     }
 
-    // Context files may contain non-UTF-8 bytes; sanitize before wrapping
-    // so downstream JSON serialization and TUI rendering never see bad bytes.
+    const allowed = trust.allow(alloc, home, path, raw, approval) catch |err| {
+        alloc.free(raw);
+        return err;
+    };
+    if (!allowed) {
+        alloc.free(raw);
+        return null;
+    }
+
+    // Review and hashing use raw bytes; only rendering/provider serialization is lossy.
     const content = if (std.unicode.Utf8View.init(raw)) |_| raw else |_| blk: {
-        const san = try @import("utf8.zig").sanitizeLossyAlloc(alloc, raw);
+        const san = @import("utf8.zig").sanitizeLossyAlloc(alloc, raw) catch |err| {
+            alloc.free(raw);
+            return err;
+        };
         alloc.free(raw);
         break :blk san;
     };
-
-    const wrapped = prov_api.wrapUntrustedNamed(alloc, "context-file", path, content) catch |err| {
-        alloc.free(content);
-        return err;
-    };
+    defer alloc.free(content);
+    const wrapped = try prov_api.wrapUntrustedNamed(alloc, "context-file", path, content);
     defer alloc.free(wrapped);
-
-    const header = std.fmt.allocPrint(alloc, "## {s}\n\n", .{path}) catch |err| {
-        alloc.free(content);
-        return err;
-    };
-    defer alloc.free(header);
-
-    const result = std.fmt.allocPrint(alloc, "{s}{s}", .{ header, wrapped }) catch |err| {
-        return err;
-    };
-    alloc.free(content);
-    return result;
+    return try std.fmt.allocPrint(alloc, "## {s}\n\n{s}", .{ path, wrapped });
 }
 
 fn readAllAlloc(file: std.Io.File, alloc: std.mem.Allocator, max_bytes: usize) ![]u8 {
@@ -270,7 +262,7 @@ test "readFile wraps context content as untrusted input" {
     defer std.testing.allocator.free(real);
     const dir_path = std.fs.path.dirname(real) orelse return error.TestUnexpectedResult;
 
-    const got = (try readFile(std.testing.allocator, dir_path, "AGENTS.md")) orelse return error.TestUnexpectedResult;
+    const got = (try readFile(std.testing.allocator, dir_path, "AGENTS.md", null, .{ .ctx = @ptrFromInt(1), .check = testApprove })) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(got);
 
     const want = try std.fmt.allocPrint(
@@ -298,7 +290,7 @@ test "readFile rejects symlinked AGENTS leaf" {
     const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
 
-    try std.testing.expect((try readFile(std.testing.allocator, dir_path, "AGENTS.md")) == null);
+    try std.testing.expect((try readFile(std.testing.allocator, dir_path, "AGENTS.md", null, .{ .ctx = @ptrFromInt(1), .check = testApprove })) == null);
 }
 
 test "discoverPaths walks real cwd ancestry, not symlink aliases" {
@@ -365,4 +357,44 @@ test "load returns null when policy locks context" {
     const got = try load(std.testing.allocator, std.testing.io, null);
     defer if (got) |v| std.testing.allocator.free(v);
     try std.testing.expect(got == null);
+}
+
+fn testApprove(_: *anyopaque, _: []const u8, _: []const u8) !bool {
+    return true;
+}
+
+test "context trust excludes injection and pins approved bytes during replacement" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home");
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    const attack = @embedFile("../test/fixtures/context-injection.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "project/AGENTS.md", .data = attack });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", a);
+    defer a.free(home);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", a);
+    defer a.free(project);
+    const Ask = struct {
+        dir: std.Io.Dir,
+        yes: bool = false,
+        replace: bool = false,
+        fn check(ptr: *anyopaque, _: []const u8, bytes: []const u8) !bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try std.testing.expectEqualStrings(@embedFile("../test/fixtures/context-injection.txt"), bytes);
+            if (self.replace) try self.dir.writeFile(std.testing.io, .{ .sub_path = "project/AGENTS.md", .data = "replacement not approved" });
+            return self.yes;
+        }
+    };
+    var ask = Ask{ .dir = tmp.dir };
+    const hook = Approval{ .ctx = &ask, .check = Ask.check };
+    try std.testing.expectError(error.ContextTrustRequired, readFile(a, project, "AGENTS.md", home, null));
+    try std.testing.expect((try readFile(a, project, "AGENTS.md", home, hook)) == null);
+    ask.yes = true;
+    ask.replace = true;
+    const included = (try readFile(a, project, "AGENTS.md", home, hook)).?;
+    defer a.free(included);
+    try std.testing.expect(std.mem.indexOf(u8, included, "function-color") != null);
+    try std.testing.expect(std.mem.indexOf(u8, included, "replacement not approved") == null);
+    try std.testing.expectError(error.ContextTrustRequired, readFile(a, project, "AGENTS.md", home, null));
 }
