@@ -4,14 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
 ### Added
 - Native OpenAI streaming provider (`/v1/responses`) with text, reasoning, tool-call, usage, and stop/error event mapping.
+- Interactive session resume with `pz resume` and `-r`, plus immediate continuation with `pz resume --last`, `-c`, or a session ID.
+- Local text, image, document, archive, audio and video attachments; clipboard image support on Wayland, X11 and macOS.
+- Public repository inspection through the `github` tool for GitHub, GitLab, Gitea, Forgejo and Codeberg, including bounded file reads, trees, history, branches and tags.
+- Typed FFmpeg operations for inspection, thumbnails, trimming, resizing, rotation, mirroring, playback speed and muting.
+- Explicit trust review for new or changed AGENTS.md context at startup and on `/reload`.
+- Working child-agent execution, discovered skill loading, single-file patching and session task lists.
 
 ### Changed
+- Require Zig 0.16.0; update the release workflow toolchain accordingly.
 - Runtime native-provider selection is now provider-aware (`anthropic` and `openai`) instead of Anthropic-only.
 - OAuth token refresh is now provider-scoped in shared auth code (`refreshOAuthForProvider`), with Anthropic and OpenAI using the same typed flow.
 - Missing-provider diagnostics are now provider-specific for native providers and explicit for unsupported native labels.
 - Removed Pi-parity-specific snapshot/doc naming from runtime/TUI tests and docs in favor of pz-owned behavior coverage.
+- Align thinking controls with supported model efforts, preserve distinct high/xhigh requests, and accept Kitty Shift+Tab.
+- Bound routine search output and long-line previews; shorten agent instructions while preserving authorization and verification rules.
+- Render repository metadata and patches as compact text with explicit pagination and truncation notices.
+
+### Fixed
+- Use Zig's secure entropy API for audit redaction keys so Linux release builds do not depend on glibc 2.36's `arc4random_buf`.
+- Read build commit hashes automatically from Git; release builds no longer require `-Dgit-hash`, and Debug build history no longer requires jj.
+- Publish TUI cell changes and editor cursor placement in one synchronized update, hiding the cursor during redraws for Backspace, Delete and arrow-key editing.
+- Preserve admitted attachment contents in session history so replay does not reopen deleted temporary files; treat ordinary directory references as context.
+- Keep UTF-8 tool previews and footer labels intact when clipping text.
+- Sort session picker entries by recent activity and hide sessions without user prompts.
+- Avoid treating punctuation after quoted traceback paths as part of attachment filenames.
+- Correct overwritten FFmpeg start and duration arguments.
+- Handle long SSE lines and HTTP chunk boundaries without losing stream data; report incomplete responses explicitly.
 
 ### Tests
 - Added comprehensive OpenAI provider unit tests for SSE event parsing, tool-call assembly, usage/stop mapping, and request-body conversion.
@@ -20,7 +43,9 @@ All notable changes to this project will be documented in this file.
 - Added OpenAI parser property coverage for randomized tool-call argument assembly and stop-reason invariants.
 - Added auth parser/request-encoding regressions for escaped callback payloads and form token exchange bodies.
 - Added stream parser fuzz coverage for malformed frame inputs with typed-error invariants.
-- CI now enforces deterministic mutation and test-impact gates (`tools/ci/mutation_gate.sh`, `tools/ci/test_impact_gate.sh`).
+- Added mutation and test-impact gate scripts (`tools/ci/mutation_gate.sh`, `tools/ci/test_impact_gate.sh`); the general CI workflow is currently disabled.
+- Added mock-terminal and real PTY regressions for editor redraws, session resume, thinking controls and repository tools, plus attachment replay and UTF-8 clipping coverage.
+- Release verification remains pending: the latest full test attempt was blocked by the read-only global Zig cache; new TUI regressions have not been run.
 
 ## [0.1.8] - 2026-02-23
 

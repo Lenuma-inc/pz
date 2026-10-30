@@ -5,7 +5,7 @@ A security-first coding harness rewritten from the ground up in Zig for enterpri
 ## Measured footprint
 
 Local Linux x86_64 measurements on 2026-10-30 with Zig 0.16.0 and
-`zig build -Doptimize=ReleaseFast -Dgit-hash=c43627bf6b51`:
+`zig build -Doptimize=ReleaseFast` at commit `c43627bf6b51`:
 
 | Measurement | Result | Scope / method |
 |---|---:|---|
@@ -101,10 +101,10 @@ On Linux, bash execution requires `bubblewrap` (`bwrap`) on `PATH` and permissio
 For an optimized local build:
 
 ```sh
-zig build -Doptimize=ReleaseFast -Dgit-hash=<commit-hash>
+zig build -Doptimize=ReleaseFast
 ```
 
-Release builds require `-Dgit-hash=<hash>` and embed `CHANGELOG.md`. Debug builds use VCS.
+Builds read the commit hash from Git and require a Git checkout. Release builds embed `CHANGELOG.md`; Debug builds use Git history.
 
 ## Run
 
@@ -242,4 +242,3 @@ metadata. Refresh it with `python3 tools/update-openai-models.py`, then run
 `zig build`. This updates the bundled snapshot; pz does not fetch it at startup.
 The startup screen shows short hints and skill names; `/hotkeys` lists the full
 keyboard help.
-

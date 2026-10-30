@@ -1081,13 +1081,13 @@ var proc_rkey: RedactKey = undefined;
 var proc_rkey_init = false;
 var proc_rkey_mu: std.Io.Mutex = .init;
 
-fn procKey() RedactKey {
+fn procKey() !RedactKey {
     const io = @import("pz_io").io;
     proc_rkey_mu.lockUncancelable(io);
     defer proc_rkey_mu.unlock(io);
     if (!proc_rkey_init) {
         var seed: [signing.rkey_len]u8 = undefined;
-        std.c.arc4random_buf(&seed, seed.len);
+        try io.randomSecure(&seed);
         proc_rkey = .{ .bytes = seed };
         proc_rkey_init = true;
     }
@@ -1103,7 +1103,7 @@ fn taggedTextAlloc(alloc: Allocator, tag: []const u8, txt: []const u8, rkey: Red
 /// Redact text using the process-level ephemeral key.
 /// For session-scoped redaction, use `redactKeyedAlloc`.
 pub fn redactTextAlloc(alloc: Allocator, txt: []const u8, vis: Vis) ![]u8 {
-    return redactKeyedAlloc(alloc, txt, vis, procKey());
+    return redactKeyedAlloc(alloc, txt, vis, try procKey());
 }
 
 /// Redact text using a caller-supplied key (session-scoped).
@@ -1433,6 +1433,12 @@ test "redactTextAlloc with mask emits tagged surrogate" {
     defer testing.allocator.free(red);
     try testing.expect(std.mem.indexOf(u8, red, "[mask:") != null);
     try testing.expect(!std.mem.eql(u8, red, "plain text"));
+    const again = try redactTextAlloc(testing.allocator, "plain text", .mask);
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(red, again);
+    const other = try redactTextAlloc(testing.allocator, "other text", .mask);
+    defer testing.allocator.free(other);
+    try testing.expect(!std.mem.eql(u8, red, other));
 }
 
 test "snapshot: variant encodings stay canonical" {

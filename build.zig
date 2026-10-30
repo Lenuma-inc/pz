@@ -23,6 +23,8 @@ pub fn build(b: *std.Build) void {
 
     const opts_pair = .{ options, test_options };
     addSharedOpt(opts_pair, []const u8, "version", pkg.version);
+    const vcs_hash = std.mem.trimEnd(u8, b.run(&.{ "git", "rev-parse", "--short=12", "HEAD" }), "\n\r ");
+    addSharedOpt(opts_pair, []const u8, "git_hash", vcs_hash);
 
     const is_release = switch (optimize) {
         .Debug => false,
@@ -30,46 +32,14 @@ pub fn build(b: *std.Build) void {
     };
 
     if (is_release) {
-        // Release builds: fail closed on missing metadata.
-        // Hash comes from -Dgit-hash=...; changelog is embedded from CHANGELOG.md.
-        const git_hash = b.option(
-            []const u8,
-            "git-hash",
-            "Build metadata: short commit hash (required for release)",
-        ) orelse {
-            std.debug.print("error: release build requires -Dgit-hash=<hash>\n", .{});
-            std.process.exit(1);
-        };
-        addSharedOpt(opts_pair, []const u8, "git_hash", git_hash);
         // State tracker key: version for release (matches ## [ver] headings).
         addSharedOpt(opts_pair, []const u8, "build_id", pkg.version);
         addSharedOpt(opts_pair, []const u8, "changelog", @embedFile("CHANGELOG.md"));
     } else {
-        // Debug builds: VCS shell-out for convenience.
-        var code: u8 = 0;
-        const vcs_hash_raw = b.runAllowFail(
-            &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short()" },
-            &code,
-            .ignore,
-        ) catch "dev";
-        const vcs_hash = std.mem.trimEnd(u8, vcs_hash_raw, "\n\r ");
-        addSharedOpt(opts_pair, []const u8, "git_hash", vcs_hash);
         // State tracker key: hash for dev (matches line-start in VCS log).
         addSharedOpt(opts_pair, []const u8, "build_id", vcs_hash);
 
-        const vcs_log_raw = b.runAllowFail(
-            &.{
-                "jj",
-                "log",
-                "--no-graph",
-                "-r",
-                "ancestors(@, 50)",
-                "-T",
-                "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
-            },
-            &code,
-            .ignore,
-        ) catch "";
+        const vcs_log_raw = b.run(&.{ "git", "log", "-50", "--abbrev=12", "--format=%h %s" });
         const vcs_log = std.mem.trimEnd(u8, vcs_log_raw, "\n\r ");
         addSharedOpt(opts_pair, []const u8, "changelog", vcs_log);
     }
