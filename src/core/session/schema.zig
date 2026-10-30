@@ -12,6 +12,7 @@ pub const Event = struct {
     },
 
     pub const Data = union(Tag) {
+        model: Model,
         message: @import("../providers/api.zig").Message,
         noop: void,
         prompt: Text,
@@ -25,6 +26,7 @@ pub const Event = struct {
     };
 
     pub const Tag = enum {
+        model,
         message,
         noop,
         prompt,
@@ -35,6 +37,11 @@ pub const Event = struct {
         usage,
         stop,
         err,
+    };
+
+    pub const Model = struct {
+        id: []const u8,
+        provider: []const u8,
     };
 
     pub const Text = struct {
@@ -91,6 +98,12 @@ pub const Event = struct {
 
     fn dupeData(alloc: std.mem.Allocator, data: Data) error{OutOfMemory}!Data {
         return switch (data) {
+            .model => |m| blk: {
+                const id = try alloc.dupe(u8, m.id);
+                errdefer alloc.free(id);
+                const provider = try alloc.dupe(u8, m.provider);
+                break :blk .{ .model = .{ .id = id, .provider = provider } };
+            },
             .noop => .{
                 .noop = {},
             },
@@ -128,6 +141,10 @@ pub const Event = struct {
 
     fn freeData(alloc: std.mem.Allocator, data: Data) void {
         switch (data) {
+            .model => |m| {
+                alloc.free(m.id);
+                alloc.free(m.provider);
+            },
             .noop, .message, .usage, .stop => {},
             .prompt, .text, .thinking, .err => |t| alloc.free(t.text),
             .tool_call => |tc| {
@@ -158,6 +175,10 @@ pub fn encodeAlloc(alloc: std.mem.Allocator, ev: Event) error{OutOfMemory}![]u8 
 
 fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!Event.Data {
     return switch (data) {
+        .model => |m| .{ .model = .{
+            .id = try utf8.sanitizeMaybeAlloc(alloc, m.id),
+            .provider = try utf8.sanitizeMaybeAlloc(alloc, m.provider),
+        } },
         .noop => .{
             .noop = {},
         },

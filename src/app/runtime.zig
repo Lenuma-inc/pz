@@ -2813,6 +2813,19 @@ fn runTui(
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
     var popts = thinking.toProviderOpts();
+    const resume_ctx = ResumeCtx{
+        .alloc = alloc,
+        .ui = &ui,
+        .dir = session_dir_path,
+        .disabled = no_session,
+        .model = &model,
+        .model_owned = &model_owned,
+        .provider = &provider_label,
+        .provider_owned = &provider_owned,
+        .thinking = &thinking,
+        .popts = &popts,
+        .router = tui_hooks.native,
+    };
     var auto_compact_on: bool = true;
     ui.panels.thinking_label = thinkingLabel(thinking);
     ui.border_fg = thinkingBorderFg(thinking);
@@ -2833,11 +2846,13 @@ fn runTui(
         .auto, .picker => false,
     };
     if (is_resumed) {
-        const restored = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
+        const restored = try resume_ctx.restore(sid.*);
         if (!restored) try showStartup(alloc, run_cmd.io, &ui, true, home);
     } else {
         try showStartup(alloc, run_cmd.io, &ui, false, home);
     }
+
+    if (run_cmd.session == .auto) try saveSessionModel(store, sid.*, model, provider_label);
 
     if (run_cmd.thinking_note) |note| try ui.tr.infoText(note);
 
@@ -2942,7 +2957,7 @@ fn runTui(
             }
         }
         if (cmd == .resumed) {
-            _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
+            _ = try resume_ctx.restore(sid.*);
         }
         if (cmd == .select_model) {
             var cur_idx: usize = 0;
@@ -2984,7 +2999,7 @@ fn runTui(
             }
             try syncBgFooter(alloc, &ui, &bg_mgr);
             try syncThinking(alloc, &ui, model, &thinking, &popts);
-            try ui.setModel(model);
+            try syncSessionModel(&ui, store, sid.*, model, provider_label);
             try ui.setProvider(provider_label);
         }
         if (cmd == .unhandled) {
@@ -3005,7 +3020,7 @@ fn runTui(
             ui.panels.run_state = .idle;
         } else {
             try syncThinking(alloc, &ui, model, &thinking, &popts);
-            try ui.setModel(model);
+            try syncSessionModel(&ui, store, sid.*, model, provider_label);
             try ui.setProvider(provider_label);
             try ui.draw(out);
         }
@@ -3133,7 +3148,7 @@ fn runTui(
                                         try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                                         ui.panels.ctx_limit = modelCtxWindow(model);
                                         try syncThinking(alloc, &ui, model, &thinking, &popts);
-                                        try ui.setModel(model);
+                                        try syncSessionModel(&ui, store, sid.*, model, provider_label);
                                         try ui.setProvider(provider_label);
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
@@ -3144,7 +3159,7 @@ fn runTui(
                                         const next_sid = try alloc.dupe(u8, sel);
                                         const prev_sid = sid.*;
                                         sid.* = next_sid;
-                                        const ok = tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*) catch |err| {
+                                        const ok = resume_ctx.restore(sid.*) catch |err| {
                                             // Rollback: restore previous sid.
                                             sid.* = prev_sid;
                                             alloc.free(next_sid);
@@ -3368,7 +3383,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .resumed) {
-                                _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
+                                _ = try resume_ctx.restore(sid.*);
                             }
                             if (cmd == .select_model) {
                                 var cur_idx: usize = 0;
@@ -3452,7 +3467,7 @@ fn runTui(
                                 }
                                 try syncBgFooter(alloc, &ui, &bg_mgr);
                                 try syncThinking(alloc, &ui, model, &thinking, &popts);
-                                try ui.setModel(model);
+                                try syncSessionModel(&ui, store, sid.*, model, provider_label);
                                 try ui.setProvider(provider_label);
                                 try ui.draw(out);
                                 continue;
@@ -3511,7 +3526,7 @@ fn runTui(
                             model = try cycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
-                            try ui.setModel(model);
+                            try syncSessionModel(&ui, store, sid.*, model, provider_label);
                             try ui.draw(out);
                         },
                         .toggle_tools => {
@@ -3611,7 +3626,7 @@ fn runTui(
                             model = try reverseCycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
-                            try ui.setModel(model);
+                            try syncSessionModel(&ui, store, sid.*, model, provider_label);
                             try ui.draw(out);
                         },
                         .tab_complete => {
@@ -3870,13 +3885,13 @@ fn runTui(
                 continue;
             }
             if (cmd == .resumed) {
-                _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
+                _ = try resume_ctx.restore(sid.*);
             }
             if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
                 if (cmd == .compacted) ui.panels.noteCompaction();
                 try syncBgFooter(alloc, &ui, &bg_mgr);
                 try syncThinking(alloc, &ui, model, &thinking, &popts);
-                try ui.setModel(model);
+                try syncSessionModel(&ui, store, sid.*, model, provider_label);
                 try ui.setProvider(provider_label);
                 try ui.draw(out);
                 cmd_ct += 1;
@@ -6061,6 +6076,11 @@ fn restoreSessionIntoUi(
     var rdr = try core.session.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
 
+    var history = tui_editor.Editor.init(alloc);
+    defer history.deinit();
+    var selection: ?core.session.Event = null;
+    defer if (selection) |ev| ev.free(alloc);
+
     // Save transcript block count for atomicity: replay appends new
     // blocks after existing ones. On success we remove the old prefix;
     // on failure we truncate back, preserving the prior transcript.
@@ -6085,12 +6105,19 @@ fn restoreSessionIntoUi(
         // or tool output that was persisted verbatim. Sanitize all text
         // fields before passing to TUI which requires valid UTF-8.
         switch (ev.data) {
+            .model => |m| {
+                if (!std.unicode.utf8ValidateSlice(m.id) or !std.unicode.utf8ValidateSlice(m.provider)) return error.InvalidUtf8;
+                const next = try ev.dupe(alloc);
+                if (selection) |old| old.free(alloc);
+                selection = next;
+            },
             .message => |msg| try ui.onProvider(.{ .message = msg }),
             .noop => {},
             .prompt => |p| {
                 const s = try ensureUtf8OrSanitize(alloc, p.text);
                 defer if (s.owned) |o| alloc.free(o);
                 try ui.tr.userText(s.text);
+                try history.pushHistory(s.text);
             },
             .text => |t| {
                 const s = try ensureUtf8OrSanitize(alloc, t.text);
@@ -6145,6 +6172,17 @@ fn restoreSessionIntoUi(
         }
     }
 
+    if (selection) |ev| {
+        const m = ev.data.model;
+        try ui.panels.model.ensureTotalCapacity(alloc, m.id.len);
+        try ui.panels.provider.ensureTotalCapacity(alloc, m.provider.len);
+        try ui.setModel(m.id);
+        try ui.setProvider(m.provider);
+        ui.panels.ctx_limit = modelCtxWindow(m.id);
+    }
+    ui.ed.clear();
+    std.mem.swap(@TypeOf(ui.ed.hist), &ui.ed.hist, &history.hist);
+
     // Replay succeeded: remove the old transcript prefix.
     for (ui.tr.blocks.items[0..saved_count]) |*b| b.deinit(alloc);
     const new_len = ui.tr.blocks.items.len - saved_count;
@@ -6157,6 +6195,41 @@ fn restoreSessionIntoUi(
     ui.panels.run_state = .idle;
     ui.tr.scrollToBottom();
 }
+
+fn saveSessionModel(store: *core.session.SessionStore, sid: []const u8, model: []const u8, provider: []const u8) !void {
+    try store.append(sid, .{ .data = .{ .model = .{ .id = model, .provider = provider } } });
+}
+
+fn syncSessionModel(ui: *tui_harness.Ui, store: *core.session.SessionStore, sid: []const u8, model: []const u8, provider: []const u8) !void {
+    if (!std.mem.eql(u8, ui.panels.model.items, model) or !std.mem.eql(u8, ui.panels.provider.items, provider)) {
+        try saveSessionModel(store, sid, model, provider);
+    }
+    try ui.setModel(model);
+    try ui.setProvider(provider);
+}
+
+const ResumeCtx = struct {
+    alloc: std.mem.Allocator,
+    ui: *tui_harness.Ui,
+    dir: ?[]const u8,
+    disabled: bool,
+    model: *[]const u8,
+    model_owned: *?[]u8,
+    provider: *[]const u8,
+    provider_owned: *?[]u8,
+    thinking: *args_mod.ThinkingLevel,
+    popts: *core.providers.Opts,
+    router: ?*NativeRouter,
+
+    fn restore(self: ResumeCtx, sid: []const u8) !bool {
+        if (!try tryRestoreSessionIntoUi(self.alloc, self.ui, self.dir, self.disabled, sid)) return false;
+        try replaceOwnedText(self.alloc, self.model, self.model_owned, self.ui.panels.model.items);
+        try replaceOwnedText(self.alloc, self.provider, self.provider_owned, self.ui.panels.provider.items);
+        if (self.router) |router| try router.prepare(self.model.*);
+        try syncThinking(self.alloc, self.ui, self.model.*, self.thinking, self.popts);
+        return true;
+    }
+};
 
 fn tryRestoreSessionIntoUi(
     alloc: std.mem.Allocator,
@@ -8810,6 +8883,8 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
     ui.panels.run_state = .failed;
 
     try restoreSessionIntoUi(std.testing.allocator, &ui, sess_abs, false, "100");
+    _ = try ui.ed.apply(.{ .up = {} });
+    try std.testing.expectEqualStrings("old prompt", ui.ed.text());
 
     var saw_stale = false;
     var saw_prompt = false;
