@@ -118,7 +118,7 @@ test "basic tools: github uses default branch and encodes path and slash refs" {
     try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, .{ .repo = "x/y", .path = "../secret" }));
     const listing = try github.listAlloc(alloc, "[{\"path\":\"src\",\"type\":\"dir\",\"size\":0},{\"path\":\"README.md\",\"type\":\"file\",\"size\":42}]");
     defer alloc.free(listing);
-    try snap(@src(), "dir\tsrc\t0 bytes\nfile\tREADME.md\t42 bytes\n", listing);
+    try snap(@src(), "src/\nREADME.md 42B file\n", listing);
     const lines = try github.readLinesAlloc(alloc, "one\ntwo\nthree\n", 2, 2);
     defer alloc.free(lines);
     try snap(@src(), "2: two\n", lines);
@@ -244,12 +244,12 @@ test "github tree refuses incomplete trees and filters at path boundaries" {
 test "github history preserves metadata and makes pagination explicit" {
     const text = try github.metadataAlloc(alloc, "[]", .{ .repo = "x/y", .op = .history, .page = 2, .per_page = 10 });
     defer alloc.free(text);
-    try snap(@src(), "page 2, per_page 10; request page 3 for more; array listings end on an empty page, commit/compare pages paginate files/commits respectively.\n[]", text);
+    try snap(@src(), "page 2 count 0\n", text);
     try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "{}", .{ .repo = "x/y", .op = .history }));
     try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "[]", .{ .repo = "x/y", .op = .commit, .ref = "main" }));
-    const commit = try github.metadataAlloc(alloc, "{\"files\":[{\"filename\":\"a\",\"patch\":\"+hello\"}]}", .{ .repo = "x/y", .op = .commit, .ref = "main" });
+    const commit = try github.metadataAlloc(alloc, "{\"sha\":\"abc\",\"commit\":{\"message\":\"Fix\"},\"files\":[{\"filename\":\"a\",\"patch\":\"+hello\"}]}", .{ .repo = "x/y", .op = .commit, .ref = "main" });
     defer alloc.free(commit);
-    try std.testing.expect(std.mem.indexOf(u8, commit, "\"patch\":\"+hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, commit, "+hello\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, commit, "missing patch is not proof") != null);
 }
 
@@ -266,4 +266,91 @@ test "github history query keeps arbitrary printable refs inside one parameter" 
             return true;
         }
     }.prop, .{ .iterations = 100 });
+}
+
+test "github forge URLs encode nested namespaces and reject ambiguous hosts" {
+    const Case = struct { args: tools.Call.GithubArgs, url: []const u8 };
+    const cases = [_]Case{
+        .{ .args = .{ .repo = "https://gitlab.com/group/sub/repo", .op = .read, .path = "src/a b", .ref = "topic/a&b" }, .url = "https://gitlab.com/api/v4/projects/group%2Fsub%2Frepo/repository/files/src%2Fa%20b/raw?ref=topic%2Fa%26b" },
+        .{ .args = .{ .repo = "https://gitlab.com/g/r", .op = .tree, .page = 2 }, .url = "https://gitlab.com/api/v4/projects/g%2Fr/repository/tree?per_page=30&page=2&recursive=true&path=" },
+        .{ .args = .{ .repo = "https://codeberg.org/forgejo/forgejo", .op = .read, .path = "README.md" }, .url = "https://codeberg.org/api/v1/repos/forgejo/forgejo/raw/README.md" },
+        .{ .args = .{ .repo = "https://forge.example/a/b", .api = .gitea, .op = .history, .ref = "a/b", .path = "a b", .page = 3 }, .url = "https://forge.example/api/v1/repos/a/b/commits?limit=30&page=3&sha=a%2Fb&path=a%20b" },
+        .{ .args = .{ .repo = "https://gitea.com/a/b", .op = .tags }, .url = "https://gitea.com/api/v1/repos/a/b/tags?limit=30&page=1" },
+        .{ .args = .{ .repo = "https://codeberg.org/a/b", .op = .tree }, .url = "https://codeberg.org/api/v1/repos/a/b/git/trees/HEAD?recursive=1&page=1&per_page=30" },
+    };
+    inline for (cases) |case| {
+        const url = try github.apiUrlAlloc(alloc, case.args);
+        defer alloc.free(url);
+        try snap(@src(), case.url, url);
+    }
+    const examples = [_]tools.Call.GithubArgs{
+        .{ .repo = "https://git.linux-gaming.ru/Linux-Gaming/PortProtonQt", .api = .gitea },
+        .{ .repo = "https://altlinux.space/rirusha/Cassette", .api = .forgejo },
+    };
+    inline for (examples) |args| {
+        const url = try github.apiUrlAlloc(alloc, args);
+        defer alloc.free(url);
+        try snap(@src(), if (args.api.? == .gitea) "https://git.linux-gaming.ru/api/v1/repos/Linux-Gaming/PortProtonQt/contents" else "https://altlinux.space/api/v1/repos/rirusha/Cassette/contents", url);
+    }
+    const invalid = [_]tools.Call.GithubArgs{
+        .{ .repo = "https://unknown.test/a/b" },
+        .{ .repo = "https://gitlab.com/a/b", .api = .github },
+        .{ .repo = "a/b", .api = .gitlab },
+        .{ .repo = "https://user@forge.test/a/b", .api = .gitea },
+        .{ .repo = "https://forge.test/a/../b", .api = .gitea },
+        .{ .repo = "https://gitlab.com/a/b?token=secret" },
+        .{ .repo = "http://gitlab.com/a/b" },
+    };
+    for (invalid) |args| try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, args));
+    try std.testing.expectError(error.UnsupportedOperation, github.apiUrlAlloc(alloc, .{ .repo = "https://gitlab.com/a/b", .op = .compare, .base = "a", .ref = "b" }));
+}
+
+test "github compact metadata removes API noise but preserves useful evidence" {
+    const history = try github.metadataAlloc(alloc,
+        \\[{"sha":"abc123","url":"https://api.test/noise","author":{"avatar_url":"noise"},"commit":{"message":"Fix parser\n\nDetails","author":{"name":"Ada","date":"2026-10-30"}}}]
+    , .{ .repo = "x/y", .op = .history, .per_page = 1 });
+    defer alloc.free(history);
+    try snap(@src(), "page 1 count 1; next page 2\nabc123 2026-10-30 Ada | Fix parser\n", history);
+    const gitlab = try github.metadataAlloc(alloc,
+        \\[{"id":"def456","message":"Fix parser\nDetails","author_name":"Ada","created_at":"2026-10-30","web_url":"noise"}]
+    , .{ .repo = "https://gitlab.com/x/y", .op = .history });
+    defer alloc.free(gitlab);
+    try snap(@src(), "page 1 count 1; next page 2\ndef456 2026-10-30 Ada | Fix parser\n", gitlab);
+    const info = try github.metadataAlloc(alloc,
+        \\{"full_name":"x/y","description":"Parser","default_branch":"main","stargazers_count":12,"archived":false,"license":{"spdx_id":"MIT"},"owner":{"avatar_url":"noise"},"hooks_url":"noise"}
+    , .{ .repo = "x/y", .op = .info });
+    defer alloc.free(info);
+    try snap(@src(), "full_name: x/y\ndescription: Parser\ndefault_branch: main\nstargazers_count: 12\narchived: false\nlicense: MIT\n", info);
+    const refs = try github.metadataAlloc(alloc, "[{\"name\":\"main\",\"commit\":{\"id\":\"abc\"},\"protected\":true}]", .{ .repo = "x/y", .op = .branches });
+    defer alloc.free(refs);
+    try snap(@src(), "page 1 count 1; next page 2\nmain abc\n", refs);
+    const commit = try github.metadataAlloc(alloc,
+        \\{"sha":"abc","commit":{"message":"Fix","author":{"name":"Ada","date":"today"}},"files":[{"filename":"new","previous_filename":"old","status":"renamed","patch":"@@ -1 +1 @@\n-old\n+new"},{"filename":"binary","status":"added"}],"url":"noise"}
+    , .{ .repo = "x/y", .op = .commit, .ref = "abc" });
+    defer alloc.free(commit);
+    try snap(@src(), "page 1; next page 2 (files)\nGitHub patch limits: commit 3000 files; compare 300 files on page 1; missing patch is not proof of no changes.\nabc today Ada | Fix\nrenamed new <- old\n@@ -1 +1 @@\n-old\n+new\nadded binary\n[patch unavailable]\n", commit);
+    try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "[{\"sha\":\"abc\"}]", .{ .repo = "x/y", .op = .history }));
+    try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "{\"description\":{\"url\":\"noise\"}}", .{ .repo = "x/y", .op = .info }));
+}
+
+test "github forge trees distinguish pagination from incomplete GitHub trees" {
+    const body =
+        \\{"sha":"root","truncated":true,"tree":[{"path":"src/a","type":"blob","mode":"100644","sha":"a","size":7}]}
+    ;
+    const page = try github.treePageAlloc(alloc, body, "src", .{ .repo = "https://codeberg.org/a/b", .op = .tree, .page = 2 });
+    defer alloc.free(page);
+    try snap(@src(), "tree root\npage 2 count 1; next page 3\n100644\tblob\ta\tsrc/a\t7 bytes\n", page);
+    try std.testing.expectError(error.GitHubTreeTruncated, github.treeAlloc(alloc, body, "src"));
+    const gitlab = try github.gitlabTreeAlloc(alloc, "[{\"path\":\"src\",\"type\":\"tree\",\"mode\":\"040000\",\"id\":\"abc\"}]", .{ .repo = "https://gitlab.com/a/b", .op = .tree });
+    defer alloc.free(gitlab);
+    try snap(@src(), "page 1 count 1; next page 2\n040000 abc src/\n", gitlab);
+}
+
+test "github compact comparison retains status commits and readable patches" {
+    const body =
+        \\{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"commits":[{"sha":"abc","commit":{"message":"Fix","author":{"name":"Ada","date":"today"}},"url":"noise"}],"files":[{"filename":"a","status":"modified","patch":"-old\n+new"}],"url":"noise","html_url":"noise","permalink_url":"noise"}
+    ;
+    const text = try github.metadataAlloc(alloc, body, .{ .repo = "x/y", .op = .compare, .base = "a", .ref = "b" });
+    defer alloc.free(text);
+    try snap(@src(), "page 1; next page 2 (commits)\nGitHub patch limits: commit 3000 files; compare 300 files on page 1; missing patch is not proof of no changes.\nstatus: ahead\nahead_by: 1\nbehind_by: 0\ntotal_commits: 1\nabc today Ada | Fix\nmodified a\n-old\n+new\n", text);
 }

@@ -1113,7 +1113,7 @@ test "basic tools UI renders patch todo and github calls" {
     const calls = [_]core.providers.ToolCall{
         .{ .id = "p", .name = "patch", .args = "{\"path\":\"probe.txt\",\"patch\":\"@@ -0,0 +1 @@\\n+ok\\n\"}" },
         .{ .id = "t", .name = "todo", .args = "{\"items\":[{\"content\":\"verify\",\"status\":\"in_progress\"}]}" },
-        .{ .id = "g", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"list\"}" },
+        .{ .id = "g", .name = "github", .args = "{\"repo\":\"https://altlinux.space/rirusha/Cassette\",\"api\":\"forgejo\",\"op\":\"list\"}" },
         .{ .id = "gh", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"history\",\"path\":\"src\",\"page\":2}" },
         .{ .id = "gc", .name = "github", .args = "{\"repo\":\"abhixdd/ghgrab\",\"op\":\"compare\",\"base\":\"v1\",\"ref\":\"main\"}" },
     };
@@ -1121,7 +1121,7 @@ test "basic tools UI renders patch todo and github calls" {
         try ui.onProvider(.{ .tool_call = call });
         const row = ui.panels.tool(idx);
         try std.testing.expectEqualStrings(call.name, row.name);
-        try ui.onProvider(.{ .tool_result = .{ .id = call.id, .output = "ok", .is_err = false } });
+        try ui.onProvider(.{ .tool_result = .{ .id = call.id, .output = "src/\nREADME.md 42B file\n", .is_err = false } });
     }
     try std.testing.expectEqual(@as(usize, 0), ui.panels.runningCount());
 }

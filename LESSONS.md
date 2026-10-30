@@ -5,6 +5,9 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-10-30)
 
 ### Do More
+- Keep forge adapters on the shared HTTP policy path; infer only known hosts and require an explicit API for self-hosted repository URLs.
+- Treat Gitea/Forgejo tree `truncated` as pagination, unlike GitHub's incomplete-tree error; test second pages against real servers.
+- Project API metadata into compact text for model tools; preserve commit identifiers, readable patches, pagination and explicit missing-patch warnings.
 - Expose media processing as a typed built-in tool with fixed ffmpeg operations; enforce read and write policy on both paths, and never overwrite output files.
 - Attach clipboard images to the outgoing editor prompt and retain their source files; terminal preview alone does not send image content.
 - Choose clipboard readers from the active desktop session: wl-paste for Wayland, xclip for X11, osascript for macOS.
@@ -22,6 +25,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Trace concurrency through production dispatch: loop.runTool blocks on PolicySpawnCtx.runReqStreaming; BgPool exists but is not wired into the agent tool.
 
 ### Do Not Do
+- Assume every repository has README.md; select an actual file from its directory listing (Cassette uses README.en.md and README.ru.md).
 - Omit OpenAI reasoning options to implement off: omission leaves the server default active.
 - Infer reasoning capabilities from model-name prefixes or advertise effort levels absent from the selected model's catalog.
 - Run PTY regressions against stale build_options.pz_bin_path; rebuild the executable and use its generated test options.

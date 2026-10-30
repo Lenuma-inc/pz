@@ -119,11 +119,12 @@ const skill_params = [_]tools.Tool.Param{
 };
 
 const github_params = [_]tools.Tool.Param{
-    .{ .name = "repo", .ty = .string, .required = true, .desc = "Public GitHub owner/repo or repository URL" },
+    .{ .name = "api", .ty = .string, .required = false, .desc = "github, gitlab, gitea, forgejo; inferred for known hosts; required for self-hosted HTTPS URLs" },
+    .{ .name = "repo", .ty = .string, .required = true, .desc = "Public owner/repo (GitHub) or HTTPS repository URL: GitHub, GitLab, Codeberg, Gitea, Forgejo" },
     .{ .name = "base", .ty = .string, .required = false, .desc = "Required base revision for compare; ref is head revision" },
     .{ .name = "page", .ty = .int, .required = false, .desc = "Page number, starting at 1; history, commit, compare, branches, tags" },
     .{ .name = "per_page", .ty = .int, .required = false, .desc = "Entries per page, 1-100, default 30" },
-    .{ .name = "op", .ty = .string, .required = false, .desc = "list (default), read, tree, history, commit, compare, branches, tags, info; no cloning" },
+    .{ .name = "op", .ty = .string, .required = false, .desc = "list (default), read, tree, history, branches, tags, info; commit/compare GitHub-only" },
     .{ .name = "path", .ty = .string, .required = false, .desc = "Repository-relative directory or file; tree prefix or history path filter" },
     .{ .name = "ref", .ty = .string, .required = false, .desc = "Branch, tag or commit; required for commit/compare (head); otherwise omitted uses default branch" },
     .{ .name = "from_line", .ty = .int, .required = false, .desc = "First file line, inclusive, default 1" },
@@ -475,7 +476,7 @@ pub const Runtime = struct {
             .{
                 .name = "github",
                 .kind = .github,
-                .spec = .{ .kind = .github, .desc = "Inspect public GitHub source, recursive file trees, history, commit patches, comparisons, branches, tags and repository metadata without cloning; responses capped at 8 MiB", .params = &github_params, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 30000, .destructive = false },
+                .spec = .{ .kind = .github, .desc = "Inspect public GitHub/GitLab/Gitea/Forgejo source, trees, history and refs without cloning; compact text, GitHub-only patches/compare; responses capped at 8 MiB", .params = &github_params, .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 30000, .destructive = false },
                 .dispatch = &self.dispatch,
             },
             .{
@@ -838,7 +839,7 @@ pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]c
     for (reg.entries) |entry| try out.writer.print(" {s}", .{entry.name});
     try out.writer.writeByte('\n');
     const guides = .{
-        .{ "github", "For GitHub repository exploration, use github before cloning: list a directory with {repo,op:\"list\",path}, then read selected files with {repo,op:\"read\",path,from_line,to_line}. Omit ref for the default branch, or set a branch/tag/commit explicitly. Do not clone a repository just to inspect source; use tree for recursive file paths (optional path prefix); history for paginated commits (optional path and ref); commit with ref for metadata and patches; compare with base and ref for changes; branches/tags for refs; info for repository metadata. Use page/per_page to continue history, commit files, comparisons and refs. Tree rejects truncated listings. Compare file lists cap at 300, commit files at 3000; missing patches may mean binary/large files. Clone only when local builds or execution require it. Public repositories only; report access/rate-limit failures." },
+        .{ "github", "For source inspection, use github before cloning: list/tree paths, read selected files (from_line/to_line), history by path/ref, branches/tags, info; compare with base and ref or commit with ref (GitHub-only patches). owner/repo means GitHub; HTTPS URLs infer GitHub/GitLab/Codeberg/Gitea, other hosts require api:gitlab/gitea/forgejo. Omit ref for default branch. Paged results show page/next; continue until empty. GitHub rejects truncated trees; compare files cap 300 (page 1), commit 3000; absent patch does not mean unchanged. Public read-only; report access/rate errors. Clone only for builds/execution. commit/compare are GitHub-only." },
         .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
         .{ "grep", "Use grep for regex content searches in a file or directory; glob filters files. It uses rg and honors ignore files." },
         .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },
