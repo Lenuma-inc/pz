@@ -123,7 +123,7 @@ const github_params = [_]tools.Tool.Param{
     .{ .name = "api", .ty = .string, .required = false, .desc = "github, gitlab, gitea, forgejo; inferred for known hosts; required for self-hosted HTTPS URLs" },
     .{ .name = "repo", .ty = .string, .required = true, .desc = "Public owner/repo (GitHub) or HTTPS repository URL: GitHub, GitLab, Codeberg, Gitea, Forgejo" },
     .{ .name = "base", .ty = .string, .required = false, .desc = "Required base revision for compare; ref is head revision" },
-    .{ .name = "page", .ty = .int, .required = false, .desc = "Page number, starting at 1; history, commit, compare, branches, tags" },
+    .{ .name = "page", .ty = .int, .required = false, .desc = "Page number, starting at 1; list, tree, history, commit, compare, branches, tags" },
     .{ .name = "per_page", .ty = .int, .required = false, .desc = "Entries per page, 1-100, default 30" },
     .{ .name = "op", .ty = .string, .required = false, .desc = "list (default), read, tree, history, branches, tags, info; commit/compare GitHub-only" },
     .{ .name = "path", .ty = .string, .required = false, .desc = "Repository-relative directory or file; tree prefix or history path filter" },
@@ -230,6 +230,7 @@ pub const Opts = struct {
     /// Parent's verified policy hash for agent sandbox inheritance.
     policy_hash: ?[]const u8 = null,
     sandbox_locked: bool = false,
+    yolo: bool = false,
     home: ?[]const u8 = null,
     egress: web.RedirectPolicy = .{},
 };
@@ -244,6 +245,7 @@ pub const Runtime = struct {
     ask_hook: ?*AskHook,
     policy_hash: ?[]const u8,
     sandbox_locked: bool,
+    yolo: bool,
     skill_cache: skill.Cache,
     egress: web.RedirectPolicy,
     tasks: todo.State = .{},
@@ -262,6 +264,7 @@ pub const Runtime = struct {
             .ask_hook = opts.ask_hook,
             .policy_hash = opts.policy_hash,
             .sandbox_locked = opts.sandbox_locked,
+            .yolo = opts.yolo,
             .skill_cache = .{ .home = opts.home },
             .egress = opts.egress,
         };
@@ -591,7 +594,9 @@ pub const Runtime = struct {
 
     fn runSwarm(self: *Runtime, call: tools.Call) !tools.Result {
         const member = self.member orelse return error.SwarmUnavailable;
-        const text = try member.run(self.alloc, call.args.swarm, call.cancel);
+        var args = call.args.swarm;
+        args.inference = call.inference;
+        const text = try member.run(self.alloc, args, call.cancel);
         errdefer self.alloc.free(text);
         return tools.shared.buildResult(self.alloc, call.id, call.at_ms, text, self.max_bytes, text.len);
     }
@@ -616,15 +621,20 @@ pub const Runtime = struct {
 
     fn runBash(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         if (std.meta.activeTag(call.args) != .bash) return error.KindMismatch;
-        const escalated = call.args.bash.sandbox_permissions == .require_escalated;
-        if (escalated) try self.approveBash(call);
+        var effective = call;
+        if (self.yolo) {
+            if (self.sandbox_locked) return error.PolicyDenied;
+            effective.args.bash.sandbox_permissions = .require_escalated;
+        }
+        const escalated = effective.args.bash.sandbox_permissions == .require_escalated;
+        if (escalated and !self.yolo) try self.approveBash(call);
         const h = bash.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = @min(self.max_bytes, text_max_bytes),
             .now_ms = call.at_ms,
             .allow_escalation = escalated,
         });
-        return h.run(call, sink);
+        return h.run(effective, sink);
     }
 
     fn approveBash(self: *Runtime, call: tools.Call) !void {
@@ -706,6 +716,7 @@ pub const Runtime = struct {
             spawn_ctx = .{
                 .alloc = self.alloc,
                 .policy_hash = self.policy_hash.?,
+                .inference = call.inference,
             };
             sh_ptr = &spawn_ctx.?.stream_hook;
         }
@@ -842,7 +853,7 @@ pub fn toolPromptAlloc(alloc: std.mem.Allocator, reg: tools.Registry, base: ?[]c
     for (reg.entries) |entry| try out.writer.print(" {s}", .{entry.name});
     try out.writer.writeByte('\n');
     const guides = .{
-        .{ "github", "For source inspection, use github before cloning: list/tree paths, read selected files (from_line/to_line), history by path/ref, branches/tags, info; compare with base and ref or commit with ref (GitHub-only patches). owner/repo means GitHub; HTTPS URLs infer GitHub/GitLab/Codeberg/Gitea, other hosts require api:gitlab/gitea/forgejo. Omit ref for default branch. Paged results show page/next; continue until empty. GitHub rejects truncated trees; compare files cap 300 (page 1), commit 3000; absent patch does not mean unchanged. Public read-only; report access/rate errors. Clone only for builds/execution. commit/compare are GitHub-only." },
+        .{ "github", "For source inspection, use github before cloning: list/tree paths, read selected files (from_line/to_line), history by path/ref, branches/tags, info; compare with base and ref or commit with ref (GitHub-only patches). owner/repo means GitHub; HTTPS URLs infer GitHub/GitLab/Codeberg/Gitea, other hosts require api:gitlab/gitea/forgejo. Omit ref for default branch. Paged results show page/next; continue until empty. GitHub rejects truncated trees; compare files cap 300 (page 1), commit 3000; absent patch does not mean unchanged. Public read-only; report access/rate errors. For large list/tree results follow next page hints; narrow tree with path. There is no content search: fetch only selected files for local search, with bounded requests and progress. Clone only for builds/execution. commit/compare are GitHub-only." },
         .{ "ffmpeg", "Use ffmpeg's typed media operations: inspect before deciding; trim stream-copies at keyframes unless accurate=true; fit uses contain or crop for landscape/portrait/square; export has fixed codec presets; audio extracts MP3/WAV/FLAC; transform rotates or mirrors; speed=0.5–2 changes playback with audio pitch preserved; mute drops audio and copies video. For speed, duration_seconds measures output time. Generated files are ffprobe-checked, which does not prove visual quality or full decodability; use read on the result for a contact sheet. Report measured metadata and name unverified properties. Render operations are bounded and write a new path. No arbitrary filter strings or shell commands." },
         .{ "grep", "Search exact symbols in known paths first; use repository-wide search only to locate files. glob narrows scope. Returns matching lines via rg, not whole files; long lines show a 240-column preview. Read surrounding lines only when needed." },
         .{ "find", "Use find with pattern for glob paths (e.g. **/*.zig), or name for a literal name substring. It uses fd and honors ignore files." },

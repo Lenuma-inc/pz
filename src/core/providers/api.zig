@@ -9,6 +9,13 @@ pub const Role = enum {
     tool,
 };
 
+pub const Inference = struct {
+    model: []const u8,
+    provider: ?[]const u8 = null,
+    thinking: ThinkingMode = .off,
+    thinking_budget: u32 = 0,
+};
+
 pub const Request = struct {
     model: []const u8,
     provider: ?[]const u8 = null,
@@ -33,6 +40,8 @@ pub const Msg = struct {
 pub const Part = union(enum) {
     text: []const u8,
     image: Image,
+    // Complete opaque Responses reasoning item, replayed only to OpenAI.
+    reasoning: []const u8,
     tool_call: ToolCall,
     tool_result: ToolResult,
 };
@@ -161,6 +170,7 @@ pub const Event = union(enum) {
     message: Message,
     text: []const u8,
     thinking: []const u8,
+    reasoning: []const u8,
     tool_call: ToolCall,
     tool_result: ToolResult,
     usage: Usage,

@@ -71,6 +71,7 @@ pub const PolicySpawnCtx = struct {
     alloc: std.mem.Allocator,
     policy_hash: []const u8,
     child: ?*rpc.ChildProc = null,
+    inference: ?@import("../providers/api.zig").Inference = null,
 
     const StreamHookBind = StreamHook.Bind(PolicySpawnCtx, run);
 
@@ -84,7 +85,7 @@ pub const PolicySpawnCtx = struct {
 
         var ps = rpc.ProgressStream.init(&child.stub, args.agent_id, cb);
         const res = try child.runReqStreaming(
-            .{ .id = "agent-0", .prompt = args.prompt },
+            .{ .id = "agent-0", .prompt = args.prompt, .inference = self.inference },
             rpc.ChildProc.default_run_deadline_ms,
             &ps,
         );

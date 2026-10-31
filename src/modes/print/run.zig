@@ -76,6 +76,7 @@ fn mapEvent(ev: core.providers.Event) core.session.Event {
     return .{
         .at_ms = core.time.milliTimestamp(),
         .data = switch (ev) {
+            .reasoning => |raw| .{ .reasoning = .{ .text = raw } },
             .message => |msg| .{ .message = msg },
             .text => |text| .{
                 .text = .{ .text = text },

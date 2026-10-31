@@ -445,6 +445,10 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
 
     for (msgs) |msg| {
         if (msg.role == .system) continue; // handled by writeSystem
+        const has_content = for (msg.parts) |part| {
+            if (part != .reasoning) break true;
+        } else false;
+        if (!has_content) continue;
 
         const role: []const u8 = switch (msg.role) {
             .system => return error.UnsupportedRole,
@@ -468,8 +472,10 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
         }
 
         for (msg.parts) |part| {
+            if (part == .reasoning) continue;
             try js.beginObject();
             switch (part) {
+                .reasoning => unreachable,
                 .text => |text| {
                     try js.objectField("type");
                     try js.write("text");

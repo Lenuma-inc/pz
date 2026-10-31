@@ -221,7 +221,7 @@ pub const Panels = struct {
 
     pub fn append(self: *Panels, ev: core.providers.Event) EventError!void {
         switch (ev) {
-            .message => {},
+            .message, .reasoning => {},
             .text, .thinking => {
                 if (!isTerminal(self.run_state)) self.run_state = .streaming;
             },

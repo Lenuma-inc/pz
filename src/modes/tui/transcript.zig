@@ -127,6 +127,7 @@ pub const Transcript = struct {
 
     pub fn appendSeq(self: *Transcript, seq: u64, ev: core.providers.Event) AppendError!void {
         switch (ev) {
+            .reasoning => {},
             .message => self.text_break = true,
             .text => |t| {
                 // Coalesce consecutive text events

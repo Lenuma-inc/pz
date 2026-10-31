@@ -50,7 +50,7 @@ even with debug info retained.
 
 - **Signed policy bundles** — Ed25519-verified policy with lock mode, generation rollback resistance, and expiry
 - **Tool sandbox** — process group isolation, env scrubbing, TERM→KILL escalation
-- **Linux workspace sandbox** — read the host filesystem, write only the workspace and `/tmp`, block network access. Python environments keep access to their installed interpreters; temporary files and tool caches use `/tmp`. A bash call with `sandbox_permissions: "require_escalated"` and `justification` asks the user to approve that command outside the sandbox. Denial, missing interactive approval, or a verified policy blocks escalation.
+- **Linux workspace sandbox** — read the host filesystem, write only the workspace and `/tmp`, block network access. Python environments keep access to their installed interpreters; temporary files and tool caches use `/tmp`. A bash call with `sandbox_permissions: "require_escalated"` and `justification` asks the user to approve that command outside the sandbox. Denial, missing interactive approval, or a verified policy blocks escalation. Explicit `--yolo` runs bash outside the sandbox without approval prompts and accepts project context for this process only; it is rejected when a signed policy is enforced.
 - **Egress policy** — deny-by-default endpoint allowlists, bounded deadlines, policy-bound proxy
 - **TOCTOU guards** — fd-pinned tool I/O with `readlinkat`/`O_NOFOLLOW`, hardlink rejection, root confinement
 - **Symlink escape prevention** — component-by-component path walk for tool paths and context files
@@ -123,6 +123,9 @@ pz resume 123      # specific session ID
 # Headless
 pz print "explain this codebase"
 echo '{"prompt":"hello"}' | pz json
+
+# Run without approval prompts (bash has your filesystem and network access)
+pz --yolo print "Investigate this repository"
 
 # Choose a supported reasoning effort
 pz --thinking low

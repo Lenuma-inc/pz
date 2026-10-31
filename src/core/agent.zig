@@ -108,6 +108,7 @@ pub const Hello = struct {
 pub const Run = struct {
     id: []const u8,
     prompt: []const u8,
+    inference: ?@import("providers/api.zig").Inference = null,
 };
 
 pub const Cancel = struct {
@@ -144,10 +145,7 @@ pub const Err = struct {
     fatal: bool = true,
 };
 
-pub const Request = struct {
-    id: []const u8,
-    prompt: []const u8,
-};
+pub const Request = Run;
 
 pub const Event = union(Tag) {
     ready: Hello,
@@ -229,10 +227,7 @@ pub const Stub = struct {
         self.state = .running;
         self.run_id = req.id;
         return self.next(.{
-            .run = .{
-                .id = req.id,
-                .prompt = req.prompt,
-            },
+            .run = req,
         });
     }
 

@@ -100,6 +100,7 @@ pub const Call = struct {
     src: Source,
     at_ms: i64,
     cancel: ?*CancelSrc = null,
+    inference: ?@import("providers/api.zig").Inference = null,
 
     pub const Source = enum {
         model,

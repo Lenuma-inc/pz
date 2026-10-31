@@ -92,6 +92,7 @@ pub const Parsed = struct {
     provider_cmd: ?[]const u8 = null,
     thinking: ThinkingLevel = .off,
     verbose: bool = false,
+    yolo: bool = false,
     system_prompt: ?[]const u8 = null,
     append_system_prompt: ?[]const u8 = null,
     max_turns: u16 = 0,
@@ -202,6 +203,7 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
         provider_cmd,
         thinking,
         verbose,
+        yolo,
         system_prompt,
         append_system_prompt,
         changelog,
@@ -239,6 +241,7 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
         .{ "--provider-cmd", .provider_cmd },
         .{ "--thinking", .thinking },
         .{ "--verbose", .verbose },
+        .{ "--yolo", .yolo },
         .{ "--system-prompt", .system_prompt },
         .{ "--append-system-prompt", .append_system_prompt },
         .{ "--changelog", .changelog },
@@ -336,6 +339,7 @@ pub fn parse(argv: []const []const u8) ParseError!Parsed {
                     out.thinking = parseThinking(val) orelse return error.InvalidThinking;
                 },
                 .verbose => out.verbose = true,
+                .yolo => out.yolo = true,
                 .system_prompt => {
                     const val = eq_val orelse takeVal(argv, &i) orelse return error.MissingSystemPromptValue;
                     if (val.len == 0) return error.MissingSystemPromptValue;

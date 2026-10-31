@@ -16,6 +16,7 @@ pub const Args = struct {
     prompt: ?[]const u8 = null,
     text: ?[]const u8 = null,
     timeout_ms: u32 = 30000,
+    inference: ?providers.Inference = null,
 };
 
 const Message = struct {
@@ -27,6 +28,7 @@ pub const Member = struct {
     team: *Team,
     id: []const u8,
     worker: ?*Worker = null,
+    inference: ?providers.Inference = null,
     canceled: std.atomic.Value(bool) = .init(false),
     abort: providers.AbortSlot = .{},
     inbox: std.ArrayList(Message) = .empty,
@@ -48,7 +50,7 @@ pub const Member = struct {
         return switch (args.op) {
             .spawn => blk: {
                 if (self.worker != null) return error.PolicyDenied;
-                try self.team.spawn(args.id orelse return error.InvalidArgs, args.prompt orelse return error.InvalidArgs);
+                try self.team.spawn(args.id orelse return error.InvalidArgs, args.prompt orelse return error.InvalidArgs, args.inference);
                 break :blk std.json.Stringify.valueAlloc(alloc, .{ .id = args.id.?, .state = "running" }, .{});
             },
             .send => blk: {
@@ -150,6 +152,10 @@ pub const Team = struct {
         w.member.clear();
         self.alloc.free(w.member.id);
         self.alloc.free(w.prompt);
+        if (w.member.inference) |inference| {
+            self.alloc.free(inference.model);
+            if (inference.provider) |provider| self.alloc.free(provider);
+        }
         if (w.output) |output| self.alloc.free(output);
         self.alloc.destroy(w);
     }
@@ -161,7 +167,7 @@ pub const Team = struct {
         return null;
     }
 
-    fn spawn(self: *Team, id: []const u8, prompt: []const u8) !void {
+    fn spawn(self: *Team, id: []const u8, prompt: []const u8, inference: ?providers.Inference) !void {
         if (id.len == 0 or id.len > 64 or std.mem.eql(u8, id, "parent") or prompt.len == 0 or prompt.len > max_text) return error.InvalidArgs;
         for (id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidArgs;
         try self.check(self.ctx, id);
@@ -176,6 +182,18 @@ pub const Team = struct {
             const task = try self.alloc.dupe(u8, prompt);
             errdefer self.alloc.free(task);
             w.* = .{ .member = .{ .team = self, .id = name }, .prompt = task, .started_ms = sys.nowMs() };
+            if (inference) |settings| {
+                const model = try self.alloc.dupe(u8, settings.model);
+                errdefer self.alloc.free(model);
+                const provider = if (settings.provider) |value| try self.alloc.dupe(u8, value) else null;
+                w.member.inference = settings;
+                w.member.inference.?.model = model;
+                w.member.inference.?.provider = provider;
+            }
+            errdefer if (w.member.inference) |settings| {
+                self.alloc.free(settings.model);
+                if (settings.provider) |provider| self.alloc.free(provider);
+            };
             w.member.worker = w;
             w.thread = try std.Thread.spawn(.{}, Worker.run, .{w});
             slot.* = w;

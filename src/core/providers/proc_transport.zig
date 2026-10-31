@@ -298,6 +298,12 @@ fn writePart(alloc: std.mem.Allocator, js: *std.json.Stringify, part: providers.
     try js.beginObject();
 
     switch (part) {
+        .reasoning => |raw| {
+            try js.objectField("type");
+            try js.write("reasoning");
+            try js.objectField("item");
+            try js.write(raw);
+        },
         .text => |txt| {
             try js.objectField("type");
             try js.write("text");

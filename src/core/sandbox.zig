@@ -128,8 +128,17 @@ fn prepareLinuxBash(
             const path = try std.fs.path.join(alloc, &.{ base, name });
             config_dirs[count] = path;
             count += 1;
-            const check = path_guard.openDir(path, .{}) catch |err| return mapFsErr(err);
-            check.close(sys.io);
+            if (path_guard.openDir(path, .{})) |check| {
+                check.close(sys.io);
+            } else |err| switch (err) {
+                error.NotDir => {
+                    const file = path_guard.openFile(path, .{}) catch |file_err| return mapFsErr(file_err);
+                    defer file.close(sys.io);
+                    const stat = file.stat(sys.io) catch |stat_err| return mapFsErr(stat_err);
+                    if (stat.kind != .file) return error.Denied;
+                },
+                else => return mapFsErr(err),
+            }
             try args.appendSlice(alloc, &.{ "--ro-bind", path, path });
         }
     }

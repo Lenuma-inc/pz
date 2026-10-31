@@ -19,6 +19,7 @@ pub const Event = struct {
         prompt: Prompt,
         text: Text,
         thinking: Text,
+        reasoning: Text,
         tool_call: ToolCall,
         tool_result: ToolResult,
         usage: Usage,
@@ -34,6 +35,7 @@ pub const Event = struct {
         prompt,
         text,
         thinking,
+        reasoning,
         tool_call,
         tool_result,
         usage,
@@ -134,6 +136,7 @@ pub const Event = struct {
             .text => |t| .{
                 .text = .{ .text = try alloc.dupe(u8, t.text) },
             },
+            .reasoning => |t| .{ .reasoning = .{ .text = try alloc.dupe(u8, t.text) } },
             .thinking => |t| .{
                 .thinking = .{ .text = try alloc.dupe(u8, t.text) },
             },
@@ -172,7 +175,7 @@ pub const Event = struct {
                 alloc.free(t.text);
                 freeAttachments(alloc, t.attachments);
             },
-            .text, .thinking, .err => |t| alloc.free(t.text),
+            .text, .thinking, .reasoning, .err => |t| alloc.free(t.text),
             .tool_call => |tc| {
                 alloc.free(tc.id);
                 alloc.free(tc.name);
@@ -242,6 +245,7 @@ fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!E
         .text => |t| .{
             .text = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
         },
+        .reasoning => |t| .{ .reasoning = t },
         .thinking => |t| .{
             .thinking = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
         },
@@ -604,6 +608,7 @@ test "schema property: event encode/decode roundtrip across tags" {
         prompt,
         text,
         thinking,
+        reasoning,
         tool_call,
         tool_result,
         usage,
@@ -742,6 +747,7 @@ test "schema property: Event.dupe preserves encode across tags" {
         prompt,
         text,
         thinking,
+        reasoning,
         tool_call,
         tool_result,
         usage,

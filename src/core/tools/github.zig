@@ -24,15 +24,37 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, policy: web.RedirectPolic
         404 => return error.NotFound,
         else => return error.GitHubHttpStatus,
     }
-    const text = switch (args.op) {
+    var text = switch (args.op) {
         .list => if (repo.api == .gitlab) try gitlabTreeAlloc(alloc, response.body, args) else try listAlloc(alloc, response.body),
         .read => try readLinesAlloc(alloc, response.body, args.from_line, args.to_line),
         .tree => if (repo.api == .gitlab) try gitlabTreeAlloc(alloc, response.body, args) else try treePageAlloc(alloc, response.body, args.path, if (repo.api == .github) null else args),
         else => try metadataAlloc(alloc, response.body, args),
     };
     errdefer alloc.free(text);
+    if (repo.api == .github and (args.op == .list or args.op == .tree)) {
+        const paged = try pageLinesAlloc(alloc, text, args.page, args.per_page);
+        alloc.free(text);
+        text = paged;
+    }
     if (text.len > max_bytes) return error.TooLarge;
     return shared.buildResult(alloc, call.id, call.at_ms, text, max_bytes, text.len);
+}
+
+fn pageLinesAlloc(alloc: std.mem.Allocator, text: []const u8, page: u32, per_page: u32) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    const start = (@as(u64, page) - 1) * per_page;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    var index: u64 = 0;
+    while (lines.next()) |line| : (index += 1) {
+        if (index < start) continue;
+        if (index == start + per_page) {
+            try out.writer.print("next page {d} (same op/path/ref)\n", .{@as(u64, page) + 1});
+            break;
+        }
+        try out.writer.print("{s}\n", .{line});
+    }
+    return out.toOwnedSlice();
 }
 
 pub fn apiUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs) ![]u8 {

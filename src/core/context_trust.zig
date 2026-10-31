@@ -6,6 +6,7 @@ const guard = @import("tools/path_guard.zig");
 
 pub const Approval = struct {
     ctx: *anyopaque,
+    remember: bool = true,
     check: *const fn (*anyopaque, []const u8, []const u8) anyerror!bool,
 };
 
@@ -43,12 +44,12 @@ pub fn allow(alloc: std.mem.Allocator, home: ?[]const u8, path: []const u8, cont
     }
     const ask = approval orelse return error.ContextTrustRequired;
     if (!try ask.check(ask.ctx, path, content)) return false;
-    if (cache) |c| {
+    if (ask.remember) if (cache) |c| {
         try fs.ensureDirPath(c);
         const dir = try guard.openDir(c, .{});
         defer dir.close(sys.io);
         try fs.atomicWriteAt(dir, &key, "approved\n");
-    }
+    };
     return true;
 }
 

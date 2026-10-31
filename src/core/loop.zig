@@ -395,6 +395,7 @@ pub const Opts = struct {
     tool_auth: ?*ToolAuth = null,
     approval: ?ApprovalCtx = null,
     approver: ?*Approver = null,
+    auto_approve: bool = false,
     /// Skip <untrusted-input> wrapping on user prompts and prompt_guard
     /// system injection. Required for OAuth API compatibility.
     skip_prompt_guard: bool = false,
@@ -644,6 +645,7 @@ const Hist = struct {
                     }
                 }
             },
+            .reasoning => |r| try self.pushPartOwned(.assistant, .{ .reasoning = try self.alloc.dupe(u8, r.text) }),
             .message => |msg| try self.message(msg),
             .text => |text| try self.text.appendSlice(self.alloc, text.text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, .{
@@ -666,6 +668,7 @@ const Hist = struct {
             else => try self.flushText(),
         }
         switch (ev) {
+            .reasoning => |r| try self.pushPartOwned(.assistant, .{ .reasoning = try self.alloc.dupe(u8, r) }),
             .message => |msg| try self.message(msg),
             .text => |text| try self.text.appendSlice(self.alloc, text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, tc),
@@ -825,7 +828,11 @@ pub const LoopCtx = struct {
                 const base_prompt = instructions.allocPrompt(turn_alloc, self.opts.model, self.opts.provider_opts, self.opts.system_prompt) catch |msg_err| {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
-                const tool_prompt = tools.builtin.toolPromptAlloc(turn_alloc, self.opts.reg, base_prompt) catch |msg_err| {
+                const runtime_prompt = if (self.opts.auto_approve)
+                    try std.fmt.allocPrint(turn_alloc, "{s}\n\nThe user enabled --yolo for this process: execute authorized work without approval questions. Bash runs outside the pz sandbox with the user's filesystem and network permissions; no escalation retry is needed. Make reasonable decisions instead of asking optional questions. This does not expand the user's task or authorize unrelated actions.", .{base_prompt})
+                else
+                    base_prompt;
+                const tool_prompt = tools.builtin.toolPromptAlloc(turn_alloc, self.opts.reg, runtime_prompt) catch |msg_err| {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
                 self.hist.flushText() catch |err| return failWithReport(self.opts, .stream_next, err);
@@ -1034,7 +1041,7 @@ fn nowMs(opts: Opts) i64 {
 
 fn freePart(alloc: std.mem.Allocator, part: providers.Part) void {
     switch (part) {
-        .text => |text| alloc.free(text),
+        .text, .reasoning => |text| alloc.free(text),
         .image => |image| alloc.free(image.data),
         .tool_call => |tc| {
             alloc.free(tc.id);
@@ -1115,6 +1122,7 @@ fn cloneReqPart(
     skip_guard: bool,
 ) !providers.Part {
     return switch (part) {
+        .reasoning => |raw| .{ .reasoning = try alloc.dupe(u8, raw) },
         .text => |text| .{ .text = try cloneReqText(alloc, role, text, skip_guard) },
         .image => |image| .{ .image = .{
             .media_type = image.media_type,
@@ -1328,6 +1336,12 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
         .src = .model,
         .at_ms = at_ms,
         .cancel = call_cancel,
+        .inference = .{
+            .model = opts.model,
+            .provider = opts.provider_label,
+            .thinking = opts.provider_opts.thinking,
+            .thinking_budget = opts.provider_opts.thinking_budget,
+        },
     };
 
     var mode_sink = ToolModeSink{
@@ -1354,12 +1368,12 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
             .output = if (run_err == error.TooLarge)
-                try opts.alloc.dupe(u8, "tool-failed:TooLarge (input exceeds the tool limit; read a smaller range or split the operation)")
+                try opts.alloc.dupe(u8, "tool-failed:TooLarge (response or output exceeds the tool limit; narrow the path, read a smaller line range or paginate)")
             else if (run_err == error.Denied)
                 try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. For bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.", .{@errorName(run_err)})
             else
                 try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. {s}", .{ @errorName(run_err), switch (run_err) {
-                    error.NotFound => "The file, parent directory, or executable does not exist. Check the path or create the parent directory; network approval does not fix this.",
+                    error.NotFound => "A path or executable was not found. Check the path and runtime dependencies before retrying.",
                     error.PolicyMismatch => "The child agent policy handshake failed. Report the configuration failure; user network approval cannot override it.",
                     error.ApprovalRequired => "This action requires interactive approval, which is unavailable in this mode.",
                     error.ApprovalDenied, error.PolicyDenied => "Access was denied. Do not retry this action or request the same permission again.",
@@ -1388,6 +1402,7 @@ fn noteApproval(
     tc: providers.ToolCall,
     parsed_args: tools.Call.Args,
 ) !void {
+    if (opts.auto_approve and opts.approval == null) return;
     const config_path: ?[]const u8 = switch (kind) {
         .write => parsed_args.write.path,
         .edit => parsed_args.edit.path,
@@ -1627,6 +1642,7 @@ fn mapProviderEv(ev: providers.Event, at_ms: i64) session.Event {
     return .{
         .at_ms = at_ms,
         .data = switch (ev) {
+            .reasoning => |raw| .{ .reasoning = .{ .text = raw } },
             .message => |msg| .{ .message = msg },
             .text => |text| .{
                 .text = .{ .text = text },
@@ -1730,6 +1746,7 @@ fn fmtReqMsgs(alloc: std.mem.Allocator, msgs: []const providers.Msg) ![]u8 {
                     @tagName(msg.role),
                     text,
                 }),
+                .reasoning => try buf.print(alloc, "{s}|reasoning|[opaque]\n", .{@tagName(msg.role)}),
                 .image => |image| try buf.print(alloc, "{s}|image|{s}|{d} bytes\n", .{
                     @tagName(msg.role),
                     image.media_type,
@@ -6067,7 +6084,6 @@ test "agent config changes require fresh approval without policy" {
     }
     try std.testing.expectEqual(@as(usize, 9), checker.calls);
 }
-
 
 test "compaction checkpoint replays as untrusted assistant memory" {
     const alloc = std.testing.allocator;

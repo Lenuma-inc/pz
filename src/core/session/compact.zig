@@ -365,15 +365,13 @@ fn summaryEventAlloc(alloc: Allocator, ev: schema.Event) !?[]u8 {
     const a = arena.allocator();
     var bounded = ev;
     switch (ev.data) {
-        .noop, .thinking, .usage, .model, .message => return null,
+        .noop, .thinking, .reasoning, .usage, .model, .message => return null,
         .tool_result => |tr| {
             if (tr.output.len > 4096) {
                 const head = headEnd(tr.output, 2048);
                 var tail = tr.output.len - 2048;
                 while (tail < tr.output.len and tr.output[tail] & 0xc0 == 0x80) tail += 1;
-                bounded.data.tool_result.output = try std.fmt.allocPrint(a,
-                    "{s}\n[compaction omitted {d} bytes of tool output; full output remains in session journal]\n{s}",
-                    .{ tr.output[0..head], tail - head, tr.output[tail..] });
+                bounded.data.tool_result.output = try std.fmt.allocPrint(a, "{s}\n[compaction omitted {d} bytes of tool output; full output remains in session journal]\n{s}", .{ tr.output[0..head], tail - head, tr.output[tail..] });
             }
         },
         .prompt => |prompt| {
@@ -782,7 +780,7 @@ fn collectSummaryText(alloc: std.mem.Allocator, provider: *providers.Provider, r
         },
         .err => return error.SummaryFailed,
         .tool_call, .tool_result => return error.SummaryFailed,
-        .message, .thinking, .usage => {},
+        .message, .thinking, .reasoning, .usage => {},
     };
 
     if (!done) return error.SummaryFailed;
@@ -985,14 +983,7 @@ test "summary projection bounds UTF8 output and labels binary attachments" {
     defer freeGeneratedSummary(alloc, generated);
     const attachment = generated.event_jsons[0];
     const output = generated.event_jsons[1];
-    const got = try std.fmt.allocPrint(alloc,
-        "events={d} binary_hidden={any} attachment_label={any} utf8={any} bounded={any} head={any} tail={any} omission={any} error={any}",
-        .{ generated.event_jsons.len, std.mem.indexOf(u8, attachment, "BINARY_BASE64") == null,
-           std.mem.indexOf(u8, attachment, "binary attachment: image/png") != null,
-           std.unicode.utf8ValidateSlice(output), output.len < 5000,
-           std.mem.indexOf(u8, output, "HEAD") != null, std.mem.indexOf(u8, output, "TAIL") != null,
-           std.mem.indexOf(u8, output, "full output remains in session journal") != null,
-           std.mem.indexOf(u8, output, "\"is_err\":true") != null });
+    const got = try std.fmt.allocPrint(alloc, "events={d} binary_hidden={any} attachment_label={any} utf8={any} bounded={any} head={any} tail={any} omission={any} error={any}", .{ generated.event_jsons.len, std.mem.indexOf(u8, attachment, "BINARY_BASE64") == null, std.mem.indexOf(u8, attachment, "binary attachment: image/png") != null, std.unicode.utf8ValidateSlice(output), output.len < 5000, std.mem.indexOf(u8, output, "HEAD") != null, std.mem.indexOf(u8, output, "TAIL") != null, std.mem.indexOf(u8, output, "full output remains in session journal") != null, std.mem.indexOf(u8, output, "\"is_err\":true") != null });
     defer alloc.free(got);
     try @import("../../test/helpers.zig").expectSnapText(@src(), "events=2 binary_hidden=true attachment_label=true utf8=true bounded=true head=true tail=true omission=true error=true", got);
 }
@@ -1746,9 +1737,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
     var provider = TestProvider{};
     const got = (try generateSummaryWithProvider(std.testing.allocator, &provider.provider, "m", &events, null)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(got.summary);
-    const meta_snap = try std.fmt.allocPrint(std.testing.allocator,
-        "outcome={s} within_budget={any} token_estimate={any} kept={d} dropped={d}",
-        .{ @tagName(got.meta.outcome), metaWithinBudget(got.meta), got.meta.input_tokens > 0 and got.meta.input_tokens < got.meta.input_bytes, got.meta.kept_events, got.meta.dropped_events });
+    const meta_snap = try std.fmt.allocPrint(std.testing.allocator, "outcome={s} within_budget={any} token_estimate={any} kept={d} dropped={d}", .{ @tagName(got.meta.outcome), metaWithinBudget(got.meta), got.meta.input_tokens > 0 and got.meta.input_tokens < got.meta.input_bytes, got.meta.kept_events, got.meta.dropped_events });
     defer std.testing.allocator.free(meta_snap);
 
     try oh.snap(@src(),

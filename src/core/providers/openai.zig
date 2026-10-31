@@ -246,6 +246,11 @@ fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?pr
     const item = ev.item orelse return null;
     const item_type = item.type orelse return null;
     if (std.mem.eql(u8, item_type, "message")) return .{ .message = .{ .phase = item.phase, .end = true } };
+    if (std.mem.eql(u8, item_type, "reasoning")) {
+        const parsed = try std.json.parseFromSlice(std.json.Value, ar, data, json_opts);
+        const value = parsed.value.object.get("item").?;
+        return .{ .reasoning = try std.json.Stringify.valueAlloc(ar, value, .{}) };
+    }
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
 
     if (item.call_id) |call_id| {
@@ -411,6 +416,9 @@ fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bo
     try js.objectField("stream");
     try js.write(true);
 
+    try js.objectField("include");
+    try js.write(&[_][]const u8{"reasoning.encrypted_content"});
+
     try js.objectField("store");
     try js.write(false);
 
@@ -540,6 +548,14 @@ fn writeInputImage(alloc: std.mem.Allocator, js: *std.json.Stringify, image: pro
 
 fn writeAssistantInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msg: providers.Msg) !void {
     for (msg.parts) |part| switch (part) {
+        .reasoning => |raw| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+            defer parsed.deinit();
+            if (parsed.value != .object) return error.InvalidReasoningItem;
+            const kind = parsed.value.object.get("type") orelse return error.InvalidReasoningItem;
+            if (kind != .string or !std.mem.eql(u8, kind.string, "reasoning")) return error.InvalidReasoningItem;
+            try js.write(parsed.value);
+        },
         .text => |text| {
             try js.beginObject();
             try js.objectField("type");
@@ -880,7 +896,7 @@ test "ChatGPT OAuth body uses instructions without API token limits" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5.4","stream":true,"store":false,"instructions":"rules","reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5.4","stream":true,"include":["reasoning.encrypted_content"],"store":false,"instructions":"rules","reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 }
 
@@ -927,7 +943,7 @@ test "buildBody minimal request has model stream and input" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5","stream":true,"include":["reasoning.encrypted_content"],"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 }
 
@@ -942,7 +958,7 @@ test "buildBody thinking defaults off and supports explicit budget" {
     defer testing.allocator.free(default);
     try expectSnap(@src(), default,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5","stream":true,"include":["reasoning.encrypted_content"],"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 
     const budget = try buildBodyImpl(testing.allocator, .{
@@ -953,7 +969,7 @@ test "buildBody thinking defaults off and supports explicit budget" {
     defer testing.allocator.free(budget);
     try expectSnap(@src(), budget,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"minimal","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+        \\  "{"model":"gpt-5","stream":true,"include":["reasoning.encrypted_content"],"store":false,"max_output_tokens":16384,"reasoning":{"effort":"minimal","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 }
 
@@ -1045,7 +1061,7 @@ test "buildBody includes system assistant tool history and tool definitions" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
+        \\  "{"model":"gpt-5","stream":true,"include":["reasoning.encrypted_content"],"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
     );
 }
 
@@ -1070,7 +1086,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"o?k?"}]}"
+        \\  "{"model":"gpt-5","stream":true,"include":["reasoning.encrypted_content"],"store":false,"max_output_tokens":16384,"reasoning":{"effort":"none","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"o?k?"}]}"
     );
 }
 

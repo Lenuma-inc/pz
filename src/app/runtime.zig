@@ -677,6 +677,7 @@ const TuiSink = struct {
     fn pushSanitized(self: *TuiSink, pev: core.providers.Event) !void {
         const alloc = self.ui.alloc;
         switch (pev) {
+            .reasoning => {},
             .text => |t| {
                 const s = try sanitizeUtf8LossyAlloc(alloc, t);
                 defer alloc.free(s);
@@ -1405,6 +1406,7 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
 
 fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) !core.providers.Event {
     return switch (ev) {
+        .reasoning => |raw| .{ .reasoning = try alloc.dupe(u8, raw) },
         .message => |msg| .{ .message = msg },
         .text => |txt| .{ .text = try alloc.dupe(u8, txt) },
         .thinking => |txt| .{ .thinking = try alloc.dupe(u8, txt) },
@@ -1442,6 +1444,7 @@ fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) !core.provi
 
 fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) void {
     switch (ev) {
+        .reasoning => |raw| alloc.free(raw),
         .text => |txt| alloc.free(txt),
         .thinking => |txt| alloc.free(txt),
         .tool_call => |tc| {
@@ -1868,6 +1871,7 @@ pub fn execChild(init: std.process.Init, argv: []const []const u8) !void {
                 var cmd = try cli.parse(alloc, init.io, std.Io.Dir.cwd(), &.{ "print", "--no-session", "--prompt", req.prompt }, env);
                 defer cmd.deinit(alloc);
                 cmd.run.prompt = req.prompt;
+                if (req.inference) |settings| try inheritInference(alloc, &cmd.run, settings);
                 var text = std.Io.Writer.Allocating.init(alloc);
                 defer text.deinit();
                 const sid = execWithWriter(alloc, cmd.run, &text.writer) catch |err| {
@@ -1936,6 +1940,22 @@ const SwarmCancel = struct {
     }
 };
 
+fn inheritInference(alloc: std.mem.Allocator, cmd: *cli.Run, settings: @import("../core/providers/api.zig").Inference) !void {
+    const options = core.providers.Opts{ .thinking = settings.thinking, .thinking_budget = settings.thinking_budget };
+    const level = if (settings.thinking == .off) "off" else options.reasoningEffort();
+    const thinking = std.meta.stringToEnum(@import("args.zig").ThinkingLevel, level) orelse return error.InvalidThinking;
+    const model = try alloc.dupe(u8, settings.model);
+    errdefer alloc.free(model);
+    const provider = try alloc.dupe(u8, settings.provider orelse cmd.cfg.provider);
+    alloc.free(cmd.cfg.model);
+    alloc.free(cmd.cfg.provider);
+    cmd.cfg.model = model;
+    cmd.cfg.provider = provider;
+    cmd.runtime_model = null;
+    cmd.runtime_provider = null;
+    cmd.thinking = thinking;
+}
+
 const SwarmRun = struct {
     cmd: cli.Run,
     pol: *const RuntimePolicy,
@@ -1953,6 +1973,16 @@ const SwarmRun = struct {
         cmd.no_session = true;
         cmd.cfg.model = @constCast(activeModel(self.cmd));
         cmd.cfg.provider = @constCast(activeProvider(self.cmd));
+        if (member.inference) |settings| {
+            // The startup config is shared; only the inherited strings below are owned here.
+            cmd.cfg.model = try alloc.dupe(u8, cmd.cfg.model);
+            cmd.cfg.provider = try alloc.dupe(u8, cmd.cfg.provider);
+            try inheritInference(alloc, &cmd, settings);
+        }
+        defer if (member.inference != null) {
+            alloc.free(cmd.cfg.model);
+            alloc.free(cmd.cfg.provider);
+        };
         cmd.tool_mask &= ~(core.tools.builtin.mask_agent | core.tools.builtin.mask_ask);
         cmd.prompt = try std.fmt.allocPrint(
             alloc,
@@ -2154,6 +2184,7 @@ fn execWithIoTuiHooks(
     const home = run_cmd.home;
     var pol = try RuntimePolicy.load(alloc, run_cmd.io, home);
     defer pol.deinit();
+    if (run_cmd.yolo and pol.enforced()) return error.PolicyDenied;
 
     // Durable audit sequence tracker: persists high-water mark so
     // replayed audit entries are detected across process restarts.
@@ -2240,7 +2271,8 @@ fn execWithIoTuiHooks(
     var tools_rt = core.tools.builtin.Runtime.init(.{
         .alloc = alloc,
         .member = member,
-        .tool_mask = run_cmd.tool_mask,
+        .tool_mask = if (run_cmd.yolo) run_cmd.tool_mask & ~core.tools.builtin.mask_ask else run_cmd.tool_mask,
+        .yolo = run_cmd.yolo,
         .home = home,
         .policy_hash = pol.hash(),
         .sandbox_locked = pol.enforced(),
@@ -2488,6 +2520,7 @@ fn runPrint(
             .loc = approval_loc,
             .policy = approval_bind,
         } else null,
+        .auto_approve = run_cmd.yolo,
         .skip_prompt_guard = is_oauth, // OAuth: API rejects <untrusted-input> wrapping
     });
 
@@ -2866,6 +2899,7 @@ fn runTui(
         .approver = &prompt_approver_impl.approver,
         .skip_prompt_guard = is_sub,
     };
+    tools_rt.ask_hook = if (is_tty) &prompt_ask_ctx.ask_hook else null;
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
     var popts = thinking.toProviderOpts();
@@ -6168,7 +6202,7 @@ fn restoreSessionIntoUi(
                 selection = next;
             },
             .message => |msg| try ui.onProvider(.{ .message = msg }),
-            .noop, .checkpoint => {},
+            .noop, .checkpoint, .reasoning => {},
             .prompt => |p| {
                 const s = try ensureUtf8OrSanitize(alloc, p.text);
                 defer if (s.owned) |o| alloc.free(o);
@@ -6766,6 +6800,11 @@ fn isPathLike(raw: []const u8) bool {
     return false;
 }
 
+fn approveYoloContext(ctx: *anyopaque, _: []const u8, _: []const u8) !bool {
+    const enabled: *const bool = @ptrCast(@alignCast(ctx));
+    return enabled.*;
+}
+
 fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const u8) !?[]u8 {
     return buildSystemPromptWithApproval(alloc, run_cmd, home, null);
 }
@@ -6791,7 +6830,12 @@ fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, hom
         return try alloc.dupe(u8, sp);
     }
 
-    const ctx = try core.context.loadWithApproval(alloc, run_cmd.io, home, approval);
+    var yolo = run_cmd.yolo;
+    const context_approval: ?core.context.Approval = if (yolo)
+        .{ .ctx = &yolo, .check = approveYoloContext, .remember = false }
+    else
+        approval;
+    const ctx = try core.context.loadWithApproval(alloc, run_cmd.io, home, context_approval);
     if (run_cmd.append_system_prompt) |ap| {
         if (ctx) |c| {
             defer alloc.free(c);
@@ -8067,6 +8111,7 @@ const TurnCtx = struct {
                 .policy = self.approval_bind,
             } else null,
             .approver = self.approver,
+            .auto_approve = self.tools_rt.yolo,
             .skip_prompt_guard = self.skip_prompt_guard,
         });
     }
