@@ -554,11 +554,7 @@ pub const Ui = struct {
             else => blk: {
                 if (!compact_on) break :blk null;
                 const sc = spinner.cp(self.spin);
-                const show_spin = (self.spin & 1) == 0;
-                const label = if (show_spin)
-                    std.fmt.bufPrint(&lbl_buf, " compaction {u} ", .{sc}) catch " compaction "
-                else
-                    " compaction ";
+                const label = std.fmt.bufPrint(&lbl_buf, " compaction {u} ", .{sc}) catch " compaction ";
                 break :blk .{ .label = label, .fg = t.accent };
             },
         };
@@ -888,6 +884,12 @@ test "harness border shows compaction indicator" {
     try std.testing.expect(pos != null);
     const cc = try ui.frm.cell(pos.?.x, pos.?.y);
     try std.testing.expect(frame.Color.eql(cc.style.fg, theme.get().accent));
+    for (0..4) |_| {
+        out.clear();
+        try ui.draw(&out);
+        const spin_cell = try ui.frm.cell(pos.?.x + "compaction ".len, pos.?.y);
+        try std.testing.expectEqual(spinner.cp(ui.spin), spin_cell.cp);
+    }
 }
 
 test "harness onMouse scrolls transcript" {

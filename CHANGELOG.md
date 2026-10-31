@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Select the lowest supported thinking level for session compaction instead of forcing unsupported thinking-off requests.
+- Remove compaction debug output that overwrote the TUI during file-operation extraction.
+
+### Changed
+- Animate the compaction indicator while waiting for summaries and report context size, percentage reduction and record counts after compaction.
+
 ## [0.3.0] - 2026-10-31
 
 ### Added

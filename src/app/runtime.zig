@@ -3034,6 +3034,7 @@ fn runTui(
             audit_hooks,
             &ctl_audit,
             home,
+            .{ .ui = &ui, .out = out },
         );
         if (cmd == .quit) return;
         if (cmd == .clear) {
@@ -3085,9 +3086,6 @@ fn runTui(
                     }
                 } else |_| {}
             }
-        }
-        if (cmd == .compacted) {
-            ui.panels.noteCompaction();
         }
         if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
             const cmd_text = init_cmd_writer.written();
@@ -3452,6 +3450,7 @@ fn runTui(
                                 audit_hooks,
                                 &ctl_audit,
                                 home,
+                                .{ .ui = &ui, .out = out },
                             );
                             if (cmd == .quit) return;
                             if (cmd == .clear) {
@@ -3557,7 +3556,6 @@ fn runTui(
                                         }
                                     }
                                 }
-                                if (cmd == .compacted) ui.panels.noteCompaction();
                                 const cmd_text = cmd_writer.written();
                                 if (cmd_text.len > 0) {
                                     try infoTextSafe(alloc, &ui, cmd_text);
@@ -3954,6 +3952,7 @@ fn runTui(
                 audit_hooks,
                 &ctl_audit,
                 home,
+                .{ .ui = &ui, .out = out },
             );
             if (cmd == .quit) return;
             if (cmd == .clear) {
@@ -3986,7 +3985,6 @@ fn runTui(
                 _ = try resume_ctx.restore(sid.*);
             }
             if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
-                if (cmd == .compacted) ui.panels.noteCompaction();
                 try syncBgFooter(alloc, &ui, &bg_mgr);
                 try syncThinking(alloc, &ui, model, &thinking, &popts);
                 try syncSessionModel(&ui, store, sid.*, model, provider_label);
@@ -5000,6 +4998,7 @@ fn handleSlashCommand(
     audit_hooks: AuditHooks,
     ctl_audit: *RuntimeCtlAudit,
     home: ?[]const u8,
+    progress: ?CompactProgress,
 ) !CmdRes {
     if (line.len == 0 or line[0] != '/' or isFilePrompt(line)) return .unhandled;
 
@@ -5326,7 +5325,7 @@ fn handleSlashCommand(
             };
             const dir = try openDirPath(session_dir, .{});
             defer dir.close(sys.io);
-            const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms(), summary_provider orelse return error.ProviderUnavailable, model.*) catch |err| {
+            const ck = compactWithProgress(alloc, dir, sid.*, audit_hooks.now_ms(), summary_provider orelse return error.ProviderUnavailable, model.*, progress) catch |err| {
                 try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
@@ -5356,7 +5355,10 @@ fn handleSlashCommand(
                 },
             };
             try runtimeCtlAudit(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, .ok, null, &attrs);
-            try writeTextLine(alloc, out, "compacted in={d} out={d}\n", .{ ck.in_lines, ck.out_lines });
+            const result = try compactResultAlloc(alloc, ck);
+            defer alloc.free(result);
+            try out.writeAll(result);
+            try out.writeAll("\n");
             return .compacted;
         },
         .@"export" => {
@@ -7456,7 +7458,70 @@ const CompactFn = *const fn (
 const CompactCtx = struct {
     provider: *core.providers.Provider,
     model: []const u8,
+    progress: ?CompactProgress = null,
 };
+
+const CompactProgress = struct {
+    ui: *tui_harness.Ui,
+    out: *std.Io.Writer,
+};
+
+fn compactWithProgress(
+    alloc: std.mem.Allocator,
+    dir: std.Io.Dir,
+    sid: []const u8,
+    now: i64,
+    provider: *core.providers.Provider,
+    model: []const u8,
+    progress: ?CompactProgress,
+) !core.session.CompactCheckpoint {
+    const display = progress orelse return core.session.compactSession(alloc, dir, sid, now, provider, model);
+    const Job = struct {
+        alloc: std.mem.Allocator,
+        dir: std.Io.Dir,
+        sid: []const u8,
+        now: i64,
+        provider: *core.providers.Provider,
+        model: []const u8,
+        done: std.atomic.Value(bool) = .init(false),
+        result: anyerror!core.session.CompactCheckpoint = undefined,
+
+        fn run(self: *@This()) void {
+            self.result = core.session.compactSession(self.alloc, self.dir, self.sid, self.now, self.provider, self.model);
+            self.done.store(true, .release);
+        }
+    };
+    var job = Job{ .alloc = alloc, .dir = dir, .sid = sid, .now = now, .provider = provider, .model = model };
+    const previous_state = display.ui.panels.run_state;
+    display.ui.panels.run_state = .idle;
+    defer display.ui.panels.run_state = previous_state;
+    defer display.ui.panels.compaction_until_ms = 0;
+    display.ui.panels.noteCompaction();
+    try display.ui.draw(display.out);
+    const thread = try std.Thread.spawn(.{}, Job.run, .{&job});
+    defer thread.join();
+    while (!job.done.load(.acquire)) {
+        display.ui.panels.noteCompaction();
+        try display.ui.draw(display.out);
+        try std.Io.sleep(sys.io, .fromNanoseconds(100 * std.time.ns_per_ms), .awake);
+    }
+    return job.result;
+}
+
+fn compactResultAlloc(alloc: std.mem.Allocator, ck: core.session.CompactCheckpoint) ![]u8 {
+    const saved = if (ck.in_bytes == 0) 0 else (ck.in_bytes -| ck.out_bytes) *| 100 / ck.in_bytes;
+    return std.fmt.allocPrint(alloc, "[session compacted] context: {d} -> {d} bytes (-{d}%); records: {d} -> {d}. Older history summarized; recent messages and original journal preserved.", .{ ck.in_bytes, ck.out_bytes, saved, ck.in_lines, ck.out_lines });
+}
+
+test "compaction result reports context reduction and preserved history" {
+    const alloc = std.testing.allocator;
+    const result = try compactResultAlloc(alloc, .{ .in_bytes = 1000, .out_bytes = 250, .in_lines = 100, .out_lines = 12 });
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("[session compacted] context: 1000 -> 250 bytes (-75%); records: 100 -> 12. Older history summarized; recent messages and original journal preserved.", result);
+    const empty = try compactResultAlloc(alloc, .{});
+    defer alloc.free(empty);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "(-0%)") != null);
+}
 
 fn compactNow(
     ctx: ?*anyopaque,
@@ -7466,7 +7531,7 @@ fn compactNow(
     now: i64,
 ) !CompactRun {
     const args: *CompactCtx = @ptrCast(@alignCast(ctx.?));
-    _ = try core.session.compactSession(alloc, dir, sid, now, args.provider, args.model);
+    _ = try compactWithProgress(alloc, dir, sid, now, args.provider, args.model, args.progress);
     return .compacted;
 }
 
@@ -7496,7 +7561,7 @@ fn autoCompact(
     provider: *core.providers.Provider,
     model: []const u8,
 ) !AutoCompactOutcome {
-    var ctx: CompactCtx = .{ .provider = provider, .model = model };
+    var ctx: CompactCtx = .{ .provider = provider, .model = model, .progress = .{ .ui = ui, .out = out } };
     return autoCompactWith(alloc, ui, out, sid, session_dir_path, no_session, force, &ctx, compactNow);
 }
 
@@ -7535,8 +7600,13 @@ fn autoCompactWith(
     };
     switch (res) {
         .compacted => {
-            ui.panels.noteCompaction();
-            try ui.tr.infoText("[session compacted]");
+            if (try core.session.loadCompactCheckpoint(alloc, dir, sid)) |ck| {
+                const result = try compactResultAlloc(alloc, ck);
+                defer alloc.free(result);
+                try ui.tr.infoText(result);
+            } else {
+                try ui.tr.infoText("[session compacted]");
+            }
             return .compacted;
         },
         .stopped => |meta| {
@@ -11039,6 +11109,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
         .{},
         &ctl_audit,
         null,
+        null,
     );
 
     try std.testing.expectEqual(CmdRes.unhandled, got);
@@ -11102,6 +11173,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
         &out_fbs,
         .{},
         &ctl_audit,
+        null,
         null,
     );
 
@@ -11298,6 +11370,7 @@ test "handleSlashCommand blocks builtins under verified policy" {
         .{},
         &ctl_audit,
         null,
+        null,
     );
 
     try std.testing.expectEqual(CmdRes.handled, got);
@@ -11397,6 +11470,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         ctl_audit.hooks,
         &ctl_audit,
         null,
+        null,
     );
 
     ctl_audit.hooks.share_gist = struct {
@@ -11423,6 +11497,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         ctl_audit.hooks,
         &ctl_audit,
         null,
+        null,
     );
 
     _ = try handleSlashCommand(
@@ -11442,6 +11517,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         &out_fbs,
         ctl_audit.hooks,
         &ctl_audit,
+        null,
         null,
     );
 
@@ -11471,6 +11547,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         &out_fbs,
         ctl_audit.hooks,
         &ctl_audit,
+        null,
         null,
     );
 
@@ -14945,6 +15022,7 @@ fn slashHelper(
         .{},
         ctl_audit,
         null,
+        null,
     );
 }
 
@@ -15514,7 +15592,7 @@ test "UX6: /share calls share_gist and prints url" {
     var out_buf: [1024]u8 = undefined;
     var out_fbs: std.Io.Writer = .fixed(&out_buf);
 
-    const got = try handleSlashCommand(alloc, "/share", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, null, &out_fbs, ctl_audit.hooks, &ctl_audit, null);
+    const got = try handleSlashCommand(alloc, "/share", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, null, &out_fbs, ctl_audit.hooks, &ctl_audit, null, null);
     try std.testing.expectEqual(CmdRes.handled, got);
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.buffered(), "https://gist.example.com/123") != null);
 }
@@ -15791,7 +15869,33 @@ test "UX11: compaction uses provider summary and resets context after shrinking"
     try std.testing.expectEqual(@as(u64, 0), ui.panels.cum_tok);
     const ck = (try core.session.compact.loadCheckpoint(alloc, tmp.dir, "s")) orelse return error.TestUnexpectedResult;
     try std.testing.expect(ck.out_bytes < ck.in_bytes);
+    try std.testing.expectEqual(@as(i64, 0), ui.panels.compaction_until_ms);
+    try std.testing.expect(!ui.panels.compactionActive(core.time.milliTimestamp()));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "[session compacted]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "compaction") != null);
+    var saw_result = false;
+    for (ui.tr.blocks.items) |block| {
+        if (std.mem.indexOf(u8, block.buf.items, "context:") != null and
+            std.mem.indexOf(u8, block.buf.items, "original journal preserved") != null) saw_result = true;
+    }
+    try std.testing.expect(saw_result);
+}
+
+test "compaction progress clears indicator and restores state on failure" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var scripted = try provider_mock.ScriptedProvider.init(&.{});
+    defer scripted.deinit();
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.panels.run_state = .failed;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    defer out.deinit();
+    try std.testing.expectError(error.FileNotFound, compactWithProgress(alloc, tmp.dir, "missing", 0, &scripted.provider, "m", .{ .ui = &ui, .out = &out.writer }));
+    try std.testing.expectEqual(@as(i64, 0), ui.panels.compaction_until_ms);
+    try std.testing.expectEqual(tui_panels.RunState.failed, ui.panels.run_state);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "compaction") != null);
 }
 
 test "UX11: compaction failure is non-fatal" {

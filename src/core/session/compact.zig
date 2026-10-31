@@ -11,7 +11,6 @@ const prov_api = @import("../providers/api.zig");
 const summary_types = @import("summary.zig");
 const fs_secure = @import("../fs_secure.zig");
 const shared = @import("../tools/shared.zig");
-const log = std.log.scoped(.compact);
 const Dir = std.Io.Dir;
 const File = std.Io.File;
 
@@ -536,14 +535,10 @@ fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?File
         mod_set.deinit(alloc);
     }
 
-    var skipped: usize = 0;
     for (events) |ev| {
         const tc = switch (ev.data) {
             .tool_call => |tc| tc,
-            else => {
-                skipped += 1;
-                continue;
-            },
+            else => continue,
         };
         const p = try extractPath(alloc, tc.args) orelse continue;
         if (isToolKind(tc.name, &write_tools)) {
@@ -563,7 +558,6 @@ fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?File
             alloc.free(p);
         }
     }
-    if (skipped > 0) log.debug("extractFileOps: skipped {d} non-tool_call events", .{skipped});
 
     if (read_set.count() == 0 and mod_set.count() == 0) return null;
 
@@ -592,7 +586,6 @@ fn freeFileOps(alloc: std.mem.Allocator, ops: FileOps) void {
     alloc.free(ops.modified);
 }
 
-// .off: summarization is mechanical; thinking tokens waste output budget
 /// Format file operations as XML-style tags for compaction summaries.
 /// Returns null if no file operations found.
 pub fn formatFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?[]const u8 {
@@ -743,15 +736,14 @@ fn buildSummaryCall(
     msgs[0] = .{ .role = .system, .parts = parts[0..2] };
     msgs[1] = .{ .role = .user, .parts = parts[2..3] };
 
+    var opts = @import("../../app/args.zig").ThinkingLevel.off.forModel(model).toProviderOpts();
+    opts.max_out = fit_req.max_tokens;
     return .{
         .req = .{
             .model = model,
             .msgs = msgs,
             .tools = &.{},
-            .opts = .{
-                .max_out = fit_req.max_tokens,
-                .thinking = .off,
-            },
+            .opts = opts,
         },
         .msgs = msgs,
         .parts = parts,
@@ -1754,6 +1746,20 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
         \\[]u8
         \\  "outcome=fit within_budget=true token_estimate=true kept=2 dropped=0"
     ).expectEqual(meta_snap);
+}
+
+test "buildSummaryCall uses the lowest supported thinking level" {
+    const alloc = std.testing.allocator;
+    for ([_]struct { model: []const u8, effort: []const u8 }{
+        .{ .model = "gpt-6.1-sol", .effort = "low" },
+        .{ .model = "custom-model", .effort = "none" },
+        .{ .model = "claude-sonnet-4", .effort = "none" },
+    }) |case| {
+        const call = try buildSummaryCall(alloc, case.model, .{ .events_json = &.{"hello"} });
+        defer freeSummaryCall(alloc, call);
+        try std.testing.expectEqualStrings(case.effort, call.req.opts.reasoningEffort());
+        try std.testing.expectEqual(@as(?u32, 4096), call.req.opts.max_out);
+    }
 }
 
 test "buildSummaryCall rejects oversized input without dropping old context" {
