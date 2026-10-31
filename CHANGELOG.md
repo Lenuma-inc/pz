@@ -4,12 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-01
+
+### Added
+- MCP clients over stdio and Streamable HTTP, including JSON/SSE responses, session handling and custom HTTP headers.
+- MCP server configuration through `mcpServers`, automatic tool discovery and invocation alongside built-in tools.
+- MCP startup status in the TUI and the `/mcp` command for server status and tool inventories.
+
 ### Fixed
 - Select the lowest supported thinking level for session compaction instead of forcing unsupported thinking-off requests.
 - Remove compaction debug output that overwrote the TUI during file-operation extraction.
+- Keep the compaction spinner visible without blinking and stop it immediately when compaction finishes.
 
 ### Changed
 - Animate the compaction indicator while waiting for summaries and report context size, percentage reduction and record counts after compaction.
+
+### Tests
+- Added MCP integration coverage for tool calls, HTTP authentication failures, redirects, disabled and failed servers, and large tool inventories.
+- Added compaction regressions for supported thinking levels, reduction reporting, progress cleanup and spinner rendering.
 
 ## [0.3.0] - 2026-10-31
 
