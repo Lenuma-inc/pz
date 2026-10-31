@@ -127,6 +127,19 @@ pub fn build(b: *std.Build) void {
     const run_suite_tests = b.addRunArtifact(suite_tests);
     run_suite_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
 
+    const mcp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mcp_tests.zig"),
+            .link_libc = true,
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"MCP"},
+    });
+    mcp_tests.root_module.addImport("pz_io", io_mod);
+    configTestMod(mcp_tests.root_module, ohsnap_mod, zcheck_mod, options);
+    b.step("test-mcp", "Run focused MCP integration tests").dependOn(&b.addRunArtifact(mcp_tests).step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_suite_tests.step);

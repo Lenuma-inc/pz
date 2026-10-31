@@ -251,6 +251,8 @@ pub const Runtime = struct {
     tasks: todo.State = .{},
     entries: [16]tools.Entry = undefined,
     selected: [16]tools.Entry = undefined,
+    mcp: ?*@import("../mcp.zig").Manager = null,
+    combined: [17 + @import("../mcp.zig").max_tools]tools.Entry = undefined,
 
     const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
@@ -272,10 +274,32 @@ pub const Runtime = struct {
 
     pub fn registry(self: *Runtime) tools.Registry {
         self.rebuildEntries();
-        return tools.Registry.init(self.activeEntries());
+        const base = self.activeEntries();
+        const external = if (self.mcp != null and self.tool_mask != 0) self.mcp.?.entries.items else &.{};
+        @memcpy(self.combined[0..base.len], base);
+        @memcpy(self.combined[base.len..][0..external.len], external);
+        var len = base.len + external.len;
+        if (self.mcp != null and self.tool_mask != 0) {
+            self.combined[len] = .{
+                .name = "mcp",
+                .kind = .mcp,
+                .spec = .{ .kind = .mcp, .desc = "List configured MCP servers, connection status and available tools. Use op=list when asked which MCP servers or tools are available. Does not expose secrets or execute remote tools.", .params = &.{}, .schema_json = "{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"enum\":[\"list\"]}},\"required\":[\"op\"],\"additionalProperties\":false}", .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 2000, .destructive = false },
+                .dispatch = &self.dispatch,
+            };
+            len += 1;
+        }
+        return tools.Registry.init(self.combined[0..len]);
+    }
+
+    pub fn configureMcp(self: *Runtime, raw: []const u8) !void {
+        // External executables cannot inherit the verified sandbox policy.
+        if (self.sandbox_locked) return error.PolicyDenied;
+        std.debug.assert(self.mcp == null);
+        self.mcp = try @import("../mcp.zig").Manager.create(self.alloc, raw);
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.mcp) |m| m.destroy();
         self.skill_cache.deinit(self.alloc);
         self.tasks.deinit(self.alloc);
     }
@@ -589,7 +613,20 @@ pub const Runtime = struct {
             .github => github.run(self.alloc, self.max_bytes, self.egress, call),
             .swarm => self.runSwarm(call),
             .ffmpeg => ffmpeg.run(self.alloc, self.max_bytes, call),
+            .mcp => self.runMcpList(call), // Remote entries have their own dispatch context.
         };
+    }
+
+    pub fn mcpReport(self: *const Runtime) ![]u8 {
+        return @import("../mcp.zig").reportAlloc(self.alloc, self.mcp);
+    }
+
+    fn runMcpList(self: *Runtime, call: tools.Call) !tools.Result {
+        const parsed = try std.json.parseFromSlice(struct { op: enum { list } }, self.alloc, call.args.mcp.arguments, .{});
+        defer parsed.deinit();
+        const raw = try self.mcpReport();
+        defer self.alloc.free(raw);
+        return shared.buildSlicedResult(self.alloc, call.id, call.at_ms, tools.truncate.apply(raw, self.max_bytes));
     }
 
     fn runSwarm(self: *Runtime, call: tools.Call) !tools.Result {
@@ -1608,4 +1645,32 @@ test "canary: thread default strips bash and agent (Lean Mask.thread_default_str
         }
     }.prop, .{ .iterations = 10000 });
     _ = thread_default;
+}
+
+test "MCP external executables cannot bypass a verified sandbox policy" {
+    var rt = Runtime.init(.{ .alloc = std.testing.allocator, .sandbox_locked = true });
+    defer rt.deinit();
+    try std.testing.expectError(error.PolicyDenied, rt.configureMcp("{\"test\":{\"command\":\"/does-not-exist\"}}"));
+    try std.testing.expectEqual(@as(usize, 16), rt.registry().entries.len);
+}
+
+test "MCP agent inventory tool lists failed and disabled servers and respects tools none" {
+    const a = std.testing.allocator;
+    var rt = Runtime.init(.{ .alloc = a });
+    defer rt.deinit();
+    try rt.configureMcp("{\"linux\":{\"command\":\"not-started\",\"enabled\":false},\"broken\":{\"command\":\"/nonexistent-mcp-program\"}}");
+    const entry = rt.registry().byName("mcp").?;
+    try std.testing.expect(!entry.spec.destructive);
+    const Sink = struct {
+        sink: tools.Sink = .{ .vt = &tools.Sink.Bind(@This(), push).vt },
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink: Sink = .{};
+    const call: tools.Call = .{ .id = "inventory", .kind = .mcp, .args = .{ .mcp = .{ .name = "mcp", .arguments = "{\"op\":\"list\"}" } }, .src = .model, .at_ms = 0 };
+    const result = try entry.dispatch.run(call, &sink.sink);
+    defer rt.deinitResult(result);
+    try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "failed") != null);
+    rt.tool_mask = 0;
+    try std.testing.expectEqual(@as(usize, 0), rt.registry().entries.len);
 }

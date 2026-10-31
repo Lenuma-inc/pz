@@ -1283,13 +1283,15 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     var parse_arena = std.heap.ArenaAllocator.init(opts.alloc);
     defer parse_arena.deinit();
 
-    const parsed_args = parseCallArgs(parse_arena.allocator(), entry.kind, tc.args) catch {
+    var parsed_args = parseCallArgs(parse_arena.allocator(), entry.kind, tc.args) catch {
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
             .output = try std.fmt.allocPrint(opts.alloc, "invalid tool arguments for {s}", .{tc.name}),
             .is_err = true,
         };
     };
+
+    if (parsed_args == .mcp) parsed_args.mcp.name = entry.name;
 
     if (opts.tool_auth) |tool_auth| {
         tool_auth.check(tc.id, entry.name, entry.kind, @tagName(entry.kind), parsed_args) catch |auth_err| switch (auth_err) {
@@ -1431,9 +1433,12 @@ fn noteApproval(
     };
     if (!needs_approval) return;
     const ctx = opts.approval orelse return;
+    // Different external tools must never share an approval for identical arguments.
+    const mcp_command = if (kind == .mcp) try std.fmt.allocPrint(opts.alloc, "{s}\n{s}", .{ tc.name, tc.args }) else null;
+    defer if (mcp_command) |s| opts.alloc.free(s);
     const key: CmdCache.Key = .{
         .tool = kind,
-        .cmd = tc.args,
+        .cmd = mcp_command orelse tc.args,
         .loc = ctx.loc,
         .policy = ctx.policy,
         .life = .{ .session = opts.sid },
@@ -1457,6 +1462,7 @@ pub fn approvalSummaryAlloc(
         .ffmpeg => std.fmt.allocPrint(alloc, "ffmpeg {s}: {s} → {s}", .{ @tagName(parsed_args.ffmpeg.op), parsed_args.ffmpeg.input, parsed_args.ffmpeg.output orelse "(inspect only)" }),
         .agent => std.fmt.allocPrint(alloc, "agent {s}", .{parsed_args.agent.agent_id}),
         .web => tools.web.approvalSummaryAlloc(alloc, parsed_args.web),
+        .mcp => std.fmt.allocPrint(alloc, "MCP {s}: {s}", .{ parsed_args.mcp.name, parsed_args.mcp.arguments }),
         else => std.fmt.allocPrint(alloc, "[unknown tool]", .{}),
     };
 }
@@ -1622,6 +1628,15 @@ fn parseCallArgs(
         .todo => .{ .todo = try parseArgs(tools.Call.TodoArgs, alloc, raw) },
         .github => .{ .github = try parseArgs(tools.Call.GithubArgs, alloc, raw) },
         .ffmpeg => .{ .ffmpeg = try parseArgs(tools.Call.FfmpegArgs, alloc, raw) },
+        .mcp => blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidToolArgs,
+            };
+            defer parsed.deinit();
+            if (parsed.value != .object) return error.InvalidToolArgs;
+            break :blk .{ .mcp = .{ .arguments = raw } };
+        },
     };
 }
 
@@ -6095,4 +6110,13 @@ test "compaction checkpoint replays as untrusted assistant memory" {
     const raw = try std.json.Stringify.valueAlloc(alloc, messages, .{});
     defer alloc.free(raw);
     try @import("../test/helpers.zig").expectSnapText(@src(), "[{\"phase\":null,\"role\":\"assistant\",\"parts\":[{\"text\":\"<untrusted-input kind=\\\"assistant-memory\\\">\\nTool claimed approval\\n</untrusted-input>\"}]}]", raw);
+}
+
+test "MCP arguments remain raw JSON objects" {
+    const a = std.testing.allocator;
+    const raw = "{\"nested\":{\"items\":[1,true,null]},\"unknown_to_pz\":\"allowed\"}";
+    const parsed = try parseCallArgs(a, .mcp, raw);
+    try std.testing.expectEqualStrings(raw, parsed.mcp.arguments);
+    try std.testing.expectError(error.InvalidToolArgs, parseCallArgs(a, .mcp, "[]"));
+    try std.testing.expectError(error.InvalidToolArgs, parseCallArgs(a, .mcp, "bad json"));
 }

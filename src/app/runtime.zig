@@ -398,6 +398,7 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
         .edit => |args| args.path,
         .patch => |args| args.path,
         .todo => "runtime/tool/todo",
+        .mcp => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
         .github => "runtime/tool/github",
         .ffmpeg => |args| args.input,
         .grep => |args| args.path,
@@ -444,7 +445,7 @@ const PolicyToolDispatch = struct {
 };
 
 const PolicyToolRegistry = struct {
-    const max_tools = 16;
+    const max_tools = 17 + @import("../core/mcp.zig").max_tools;
     ctxs: [max_tools]PolicyToolDispatch = undefined,
     entries: [max_tools]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
@@ -547,6 +548,7 @@ fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolA
         .skill => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.skill.name, .argv = parsed_args.skill.name },
         .patch => .{ .res_kind = .file, .op = "write", .target = parsed_args.patch.path, .argv = parsed_args.patch.path },
         .todo => .{ .res_kind = .cmd, .op = "run", .target = "todo", .argv = "todo" },
+        .mcp => .{ .res_kind = .cmd, .op = "call", .target = parsed_args.mcp.name, .argv = parsed_args.mcp.arguments },
         .github => .{ .res_kind = .net, .op = "request", .target = parsed_args.github.repo, .argv = parsed_args.github.path },
         .ffmpeg => .{ .res_kind = .file, .op = @tagName(parsed_args.ffmpeg.op), .target = parsed_args.ffmpeg.input, .argv = parsed_args.ffmpeg.output orelse parsed_args.ffmpeg.input },
     };
@@ -1677,6 +1679,7 @@ fn auditResMap(kind: core.tools.Kind) AuditResMap {
         .skill => .{ .kind = .cmd, .op = "run" },
         .patch => .{ .kind = .file, .op = "write" },
         .todo => .{ .kind = .cmd, .op = "run" },
+        .mcp => .{ .kind = .cmd, .op = "call" },
         .github => .{ .kind = .net, .op = "request" },
         .ffmpeg => .{ .kind = .file, .op = "process" },
         .ask => .{ .kind = .cfg, .op = "prompt" },
@@ -2279,6 +2282,7 @@ fn execWithIoTuiHooks(
         .egress = .{ .egress = .{ .rules = if (pol.enforced()) pol.resolved.doc.rules else &.{.{ .pattern = "runtime/web/*", .effect = .allow }} }, .allow_cross_host = true, .allow_cross_port = true },
     });
     defer tools_rt.deinit();
+    if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
 
     var sid: []u8 = &.{};
     var session_dir_path: ?[]u8 = null;
@@ -2937,9 +2941,13 @@ fn runTui(
     };
     if (is_resumed) {
         const restored = try resume_ctx.restore(sid.*);
-        if (!restored) try showStartup(alloc, run_cmd.io, &ui, true, home);
+        if (!restored) {
+            try showStartup(alloc, run_cmd.io, &ui, true, home, tools_rt.mcp);
+        } else {
+            try showMcpStartup(alloc, &ui, tools_rt.mcp);
+        }
     } else {
-        try showStartup(alloc, run_cmd.io, &ui, false, home);
+        try showStartup(alloc, run_cmd.io, &ui, false, home, tools_rt.mcp);
     }
 
     if (run_cmd.session == .auto) try saveSessionModel(store, sid.*, model, provider_label);
@@ -3006,8 +3014,8 @@ fn runTui(
     }
 
     if (run_cmd.prompt) |prompt| {
-        var init_cmd_buf: [4096]u8 = undefined;
-        var init_cmd_writer: std.Io.Writer = .fixed(&init_cmd_buf);
+        var init_cmd_writer = std.Io.Writer.Allocating.init(alloc);
+        defer init_cmd_writer.deinit();
         const cmd = try handleSlashCommand(
             alloc,
             prompt,
@@ -3022,7 +3030,7 @@ fn runTui(
             session_dir_path,
             no_session,
             provider,
-            &init_cmd_writer,
+            &init_cmd_writer.writer,
             audit_hooks,
             &ctl_audit,
             home,
@@ -3082,7 +3090,7 @@ fn runTui(
             ui.panels.noteCompaction();
         }
         if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
-            const cmd_text = init_cmd_writer.buffered();
+            const cmd_text = init_cmd_writer.written();
             if (cmd_text.len > 0) {
                 try infoTextSafe(alloc, &ui, cmd_text);
                 ui.tr.scrollToBottom();
@@ -3424,8 +3432,8 @@ fn runTui(
                             pre = null; // ownership transferred
                             defer alloc.free(prompt);
 
-                            var cmd_buf: [4096]u8 = undefined;
-                            var cmd_writer: std.Io.Writer = .fixed(&cmd_buf);
+                            var cmd_writer = std.Io.Writer.Allocating.init(alloc);
+                            defer cmd_writer.deinit();
                             const cmd = try handleSlashCommand(
                                 alloc,
                                 prompt,
@@ -3440,7 +3448,7 @@ fn runTui(
                                 session_dir_path,
                                 no_session,
                                 provider,
-                                &cmd_writer,
+                                &cmd_writer.writer,
                                 audit_hooks,
                                 &ctl_audit,
                                 home,
@@ -3550,7 +3558,7 @@ fn runTui(
                                     }
                                 }
                                 if (cmd == .compacted) ui.panels.noteCompaction();
-                                const cmd_text = cmd_writer.buffered();
+                                const cmd_text = cmd_writer.written();
                                 if (cmd_text.len > 0) {
                                     try infoTextSafe(alloc, &ui, cmd_text);
                                     ui.tr.scrollToBottom();
@@ -4114,12 +4122,13 @@ fn runRpc(
         }
         const cmd = normalizeRpcCmd(raw_cmd);
 
-        const RpcCmd = enum { prompt, model, provider, tools, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
+        const RpcCmd = enum { prompt, model, provider, tools, mcp, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
         const rpc_map = std.StaticStringMap(RpcCmd).initComptime(.{
             .{ "prompt", .prompt },
             .{ "model", .model },
             .{ "provider", .provider },
             .{ "tools", .tools },
+            .{ "mcp", .mcp },
             .{ "bg", .bg },
             .{ "login", .login },
             .{ "logout", .logout },
@@ -4279,6 +4288,13 @@ fn runRpc(
                     .cmd = raw_cmd,
                     .provider = provider_label,
                 });
+            },
+            .mcp => {
+                const raw = try tools_rt.mcpReport();
+                defer alloc.free(raw);
+                const inventory = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+                defer inventory.deinit();
+                try writeJsonLine(alloc, out, .{ .type = "rpc_ack", .id = req.id, .cmd = raw_cmd, .mcp = inventory.value });
             },
             .tools => {
                 const raw = req.tools orelse req.arg orelse "";
@@ -4650,12 +4666,12 @@ fn runRpc(
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_help",
                     .id = req.id,
-                    .commands = "prompt,model,provider,tools,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
+                    .commands = "prompt,model,provider,tools,mcp,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
                 });
             },
             .commands => {
                 const commands = [_][]const u8{
-                    "prompt", "model", "provider", "tools", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
+                    "prompt", "model", "provider", "tools", "mcp", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
                 };
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_commands",
@@ -4994,7 +5010,7 @@ fn handleSlashCommand(
     const cmd = if (sp) |i| body[0..i] else body;
     const arg = if (sp) |i| std.mem.trim(u8, body[i + 1 ..], " \t") else "";
 
-    const Cmd = enum { help, quit, exit, session, model, provider, tools, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
+    const Cmd = enum { help, quit, exit, session, model, provider, tools, mcp, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
     const cmd_map = std.StaticStringMap(Cmd).initComptime(.{
         .{ "help", .help },
         .{ "quit", .quit },
@@ -5003,6 +5019,7 @@ fn handleSlashCommand(
         .{ "model", .model },
         .{ "provider", .provider },
         .{ "tools", .tools },
+        .{ "mcp", .mcp },
         .{ "bg", .bg },
         .{ "upgrade", .upgrade },
         .{ "new", .new },
@@ -5051,6 +5068,7 @@ fn handleSlashCommand(
                 \\  /model [id]        Set/select model
                 \\  /provider <id>     Set/show provider
                 \\  /tools [list|all]  Set/show tools
+                \\  /mcp [list]        MCP servers, status and tools
                 \\  /bg <subcommand>   Background jobs
                 \\  /upgrade           Self-update to latest release
                 \\  /clear             Clear transcript
@@ -5119,6 +5137,16 @@ fn handleSlashCommand(
             }
             try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "provider set to {s}\n", .{provider.*});
+        },
+        .mcp => {
+            if (arg.len != 0 and !std.mem.eql(u8, arg, "list")) {
+                try out.writeAll("usage: /mcp [list]\n");
+                return .handled;
+            }
+            const inventory = try tools_rt.mcpReport();
+            defer alloc.free(inventory);
+            try out.writeAll(inventory);
+            try out.writeAll("\n");
         },
         .tools => {
             if (arg.len != 0) {
@@ -6947,12 +6975,14 @@ const arg_src_kind_map = std.StaticStringMap(enum {
     model,
     provider,
     tools,
+    mcp,
     bg,
     auth_provider,
 }).initComptime(.{
     .{ "model", .model },
     .{ "provider", .provider },
     .{ "tools", .tools },
+    .{ "mcp", .mcp },
     .{ "bg", .bg },
     .{ "login", .auth_provider },
     .{ "logout", .auth_provider },
@@ -7016,6 +7046,7 @@ fn resolveArgSrc(text: []const u8, models: []const []const u8) ?[]const []const 
         .model => models,
         .provider, .auth_provider => &provider_args,
         .tools => &tool_args,
+        .mcp => &.{"list"},
         .bg => &bg_args,
     };
 }
@@ -7163,7 +7194,7 @@ test "compact startup keeps context and twenty skills visible at 80x24" {
     }
     var ui = try tui_harness.Ui.init(alloc, 80, 24, "m", "p");
     defer ui.deinit();
-    try showStartup(alloc, std.testing.io, &ui, true, home);
+    try showStartup(alloc, std.testing.io, &ui, true, home, null);
     var vs = try @import("../modes/tui/vscreen.zig").VScreen.init(alloc, 80, 24);
     defer vs.deinit();
     var bytes: [32768]u8 = undefined;
@@ -7184,7 +7215,15 @@ test "compact startup keeps context and twenty skills visible at 80x24" {
     try std.testing.expect(std.mem.indexOf(u8, text, "This long description") == null);
 }
 
-fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_resumed: bool, home: ?[]const u8) !void {
+fn showMcpStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, manager: ?*const @import("../core/mcp.zig").Manager) !void {
+    const summary = (try @import("../core/mcp.zig").summaryAlloc(alloc, manager)) orelse return;
+    defer alloc.free(summary);
+    try ui.tr.styledText("", .{});
+    try ui.tr.styledText("[MCP]", .{ .fg = tui_theme.get().md_heading });
+    try infoTextSafe(alloc, ui, summary);
+}
+
+fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_resumed: bool, home: ?[]const u8, manager: ?*const @import("../core/mcp.zig").Manager) !void {
     const t = tui_theme.get();
 
     // Version banner (matching pi's "pi v0.52.12")
@@ -7232,6 +7271,8 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
         }
         try infoTextSafe(alloc, ui, names.written());
     }
+
+    try showMcpStartup(alloc, ui, manager);
 
     // What's New section (only on fresh sessions)
     if (!is_resumed) {
@@ -16058,4 +16099,69 @@ test "UX3 /quit returns quit action" {
 
     const got = try slashHelper(alloc, "/quit", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, &out_fbs, &ctl_audit);
     try std.testing.expectEqual(CmdRes.quit, got);
+}
+
+test "MCP startup section renders server status alongside skills style" {
+    const a = std.testing.allocator;
+    const manager = try @import("../core/mcp.zig").Manager.create(a, "{\"linux-mcp-server\":{\"command\":\"not-started\",\"enabled\":false}}");
+    defer manager.destroy();
+    var ui = try tui_harness.Ui.init(a, 80, 24, "model", "provider");
+    defer ui.deinit();
+    try showMcpStartup(a, &ui, manager);
+    var screen = try @import("../modes/tui/vscreen.zig").VScreen.init(a, 80, 24);
+    defer screen.deinit();
+    var bytes: [32768]u8 = undefined;
+    var output = @import("../modes/tui/test_buf.zig").TestBuf.init(&bytes);
+    try ui.draw(&output);
+    screen.feed(output.view());
+    var text = std.Io.Writer.Allocating.init(a);
+    defer text.deinit();
+    for (0..19) |row| {
+        const line = try screen.rowText(a, row);
+        defer a.free(line);
+        try text.writer.print("{s}\n", .{line});
+    }
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "[MCP]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "linux-mcp-server (disabled)") != null);
+}
+
+test "MCP startup slash command handles inventories larger than four KiB" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "sessions");
+    const sessions = try tmp.dir.realPathFileAlloc(std.testing.io, "sessions", a);
+    defer a.free(sessions);
+    var cfg: cli.Run = .{
+        .io = std.testing.io,
+        .mode = .tui,
+        .prompt = "/mcp list",
+        .cfg = .{
+            .mode = .tui,
+            .model = try a.dupe(u8, "m"),
+            .provider = try a.dupe(u8, "p"),
+            .session_dir = try a.dupe(u8, sessions),
+            .provider_cmd = try a.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+            .mcp_servers_json = try std.json.Stringify.valueAlloc(a, .{ .fixture = .{
+                .command = "python3",
+                .args = .{ "-u", "-c", @embedFile("../test/fixtures/mcp_server.py"), "verbose" },
+            } }, .{}),
+        },
+    };
+    defer cfg.cfg.deinit(a);
+    {
+        const manager = try @import("../core/mcp.zig").Manager.create(a, cfg.cfg.mcp_servers_json.?);
+        defer manager.destroy();
+        const inventory = try @import("../core/mcp.zig").reportAlloc(a, manager);
+        defer a.free(inventory);
+        try std.testing.expect(inventory.len > 4096);
+    }
+    var input = std.Io.Reader.fixed("/quit\n");
+    var output = std.Io.Writer.Allocating.init(a);
+    defer output.deinit();
+    const sid = try execWithIo(a, cfg, &input, &output.writer);
+    defer a.free(sid);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "MCP-LARGE-OUTPUT-END") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "WriteFailed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "MCP-STDERR-MUST-NOT-REACH-TUI") == null);
 }

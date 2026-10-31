@@ -33,6 +33,7 @@ pub const Kind = enum {
     github,
     swarm,
     ffmpeg,
+    mcp,
 };
 
 pub const Tool = struct {
@@ -125,6 +126,7 @@ pub const Call = struct {
         github: GithubArgs,
         swarm: @import("swarm.zig").Args,
         ffmpeg: FfmpegArgs,
+        mcp: struct { name: []const u8 = "", arguments: []const u8 },
     };
 
     pub const ReadArgs = struct {

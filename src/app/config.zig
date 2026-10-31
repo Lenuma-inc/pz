@@ -93,6 +93,7 @@ pub const Config = struct {
     policy_lock: core.policy.Lock = .{},
     audit_overflow: core.policy.AuditOverflow = .drop_oldest,
     syslog_fwd: ?SyslogFwd = null,
+    mcp_servers_json: ?[]u8 = null,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         if (self.syslog_fwd) |*fwd| fwd.deinit(alloc);
@@ -234,6 +235,7 @@ const SettingsCfg = struct {
     provider_cmd: ?[]const u8 = null,
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
+    mcpServers: ?std.json.Value = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
     syslog_host: ?[]const u8 = null,
@@ -329,6 +331,7 @@ pub fn discover(
     if (!out.policy_lock.cfg) {
         if (try loadFile(alloc, io, dir, parsed.cfg)) |file_cfg| {
             defer file_cfg.deinit();
+            if (file_cfg.value.mcpServers) |value| try setMcp(alloc, &out, value);
             try applyRawCfg(
                 alloc,
                 &out,
@@ -430,6 +433,7 @@ const FileCfg = struct {
     provider_cmd: ?[]const u8 = null,
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
+    mcpServers: ?std.json.Value = null,
 };
 
 fn loadFile(
@@ -497,7 +501,15 @@ fn hasGlobalSettings(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8) !b
     return true;
 }
 
+fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
+    try @import("../core/mcp.zig").validate(value);
+    const raw = try std.json.Stringify.valueAlloc(alloc, value, .{});
+    if (cfg.mcp_servers_json) |old| alloc.free(old);
+    cfg.mcp_servers_json = raw;
+}
+
 fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) !void {
+    if (pi.mcpServers) |value| try setMcp(alloc, cfg, value);
     try applyRawCfg(
         alloc,
         cfg,
@@ -1086,4 +1098,23 @@ test "PzState works with null HOME (env isolation)" {
 fn testPolicyKeyPair() !core.signing.KeyPair {
     const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     return core.signing.KeyPair.fromSeed(seed);
+}
+
+test "MCP settings load from project config and no-config disables them" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeAutoCfg(tmp.dir, "{\"mcpServers\":{\"linux\":{\"command\":\"linux-mcp-server\",\"enabled\":false}}}");
+    var cfg = try discover(std.testing.allocator, std.testing.io, tmp.dir, try args.parse(&.{}), .{});
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, cfg.mcp_servers_json.?, "linux-mcp-server") != null);
+    var off = try discover(std.testing.allocator, std.testing.io, tmp.dir, try args.parse(&.{"--no-config"}), .{});
+    defer off.deinit(std.testing.allocator);
+    try std.testing.expect(off.mcp_servers_json == null);
+}
+
+test "MCP configuration rejects invalid servers before launching processes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeAutoCfg(tmp.dir, "{\"mcpServers\":{\"linux\":{\"command\":\"\"}}}");
+    try std.testing.expectError(error.InvalidMcpConfig, discover(std.testing.allocator, std.testing.io, tmp.dir, try args.parse(&.{}), .{}));
 }
