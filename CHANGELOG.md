@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-31
+
+### Added
+- Explicit `--yolo` execution without approval prompts or bash sandboxing; enforced signed policy rejects this mode, and project-context trust remains temporary.
+
+### Fixed
+- Preserve opaque OpenAI reasoning items across tool calls and session replay.
+- Pass the active model, provider and thinking level to child agents and newly spawned swarm workers, including settings changed in the TUI.
+- Allow sandbox startup when `.codex` or another protected configuration path is a regular file; keep that file read-only.
+- Enable interactive approval requests for tasks supplied at TUI startup with `-p`.
+- Paginate GitHub directory and tree output instead of discarding oversized listings.
+
+### Changed
+- Strengthen research persistence and recovery instructions, including inspecting embedded data and scripts when HTML lacks the requested content.
+- Clarify tool failures and bound remote repository research.
+
 ## [0.2.0] - 2026-10-31
 
 ### Added

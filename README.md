@@ -125,7 +125,7 @@ pz print "explain this codebase"
 echo '{"prompt":"hello"}' | pz json
 
 # Run without approval prompts (bash has your filesystem and network access)
-pz --yolo print "Investigate this repository"
+pz print --yolo "Investigate this repository"
 
 # Choose a supported reasoning effort
 pz --thinking low
