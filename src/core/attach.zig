@@ -22,6 +22,7 @@ pub const Paths = struct {
         while (self.pos < self.text.len) {
             while (self.pos < self.text.len and std.ascii.isWhitespace(self.text[self.pos])) self.pos += 1;
             if (self.pos == self.text.len) return null;
+            const start = self.pos;
             var len: usize = 0;
             var quote: ?u8 = null;
             var quoted_len: ?usize = null;
@@ -52,6 +53,13 @@ pub const Paths = struct {
             var path: []const u8 = self.buf[0..len];
             if (!literal) path = std.mem.trimEnd(u8, path, ",;:!?)]}");
             const uri = std.mem.startsWith(u8, path, "file:///");
+            // Paths inside pasted code are context; multiline drops use one path per line.
+            if (!uri and !std.mem.startsWith(u8, path, "@") and std.mem.indexOfAny(u8, self.text, "\r\n") != null) {
+                const line_start = if (std.mem.lastIndexOfAny(u8, self.text[0..start], "\r\n")) |i| i + 1 else 0;
+                const line_end = if (std.mem.indexOfAny(u8, self.text[self.pos..], "\r\n")) |i| self.pos + i else self.text.len;
+                if (std.mem.trim(u8, self.text[line_start..start], " \t").len != 0 or
+                    std.mem.trim(u8, self.text[self.pos..line_end], " \t").len != 0) continue;
+            }
             // A quoted path followed by prose punctuation (e.g. a traceback) is context.
             if (!uri and !std.mem.startsWith(u8, path, "@")) {
                 if (quoted_len) |end| {
@@ -222,6 +230,22 @@ test "attachment paths handle quoted, escaped, URI and multiple files" {
     try std.testing.expect(!isPrompt("File \"/tmp/settings_dialog.py\", line 1839, in eventFilter"));
     var invalid = Paths{ .text = "file:///tmp/x%00.png" };
     try std.testing.expectError(error.InvalidAttachmentPath, invalid.next());
+}
+
+test "attachment paths ignore pasted shell code and keep multiline file drops" {
+    try std.testing.expect(!isPrompt(
+        "#!/bin/sh\n" ++
+            "find \"opt/$PRODUCT/bin\" -type f > \"$REPO/elf-files\" || fatal\n" ++
+            "cat > usr/bin/$PRODUCT <<EOF\n" ++
+            "#!/bin/sh\n" ++
+            "exec /opt/$PRODUCT/bin/kwi \"\\$@\"\n" ++
+            "EOF\ncp /tmp/pz-missing-source.txt /usr/share/icons/ убери это",
+    ));
+    var paths = Paths{ .text = "Review these files:\n'/tmp/first file.txt'\n/tmp/second.png\nAlso read @/tmp/third.txt" };
+    for ([_][]const u8{ "/tmp/first file.txt", "/tmp/second.png", "/tmp/third.txt" }) |expected| {
+        try std.testing.expectEqualStrings(expected, (try paths.next()).?);
+    }
+    try std.testing.expect(try paths.next() == null);
 }
 
 test "attachment paths skip directory context and preserve explicit directory attachments" {

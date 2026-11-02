@@ -162,7 +162,9 @@ MIT
 ## Attachments and clipboard
 
 Drop local files into the prompt or paste their paths. Quoted paths, escaped
-spaces, `file:///` URLs, `~/`, `./`, and multiple files are supported. Ctrl+V
+spaces, `file:///` URLs, `~/`, `./`, and multiple files are supported. In multiline
+prompts, put each path on its own line or use `@path` / `file:///` explicitly;
+paths embedded in pasted code remain text. Ctrl+V
 reads images or text from the clipboard using `wl-paste` on Wayland, `xclip`
 on X11, or `osascript` on macOS. Pasted images enter the editor as attachments;
 press Enter to send them. Their private temporary files remain available for
