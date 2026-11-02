@@ -218,7 +218,9 @@ pub const Ui = struct {
             const row_start = buf.items.len;
             var x = x0;
             while (x <= x1) : (x += 1) {
-                const cp = self.frm.cells[y * self.frm.w + x].cp;
+                const cell = self.frm.cells[y * self.frm.w + x];
+                if (!cell.copyable) continue;
+                const cp = cell.cp;
                 if (cp == frame.Frame.wide_pad) continue;
                 var enc: [4]u8 = undefined;
                 const n = try std.unicode.utf8Encode(cp, &enc);
@@ -936,6 +938,21 @@ test "harness drag selects and extracts visible transcript text" {
     try ui.draw(&out);
     const selected_cell = try ui.frm.cell(pos.x, pos.y);
     try std.testing.expect(frame.Color.eql(selected_cell.style.bg, theme.get().sel_bg));
+}
+
+test "harness selection excludes scrollbar and preserves UTF-8 and line breaks" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+    try ui.onProvider(.{ .text = "one\ntwo\nthree\nПривет ░█\nqml6(org.kde.kwi)\n/opt/kwi/bin/kwi" });
+    var raw: [8192]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try ui.draw(&out);
+    ui.selection_start = .{ .x = 1, .y = 0, .btn = 0 };
+    ui.selection_end = .{ .x = ui.frm.w - 1, .y = ui.transcript_h - 1, .btn = 0 };
+    ui.selection_ready = true;
+    const selected = (try ui.takeSelectedText()).?;
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("Привет ░█\n qml6(org.kde.kwi)\n /opt/kwi/bin/kwi", selected);
 }
 
 test "harness submit resets scroll" {

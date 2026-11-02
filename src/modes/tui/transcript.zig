@@ -581,6 +581,7 @@ pub const Transcript = struct {
             const cp: u21 = if (is_thumb) 0x2588 else 0x2591;
             const st = if (is_thumb) bar_st else track_st;
             try frm.set(bar_x, rect.y + sy, cp, st);
+            frm.cells[(rect.y + sy) * frm.w + bar_x].copyable = false;
         }
     }
 

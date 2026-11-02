@@ -7386,9 +7386,14 @@ fn pipeToCmd(alloc: std.mem.Allocator, cmd: []const u8, text: []const u8, pol: *
     _ = alloc;
     const base = std.fs.path.basename(cmd);
     if (!pol.allowsCmdKind(base, null, "clipboard")) return false;
-    const argv = [_][]const u8{cmd};
+    const argv: []const []const u8 = if (std.mem.eql(u8, base, "xclip"))
+        &.{ cmd, "-selection", "clipboard", "-in" }
+    else if (std.mem.eql(u8, base, "xsel"))
+        &.{ cmd, "--clipboard", "--input" }
+    else
+        &.{cmd};
     var child = std.process.spawn(sys.io, .{
-        .argv = argv[0..],
+        .argv = argv,
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .ignore,

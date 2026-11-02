@@ -79,6 +79,7 @@ pub const Rect = struct {
 pub const Cell = struct {
     cp: u21 = ' ',
     style: Style = .{},
+    copyable: bool = true,
 
     pub fn eql(a: Cell, b: Cell) bool {
         return a.cp == b.cp and Style.eql(a.style, b.style);
