@@ -20,11 +20,13 @@ pub const Review = struct {
         try appendRow(alloc, &rows, "Deny");
         try appendRow(alloc, &rows, action);
         try appendPreview(alloc, &rows, path);
-        try appendRow(alloc, &rows, "--- Contents (quoted; controls escaped) ---");
+        try appendRow(alloc, &rows, "--- Contents (controls escaped) ---");
+        const markdown_start = rows.items.len;
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| try appendPreview(alloc, &rows, line);
         var ov = overlay.Overlay.initDyn(try rows.toOwnedSlice(alloc), title, .session);
-        ov.hint = "Up/Down review; Enter chooses; Esc denies";
+        ov.markdown_start = markdown_start;
+        ov.hint = "Wheel/Up/Down review; Enter chooses; Esc denies";
         return .{ .ov = ov };
     }
 
@@ -48,6 +50,16 @@ pub const Review = struct {
         }
         return null;
     }
+
+    pub fn onMouse(self: *Review, event: @import("mouse.zig").Event) void {
+        const last = self.ov.dyn_items.?.len - 1;
+        switch (event) {
+            .scroll_up => self.ov.sel -|= 3,
+            .scroll_down => self.ov.sel = @min(last, self.ov.sel +| 3),
+            else => return,
+        }
+        self.ov.fixScroll();
+    }
 };
 
 pub fn run(alloc: std.mem.Allocator, ui: *@import("harness.zig").Ui, out: *std.Io.Writer, reader: *@import("input.zig").Reader, path: []const u8, content: []const u8, title: []const u8, action: []const u8) !bool {
@@ -60,6 +72,7 @@ pub fn run(alloc: std.mem.Allocator, ui: *@import("harness.zig").Ui, out: *std.I
         try ui.draw(out);
         switch (reader.next()) {
             .key => |key| if (view.onKey(key)) |allowed| return allowed,
+            .mouse => |event| view.onMouse(event),
             .err => return error.ApprovalRequired,
             else => {}, // pasted text and notifications cannot grant approval
         }
@@ -77,7 +90,8 @@ fn appendPreview(alloc: std.mem.Allocator, rows: *std.ArrayList([]u8), raw: []co
     defer if (safe.owned) |owned| alloc.free(owned);
     const quoted = try std.json.Stringify.valueAlloc(alloc, safe.text, .{});
     defer alloc.free(quoted);
-    var rest: []const u8 = quoted;
+    var rest: []const u8 = quoted[1 .. quoted.len - 1];
+    if (rest.len == 0) try appendRow(alloc, rows, "");
     while (rest.len > 0) {
         var n = @min(rest.len, 56);
         while (n < rest.len and rest[n] & 0xc0 == 0x80) n -= 1;
@@ -111,8 +125,8 @@ test "context review defaults to deny and previews escaped instructions" {
     }
     const snap = try std.fmt.allocPrint(alloc, "default={?} path={} content={} controls_escaped={} rendered={}", .{
         review.onKey(.enter),
-        std.mem.eql(u8, review.ov.dyn_items.?[2], "\"/Downloads/AGENTS.md\""),
-        std.mem.eql(u8, review.ov.dyn_items.?[4], "\"Change config\""),
+        std.mem.eql(u8, review.ov.dyn_items.?[2], "/Downloads/AGENTS.md"),
+        std.mem.eql(u8, review.ov.dyn_items.?[4], "Change config"),
         std.mem.indexOf(u8, review.ov.dyn_items.?[5], "\\u001b") != null and std.mem.indexOfScalar(u8, review.ov.dyn_items.?[5], 27) == null,
         rendered_title and rendered_content,
     });
@@ -124,4 +138,55 @@ test "context review defaults to deny and previews escaped instructions" {
     _ = review.onKey(.down);
     try std.testing.expect(review.onKey(.enter).?);
     try std.testing.expect(!review.onKey(.esc).?);
+}
+
+test "context review renders markdown without quotes or markup" {
+    const alloc = std.testing.allocator;
+    var review = try Review.init(alloc, "/project/AGENTS.md", "# Guidelines\n\n**Language:** Python");
+    defer review.deinit(alloc);
+    var frm = try @import("frame.zig").Frame.init(alloc, 100, 30);
+    defer frm.deinit(alloc);
+    try review.ov.render(&frm);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(alloc);
+    for (frm.cells) |cell| {
+        var bytes: [4]u8 = undefined;
+        const n = try std.unicode.utf8Encode(cell.cp, &bytes);
+        try text.appendSlice(alloc, bytes[0..n]);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "Guidelines") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "Language:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "# Guidelines") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "**Language:") == null);
+}
+
+test "context review wheel reaches end of a 900 line file without wrapping" {
+    const alloc = std.testing.allocator;
+    const content = try alloc.alloc(u8, 900 * 5);
+    defer alloc.free(content);
+    for (0..900) |i| @memcpy(content[i * 5 ..][0..5], "line\n");
+    var review = try Review.init(alloc, "/project/AGENTS.md", content);
+    defer review.deinit(alloc);
+    review.onMouse(.scroll_up);
+    try std.testing.expectEqual(@as(usize, 0), review.ov.sel);
+    for (0..400) |_| review.onMouse(.scroll_down);
+    try std.testing.expectEqual(review.ov.dyn_items.?.len - 1, review.ov.sel);
+    try std.testing.expect(review.ov.scroll > 890);
+    try std.testing.expect(review.onKey(.enter) == null);
+    review.onMouse(.scroll_up);
+    try std.testing.expectEqual(review.ov.dyn_items.?.len - 4, review.ov.sel);
+    try std.testing.expect(!review.onKey(.esc).?);
+}
+
+test "context review scroll renders multilingual code blocks" {
+    const alloc = std.testing.allocator;
+    const content = "# Guidelines\n```python\nПривет → 世界 😀\n```\n```json\nПривет → 世界 😀\n```\n" ** 100;
+    var review = try Review.init(alloc, "/project/AGENTS.md", content);
+    defer review.deinit(alloc);
+    var frm = try @import("frame.zig").Frame.init(alloc, 160, 45);
+    defer frm.deinit(alloc);
+    for (0..review.ov.dyn_items.?.len) |_| {
+        try review.ov.render(&frm);
+        review.onMouse(.scroll_down);
+    }
 }

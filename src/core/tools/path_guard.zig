@@ -110,7 +110,11 @@ pub fn openDir(path: []const u8, opts: Dir.OpenOptions) !Dir {
 }
 
 pub fn openFile(path: []const u8, flags: Dir.OpenFileOptions) !File {
-    const rel = try relPath(path, flags.mode != .read_only);
+    return openFileApproved(path, flags, false);
+}
+
+pub fn openFileApproved(path: []const u8, flags: Dir.OpenFileOptions, approved: bool) !File {
+    const rel = try relPath(path, flags.mode != .read_only and !(approved and @import("../agent_config.zig").isPath(path)));
     if (rel.len == 0) return error.FileNotFound;
 
     var parent = try openParentDir(rel);
@@ -140,7 +144,11 @@ pub fn createFileInDir(dir: Dir, name: []const u8, flags: Dir.CreateFileOptions)
 }
 
 pub fn createFile(path: []const u8, flags: Dir.CreateFileOptions) !File {
-    const rel = try relPath(path, true);
+    return createFileApproved(path, flags, false);
+}
+
+pub fn createFileApproved(path: []const u8, flags: Dir.CreateFileOptions, approved: bool) !File {
+    const rel = try relPath(path, !(approved and @import("../agent_config.zig").isPath(path)));
     if (rel.len == 0) return error.FileNotFound;
 
     var parent = try openParentDir(rel);
@@ -706,4 +714,30 @@ test "createFile denies replaced leaf before truncation" {
     const now = try tmp.dir.readFileAlloc(std.testing.io, "victim.txt", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(now);
     try std.testing.expectEqualStrings("swap\n", now);
+}
+
+test "approved config writes outside workspace keep ordinary paths confined" {
+    if (native_os == .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(sys.io, "workspace");
+    try tmp.dir.createDirPath(sys.io, ".pz");
+    const config = try tmp.dir.realPathFileAlloc(sys.io, ".pz", alloc);
+    defer alloc.free(config);
+    const path = try std.fs.path.join(alloc, &.{ config, "settings.json" });
+    defer alloc.free(path);
+    var workspace = try tmp.dir.openDir(sys.io, "workspace", .{});
+    defer workspace.close(sys.io);
+    var cwd = try CwdGuard.enter(workspace);
+    defer cwd.deinit();
+    try std.testing.expectError(error.AccessDenied, createFile(path, .{}));
+    var file = try createFileApproved(path, .{}, true);
+    file.close(sys.io);
+    try std.testing.expectError(error.AccessDenied, openFile(path, .{ .mode = .write_only }));
+    file = try openFileApproved(path, .{ .mode = .write_only }, true);
+    file.close(sys.io);
+    const ordinary = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(config).?, "ordinary" });
+    defer alloc.free(ordinary);
+    try std.testing.expectError(error.AccessDenied, createFileApproved(ordinary, .{}, true));
 }

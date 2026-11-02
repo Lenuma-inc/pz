@@ -316,8 +316,10 @@ fn tokenizeLang(line: []const u8, buf: []Token, comptime lang: Lang) []const Tok
                 break :sw .{ .start = i - 1, .end = i, .kind = .punct };
             },
             else => {
+                const start = i;
                 i += 1;
-                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+                while (i < line.len and line[i] & 0xc0 == 0x80) : (i += 1) {}
+                break :sw .{ .start = start, .end = i, .kind = .text };
             },
         };
         buf[n] = tok;
@@ -378,8 +380,10 @@ fn tokenizeJson(line: []const u8, buf: []Token) []const Token {
                 break :sw .{ .start = i - 1, .end = i, .kind = .punct };
             },
             else => {
+                const start = i;
                 i += 1;
-                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+                while (i < line.len and line[i] & 0xc0 == 0x80) : (i += 1) {}
+                break :sw .{ .start = start, .end = i, .kind = .text };
             },
         };
         buf[n] = tok;
@@ -873,4 +877,19 @@ test "json: negative number and null" {
         \\10|keyword|20..24|"null"
         \\11|punct|24..25|"}""
     , line, toks);
+}
+
+test "syntax tokens preserve UTF-8 boundaries in every language" {
+    const line = "Привет → 世界 😀";
+    inline for (std.meta.tags(Lang)) |lang| {
+        var buf: [128]Token = undefined;
+        const tokens = tokenize(line, lang, &buf);
+        var end: usize = 0;
+        for (tokens) |token| {
+            try std.testing.expectEqual(end, token.start);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(line[token.start..token.end]));
+            end = token.end;
+        }
+        try std.testing.expectEqual(line.len, end);
+    }
 }

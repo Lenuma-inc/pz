@@ -24,6 +24,7 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call, sink: *
     defer alloc.free(updated);
     if (old.len == 0) {
         return write.Handler.init(.{ .alloc = alloc, .max_bytes = max_bytes, .now_ms = call.at_ms }).run(.{
+            .config_approved = call.config_approved,
             .id = call.id,
             .kind = .write,
             .args = .{ .write = .{ .path = args.path, .text = updated } },
@@ -32,6 +33,7 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, call: tools.Call, sink: *
         }, sink);
     }
     return edit.Handler.init(.{ .alloc = alloc, .max_bytes = max_bytes, .now_ms = call.at_ms }).run(.{
+        .config_approved = call.config_approved,
         .id = call.id,
         .kind = .edit,
         .args = .{ .edit = .{ .path = args.path, .old = old, .new = updated } },

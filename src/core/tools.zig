@@ -95,6 +95,7 @@ pub const CancelSrc = struct {
 };
 
 pub const Call = struct {
+    config_approved: bool = false,
     id: []const u8,
     kind: Kind,
     args: Args,

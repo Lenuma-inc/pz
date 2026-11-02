@@ -682,7 +682,7 @@ pub const Runtime = struct {
         if (std.mem.trim(u8, reason, " \t\r\n").len == 0 or args.cmd.len == 0) return error.InvalidArgs;
         if (call.cancel) |cancel| if (cancel.isCanceled()) return error.ApprovalDenied;
         const hook = self.ask_hook orelse return error.ApprovalRequired;
-        const details = try std.json.Stringify.valueAlloc(self.alloc, args, .{});
+        const details = try std.json.Stringify.valueAlloc(self.alloc, args, .{ .whitespace = .indent_2 });
         defer self.alloc.free(details);
         const question = try std.fmt.allocPrint(self.alloc, "{s}\nRun outside the sandbox with your filesystem and network access?\n{s}", .{ reason, details });
         defer self.alloc.free(question);
@@ -1012,6 +1012,7 @@ test "bash escalation requires an explicit matching interactive grant" {
             const q = args.questions[0];
             try std.testing.expect(!q.allow_other);
             try std.testing.expect(std.mem.indexOf(u8, q.review.?, "printf approved") != null);
+            try std.testing.expect(std.mem.indexOf(u8, q.review.?, "\n  \"cmd\":") != null);
             try std.testing.expectEqualStrings("Approve once", q.options[0].label);
             return std.testing.allocator.dupe(u8, self.raw);
         }

@@ -1331,7 +1331,14 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     else
         null;
 
+    const config_approved = switch (entry.kind) {
+        .write => agent_config.isPath(parsed_args.write.path),
+        .edit => agent_config.isPath(parsed_args.edit.path),
+        .patch => agent_config.isPath(parsed_args.patch.path),
+        else => false,
+    };
     const call: tools.Call = .{
+        .config_approved = config_approved and opts.approver != null,
         .id = tc.id,
         .kind = entry.kind,
         .args = parsed_args,
@@ -1404,7 +1411,6 @@ fn noteApproval(
     tc: providers.ToolCall,
     parsed_args: tools.Call.Args,
 ) !void {
-    if (opts.auto_approve and opts.approval == null) return;
     const config_path: ?[]const u8 = switch (kind) {
         .write => parsed_args.write.path,
         .edit => parsed_args.edit.path,
@@ -1427,6 +1433,7 @@ fn noteApproval(
             return;
         }
     }
+    if (opts.auto_approve and opts.approval == null) return;
     const needs_approval = switch (kind) {
         .web => tools.web.requiresEscalationApproval(parsed_args.web),
         else => destructive,
@@ -6082,8 +6089,8 @@ test "agent config changes require fresh approval without policy" {
     // noteApproval must not access provider, store, registry or mode.
     var opts = Opts{ .alloc = a, .sid = "config", .prompt = "", .model = "m", .provider = undefined, .store = undefined, .reg = undefined, .mode = undefined };
     const cases = [_]struct { kind: tools.Kind, args: tools.Call.Args }{
-        .{ .kind = .write, .args = .{ .write = .{ .path = ".claude/settings.json", .text = "new" } } },
-        .{ .kind = .edit, .args = .{ .edit = .{ .path = "/home/user/.codex/config.toml", .old = "old", .new = "new" } } },
+        .{ .kind = .write, .args = .{ .write = .{ .path = ".pz/settings.json", .text = "new" } } },
+        .{ .kind = .edit, .args = .{ .edit = .{ .path = "/home/user/.pz/settings.json", .old = "old", .new = "new" } } },
         .{ .kind = .patch, .args = .{ .patch = .{ .path = "./.pz/settings.json", .patch = "patch" } } },
     };
     for (cases) |case| {

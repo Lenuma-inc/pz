@@ -54,9 +54,9 @@ pub const Handler = struct {
         const result = try shared.buildSlicedResult(self.alloc, call.id, self.now_ms, tools.truncate.apply(diff, @min(self.max_bytes, shared.max_diff_bytes)));
         errdefer shared.deinitResult(self.alloc, result);
 
-        var file = path_guard.createFile(args.path, .{
+        var file = path_guard.createFileApproved(args.path, .{
             .truncate = !args.append,
-        }) catch |open_err| {
+        }, call.config_approved) catch |open_err| {
             return shared.mapFsErr(open_err);
         };
         defer file.close(sys.io);

@@ -1558,10 +1558,27 @@ test "bash sandbox denies agent config writes and directory replacement" {
         .kind = .bash,
         .src = .model,
         .at_ms = 0,
-        .args = .{ .bash = .{ .cmd = "for d in .claude .codex; do if (printf blocked > \"$d/settings.json\") 2>/dev/null; then exit 99; fi; if mv \"$d\" replaced 2>/dev/null; then exit 98; fi; done; printf protected" } },
+        .args = .{ .bash = .{ .cmd = "d=$(printf .%s pz); for d in \"$d\"; do if (printf blocked > \"$d/settings.json\") 2>/dev/null; then exit 99; fi; if mv \"$d\" replaced 2>/dev/null; then exit 98; fi; done; printf protected" } },
     }, noop.sink());
     defer handler.deinitResult(result);
     try std.testing.expectEqualStrings("protected", result.out[0].chunk);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, ".claude/settings.json", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, ".codex/settings.json", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, ".pz/settings.json", .{}));
+}
+
+test "bash sandbox allows foreign agent config writes" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try @import("path_guard.zig").CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 1024 });
+    const result = try handler.run(.{
+        .id = "foreign-config",
+        .kind = .bash,
+        .src = .model,
+        .at_ms = 0,
+        .args = .{ .bash = .{ .cmd = "mkdir .claude .codex; for d in .claude .codex; do printf ok > \"$d/settings.json\" || exit 1; done; printf writable" } },
+    }, noop.sink());
+    defer handler.deinitResult(result);
+    try std.testing.expectEqualStrings("writable", result.out[0].chunk);
 }

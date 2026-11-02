@@ -90,7 +90,11 @@ pub const AskUiCtx = struct {
             const q = args.questions[0];
             const parsed = try std.json.parseFromSlice(struct { path: []const u8 }, self.alloc, q.question, .{ .ignore_unknown_fields = true });
             defer parsed.deinit();
-            const allowed = try @import("context_trust.zig").run(self.alloc, self.ui, self.out, reader, parsed.value.path, q.question, "Approve config change?", "Approve this exact change");
+            const change = try std.json.parseFromSlice(std.json.Value, self.alloc, q.question, .{});
+            defer change.deinit();
+            const preview = try std.json.Stringify.valueAlloc(self.alloc, change.value, .{ .whitespace = .indent_2 });
+            defer self.alloc.free(preview);
+            const allowed = try @import("context_trust.zig").run(self.alloc, self.ui, self.out, reader, parsed.value.path, preview, "Approve config change?", "Approve this exact change");
             const answers = [_]Answer{.{ .id = q.id, .answer = if (allowed) "Approve" else "Deny", .index = if (allowed) 1 else 0 }};
             return buildAskResult(self.alloc, false, &answers);
         }

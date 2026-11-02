@@ -6830,11 +6830,6 @@ fn isPathLike(raw: []const u8) bool {
     return false;
 }
 
-fn approveYoloContext(ctx: *anyopaque, _: []const u8, _: []const u8) !bool {
-    const enabled: *const bool = @ptrCast(@alignCast(ctx));
-    return enabled.*;
-}
-
 fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const u8) !?[]u8 {
     return buildSystemPromptWithApproval(alloc, run_cmd, home, null);
 }
@@ -6860,12 +6855,7 @@ fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, hom
         return try alloc.dupe(u8, sp);
     }
 
-    var yolo = run_cmd.yolo;
-    const context_approval: ?core.context.Approval = if (yolo)
-        .{ .ctx = &yolo, .check = approveYoloContext, .remember = false }
-    else
-        approval;
-    const ctx = try core.context.loadWithApproval(alloc, run_cmd.io, home, context_approval);
+    const ctx = try core.context.loadWithApproval(alloc, run_cmd.io, home, approval);
     if (run_cmd.append_system_prompt) |ap| {
         if (ctx) |c| {
             defer alloc.free(c);
@@ -14699,6 +14689,35 @@ test "buildSystemPrompt rejects context under policy lock" {
     defer run.cfg.deinit(std.testing.allocator);
 
     try std.testing.expectError(error.PolicyLockedContext, buildSystemPrompt(std.testing.allocator, run, null));
+}
+
+test "buildSystemPrompt requires context approval even with yolo" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "AGENTS.md", .data = "ctx" });
+    const old = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(old);
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    try chdirPath(cwd);
+    defer chdirPath(old) catch {}; // test: error irrelevant
+
+    var run = cli.Run{
+        .io = std.testing.io,
+        .mode = .tui,
+        .prompt = null,
+        .yolo = true,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, config.model_default),
+            .provider = try std.testing.allocator.dupe(u8, config.provider_default),
+            .session_dir = try std.testing.allocator.dupe(u8, config.session_dir_default),
+        },
+    };
+    defer run.cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.ContextTrustRequired, buildSystemPrompt(std.testing.allocator, run, null));
 }
 
 test "shouldRetryOverflow gates retry to real overflow in same model once" {

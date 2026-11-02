@@ -31,6 +31,7 @@ pub const Overlay = struct {
     input_label: ?[]const u8 = null,
     input_text: ?[]const u8 = null,
     input_cursor: bool = false,
+    markdown_start: ?usize = null,
 
     const max_vis: usize = 12;
 
@@ -236,6 +237,10 @@ pub const Overlay = struct {
         // Items (scrolled window)
         var row: usize = 0;
         const row_count = self.itemCount();
+        var markdown: @import("markdown.zig").Renderer = .{};
+        if (self.markdown_start) |start| {
+            for (start..@max(start, self.scroll)) |idx| markdown.advanceSkipped(items[idx]);
+        }
         while (row < vis_n) : (row += 1) {
             const idx = self.scroll + row;
             if (idx >= row_count) break;
@@ -297,6 +302,12 @@ pub const Overlay = struct {
                     row_data.tokens,
                     Style{ .fg = item_st.fg, .bg = row_bg },
                 );
+            } else if (self.markdown_start != null and idx >= self.markdown_start.?) {
+                _ = try markdown.renderLine(frm, x, y, items[idx], (x0 + box_w - 2) -| x, .{
+                    .fg = row_st.fg,
+                    .bg = row_bg,
+                    .bold = row_st.bold,
+                });
             } else {
                 const item = items[idx];
                 const label = if (self.kind == .model) shortLabel(item) else item;
