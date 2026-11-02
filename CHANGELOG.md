@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
+### Added
+- Readable Markdown output for web pages, article JSON and RSS/Atom feeds, with numbered line ranges, JSON field selection and regex search for values such as application versions.
+- Raw web response mode for callers that need the original body; browser verification pages are explicitly reported as blocked content.
+
+### Changed
+- Bound default web output to 80 lines and 8 KiB, with up to 4 MiB downloaded for extraction. Auto extraction requires Python 3; regex search reuses ripgrep.
+
+### Fixed
+- Preserve clickable Markdown links through TUI rendering, wrapping and redraws.
+- Prefer UTF-8 clipboard text on Wayland and exclude the scrollbar from copied selections.
+- Ignore file paths embedded in pasted code instead of opening them as attachments.
+- Honor approved writes to pz configuration while retaining ordinary path confinement; limit special configuration approval handling to `.pz`.
+- Render context review as Markdown and support mouse-wheel scrolling.
+
+### Tests
+- Added web extraction coverage for HTML, article JSON, RSS/Atom, verification pages, JSON paths and version searches.
+- Added regressions for clickable links, clipboard MIME selection, scrollbar selection, pasted-code attachments, configuration approval and context review.
+
 ## [0.4.0] - 2026-11-01
 
 ### Added
