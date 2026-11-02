@@ -48,6 +48,15 @@ fn selectImage(types: []const u8) ?Format {
     return null;
 }
 
+fn selectText(types: []const u8) []const u8 {
+    var lines = std.mem.tokenizeAny(u8, types, "\r\n");
+    while (lines.next()) |line| {
+        const mime = std.mem.trim(u8, line, " \t");
+        if (std.ascii.eqlIgnoreCase(mime, "text/plain;charset=utf-8")) return mime;
+    }
+    return "text/plain";
+}
+
 pub fn readAlloc(alloc: std.mem.Allocator, source: Backend) !Content {
     const types = try runAlloc(alloc, switch (source) {
         .wayland => &.{ "wl-paste", "--list-types" },
@@ -56,7 +65,7 @@ pub fn readAlloc(alloc: std.mem.Allocator, source: Backend) !Content {
     });
     defer alloc.free(types);
     const format = selectImage(types);
-    const mime = if (format) |f| f.mime else "text/plain";
+    const mime = if (format) |f| f.mime else selectText(types);
     var data = try runAlloc(alloc, switch (source) {
         .wayland => &.{ "wl-paste", "--no-newline", "--type", mime },
         .x11 => &.{ "xclip", "-selection", "clipboard", "-out", "-target", if (format != null) mime else "UTF8_STRING" },
@@ -96,6 +105,13 @@ fn runAlloc(alloc: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     errdefer alloc.free(result.stdout);
     if (result.term != .exited or result.term.exited != 0) return error.ClipboardReadFailed;
     return result.stdout;
+}
+
+test "clipboard text prefers advertised UTF-8 over plain text" {
+    try std.testing.expectEqualStrings("text/plain;charset=utf-8", selectText("text/plain\ntext/plain;charset=utf-8\nUTF8_STRING\n"));
+    try std.testing.expectEqualStrings("text/plain;charset=UTF-8", selectText(" text/plain;charset=UTF-8\t\r\ntext/plain\r\n"));
+    try std.testing.expectEqualStrings("text/plain", selectText("text/plain\nUTF8_STRING\n"));
+    try std.testing.expectEqualStrings("text/plain", selectText("application/text/plain;charset=utf-8-fake\n"));
 }
 
 test "clipboard MIME negotiation prefers exact supported images" {
