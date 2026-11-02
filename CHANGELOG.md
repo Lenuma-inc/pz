@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-03
+
 ### Fixed
 - Preserve HTML table columns as Markdown, promote the first nonempty row to the header, and keep list markers with their text.
 - Prefer explicit article bodies over recommendation cards and surrounding page content.
