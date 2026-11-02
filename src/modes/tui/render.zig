@@ -82,6 +82,7 @@ pub const Renderer = struct {
         }
 
         var cur_st = frame.Style{};
+        var cur_link: []const u8 = "";
         var y: usize = 0;
         while (y < next.h) : (y += 1) {
             var x: usize = 0;
@@ -99,6 +100,10 @@ pub const Renderer = struct {
                     if (frame.Cell.eql(self.prev.cells[j], next.cells[j])) break;
                 }
 
+                if (cur_link.len != 0) {
+                    try out.writeAll("\x1b]8;;\x1b\\");
+                    cur_link = "";
+                }
                 try writeFmt(out, "\x1b[{};{}H", .{ y + 1, run_start + 1 });
 
                 var col = run_start;
@@ -107,6 +112,12 @@ pub const Renderer = struct {
                     // Skip wide-char padding cells — the wide char
                     // already occupies this column from the previous cell
                     if (c.cp == frame.Frame.wide_pad) continue;
+                    if (!std.mem.eql(u8, cur_link, c.style.link)) {
+                        try out.writeAll("\x1b]8;;");
+                        try out.writeAll(c.style.link);
+                        try out.writeAll("\x1b\\");
+                        cur_link = c.style.link;
+                    }
                     if (!frame.Style.eql(cur_st, c.style)) {
                         try writeStyle(out, c.style, self.cap);
                         cur_st = c.style;
@@ -115,6 +126,8 @@ pub const Renderer = struct {
                 }
             }
         }
+
+        if (cur_link.len != 0) try out.writeAll("\x1b]8;;\x1b\\");
 
         if (!cur_st.isDefault()) {
             try out.writeAll("\x1b[0m");
@@ -143,6 +156,7 @@ fn writeStyle(out: anytype, st: frame.Style, cap: color_detect.ColorDepth) !void
     if (st.italic) try out.writeAll(";3");
     if (st.underline) try out.writeAll(";4");
     if (st.inverse) try out.writeAll(";7");
+    if (st.strikethrough) try out.writeAll(";9");
 
     try color_detect.writeColor(out, .fg, st.fg, cap);
     try color_detect.writeColor(out, .bg, st.bg, cap);
@@ -262,4 +276,53 @@ test "renderer cleanup restores terminal and disables mouse modes" {
         "\x1b[<u" ++ decRst(.bracketed_paste) ++ "\x1b[?1006l\x1b[?1002l" ++ decSet(.cursor) ++ decRst(.alt_screen),
         out.view(),
     );
+}
+
+test "terminal hyperlinks keep owned destinations and repaint a changed target" {
+    var rnd = try Renderer.init(std.testing.allocator, 2, 1);
+    defer rnd.deinit();
+    var frm = try frame.Frame.init(std.testing.allocator, 2, 1);
+    defer frm.deinit(std.testing.allocator);
+    var target = "https://a.example".*;
+    _ = try frm.write(0, 0, "A", .{ .link = &target });
+    var raw: [1024]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try rnd.render(&frm, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.view(), "\x1b]8;;https://a.example\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.view(), "\x1b]8;;\x1b\\") != null);
+    target[8] = 'b';
+    try std.testing.expectEqualStrings("https://a.example", rnd.prev.cells[0].style.link);
+    out.clear();
+    try rnd.render(&frm, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.view(), "\x1b]8;;https://b.example\x1b\\") != null);
+    out.clear();
+    try rnd.render(&frm, &out);
+    try std.testing.expectEqualStrings("", out.view());
+    frm.clear();
+    out.clear();
+    try rnd.render(&frm, &out);
+    try std.testing.expectEqualStrings("", rnd.prev.cells[0].style.link);
+}
+
+test "renderer emits and clears strikethrough" {
+    var rnd = try Renderer.init(std.testing.allocator, 2, 1);
+    defer rnd.deinit();
+    var frm = try frame.Frame.init(std.testing.allocator, 2, 1);
+    defer frm.deinit(std.testing.allocator);
+    _ = try frm.write(0, 0, "A", .{ .strikethrough = true });
+    _ = try frm.write(1, 0, "B", .{});
+    var raw: [256]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try rnd.render(&frm, &out);
+    try std.testing.expectEqualStrings(
+        "\x1b[0m\x1b[2J\x1b[H\x1b[1;1H\x1b[0;9mA\x1b[0mB",
+        out.view(),
+    );
+    var screen = try @import("vscreen.zig").VScreen.init(std.testing.allocator, 2, 1);
+    defer screen.deinit();
+    screen.feed(out.view());
+    try std.testing.expect(screen.cellAt(0, 0).style.strikethrough);
+    try std.testing.expect(!screen.cellAt(0, 1).style.strikethrough);
+    screen.feed("\x1b[1;1H\x1b[29mC");
+    try std.testing.expect(!screen.cellAt(0, 0).style.strikethrough);
 }

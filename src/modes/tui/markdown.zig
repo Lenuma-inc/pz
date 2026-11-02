@@ -271,13 +271,24 @@ fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: 
             }
         }
 
+        // Strikethrough: ~~...~~, including links and nested emphasis.
+        if (i + 1 < text.len and text[i] == '~' and text[i + 1] == '~') {
+            if (findDelimited(text, i, 2)) |span| {
+                var st = base_st;
+                st.strikethrough = true;
+                col += try renderInline(frm, x + col, y, text[span.start..span.end], max_w - col, st);
+                i = span.after;
+                continue;
+            }
+        }
+
         // Bold: **...** or __...__
         if (i + 1 < text.len and ((text[i] == '*' and text[i + 1] == '*') or (text[i] == '_' and text[i + 1] == '_'))) {
             if (findDelimited(text, i, 2)) |span| {
                 var st = base_st;
                 st.bold = true;
                 const content = text[span.start..span.end];
-                col += try writeStr(frm, x + col, y, content, max_w - col, st);
+                col += try renderInline(frm, x + col, y, content, max_w - col, st);
                 i = span.after;
                 continue;
             }
@@ -289,7 +300,7 @@ fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: 
                 var st = base_st;
                 st.italic = true;
                 const content = text[span.start..span.end];
-                col += try writeStr(frm, x + col, y, content, max_w - col, st);
+                col += try renderInline(frm, x + col, y, content, max_w - col, st);
                 i = span.after;
                 continue;
             }
@@ -300,10 +311,38 @@ fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: 
             if (findLink(text, i)) |lnk| {
                 var st = base_st;
                 st.fg = theme.get().md_link;
-                col += try writeStr(frm, x + col, y, lnk.label, max_w - col, st);
+                st.link = safeLink(lnk.url);
+                col += try renderInline(frm, x + col, y, lnk.label, max_w - col, st);
                 i = lnk.after;
                 continue;
             }
+        }
+
+        // Bare URLs and angle-bracket autolinks share the same destination.
+        const angle = text[i] == '<';
+        const url_start = i + @intFromBool(angle);
+        if (url_start < text.len and isUrl(text[url_start..]) and
+            (i == 0 or angle or std.mem.indexOfScalar(u8, " \t([", text[i - 1]) != null))
+        {
+            var end = url_start;
+            var depth: usize = 0;
+            while (end < text.len) : (end += 1) {
+                const ch = text[end];
+                if (ch <= 0x20 or ch == '<' or ch == '>' or ch == '`' or ch == '"') break;
+                if (ch == '(') depth += 1;
+                if (ch == ')') {
+                    if (depth == 0) break;
+                    depth -= 1;
+                }
+            }
+            while (end > url_start and std.mem.indexOfScalar(u8, ".,;:!?", text[end - 1]) != null) end -= 1;
+            const url = text[url_start..end];
+            var st = base_st;
+            st.fg = theme.get().md_link;
+            st.link = safeLink(url);
+            col += try writeStr(frm, x + col, y, url, max_w - col, st);
+            i = end + @intFromBool(angle and end < text.len and text[end] == '>');
+            continue;
         }
 
         // Regular character
@@ -315,6 +354,7 @@ fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: 
             const cw = wc.wcwidth(cp);
             if (col + cw > max_w) break;
             try frm.set(x + col, y, cp, base_st);
+            if (cw == 2 and x + col + 1 < frm.w) try frm.set(x + col + 1, y, frame.Frame.wide_pad, base_st);
             col += cw;
         }
         i = end;
@@ -459,6 +499,7 @@ fn findDelimited(text: []const u8, pos: usize, delim_len: usize) ?Span {
 
 const Link = struct {
     label: []const u8,
+    url: []const u8,
     after: usize,
 };
 
@@ -473,11 +514,45 @@ fn findLink(text: []const u8, pos: usize) ?Link {
     // Expect (
     i += 1;
     if (i >= text.len or text[i] != '(') return null;
-    // Find )
     i += 1;
-    while (i < text.len and text[i] != ')') : (i += 1) {}
+    const start = i;
+    var depth: usize = 1;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '(') depth += 1;
+        if (text[i] == ')') {
+            depth -= 1;
+            if (depth == 0) break;
+        }
+    }
     if (i >= text.len) return null;
-    return .{ .label = label, .after = i + 1 };
+    var url = std.mem.trim(u8, text[start..i], " \t");
+    if (url.len > 1 and url[0] == '<') {
+        const close = std.mem.indexOfScalar(u8, url, '>') orelse return null;
+        url = url[1..close];
+    } else if (std.mem.indexOfAny(u8, url, " \t")) |space| {
+        url = url[0..space]; // Optional Markdown title is not part of the URL.
+    }
+    return .{ .label = label, .url = url, .after = i + 1 };
+}
+
+fn isUrl(text: []const u8) bool {
+    return std.mem.startsWith(u8, text, "https://") or
+        std.mem.startsWith(u8, text, "http://") or
+        std.mem.startsWith(u8, text, "mailto:");
+}
+
+fn safeLink(url: []const u8) []const u8 {
+    if (!isUrl(url)) return "";
+    for (url) |ch| {
+        if (ch <= 0x20 or ch == 0x7f) return "";
+    }
+    return url;
+}
+
+pub fn hasLinks(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "https://") != null or
+        std.mem.indexOf(u8, text, "http://") != null or
+        std.mem.indexOf(u8, text, "mailto:") != null;
 }
 
 // -- Utility --
@@ -501,6 +576,7 @@ fn writeStr(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: usiz
         if (col + cw > max_w) break;
         if (x + col >= frm.w) break;
         try frm.set(x + col, y, cp, st);
+        if (cw == 2 and x + col + 1 < frm.w) try frm.set(x + col + 1, y, frame.Frame.wide_pad, st);
         col += cw;
     }
     return col;
@@ -967,4 +1043,63 @@ test "splitCells handles no trailing pipe" {
         \\[0] a
         \\[1] b"
     ).expectEqual(snap);
+}
+
+test "named and formatted links retain destinations" {
+    const cases = [_]struct { text: []const u8, label: []const u8, url: []const u8 }{
+        .{ .text = "[GitHub](https://github.com)", .label = "GitHub", .url = "https://github.com" },
+        .{ .text = "**[Python](https://docs.python.org/3/)**", .label = "Python", .url = "https://docs.python.org/3/" },
+        .{ .text = "*[Курсив](https://example.com/проверка)*", .label = "Курсив", .url = "https://example.com/проверка" },
+        .{ .text = "[wiki](https://example.com/a_(b))", .label = "wiki", .url = "https://example.com/a_(b)" },
+        .{ .text = "[title](<https://example.com> \"Title\")", .label = "title", .url = "https://example.com" },
+    };
+    for (cases) |case| {
+        var frm = try frame.Frame.init(testing.allocator, 120, 1);
+        defer frm.deinit(testing.allocator);
+        var md = Renderer{};
+        const n = try md.renderLine(&frm, 0, 0, case.text, 120, .{});
+        try testing.expectEqual(wc.strwidth(case.label), n);
+        for (frm.cells[0..n]) |cell| try testing.expectEqualStrings(case.url, cell.style.link);
+    }
+}
+
+test "bare and angle links preserve query and unicode without punctuation" {
+    var frm = try frame.Frame.init(testing.allocator, 150, 1);
+    defer frm.deinit(testing.allocator);
+    var md = Renderer{};
+    _ = try md.renderLine(&frm, 0, 0, "<https://пример.рф/> https://example.com/?a=1&b=2#part.", 150, .{});
+    try testing.expectEqualStrings("https://пример.рф/", frm.cells[0].style.link);
+    var saw_query = false;
+    for (frm.cells) |cell| {
+        if (std.mem.eql(u8, cell.style.link, "https://example.com/?a=1&b=2#part")) saw_query = true;
+    }
+    try testing.expect(saw_query);
+}
+
+test "code and unsafe destinations do not become terminal links" {
+    var frm = try frame.Frame.init(testing.allocator, 100, 1);
+    defer frm.deinit(testing.allocator);
+    var md = Renderer{};
+    _ = try md.renderLine(&frm, 0, 0, "`https://example.com` [bad](javascript:alert(1))", 100, .{});
+    for (frm.cells) |cell| try testing.expectEqualStrings("", cell.style.link);
+    try testing.expectEqualStrings("", safeLink("https://example.com/\x1b]0;injected"));
+}
+
+test "strikethrough hides markers and keeps link destinations" {
+    var frm = try frame.Frame.init(testing.allocator, 80, 1);
+    defer frm.deinit(testing.allocator);
+    var md = Renderer{};
+    const n = try md.renderLine(&frm, 0, 0, "~~[Зачёркнутая подпись](https://example.com/strike)~~!", 80, .{});
+    const label_width = wc.strwidth("Зачёркнутая подпись");
+    try testing.expectEqual(label_width + 1, n);
+    for (frm.cells[0..label_width]) |cell| {
+        try testing.expect(cell.style.strikethrough);
+        try testing.expectEqualStrings("https://example.com/strike", cell.style.link);
+        try testing.expect(cell.cp != '~');
+    }
+    try testing.expectEqual(@as(u21, '!'), frm.cells[label_width].cp);
+    try testing.expect(!frm.cells[label_width].style.strikethrough);
+    frm.clear();
+    _ = try md.renderLine(&frm, 0, 0, "`~~literal~~` ~~unclosed", 80, .{});
+    for (frm.cells) |cell| try testing.expect(!cell.style.strikethrough);
 }

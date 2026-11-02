@@ -30,7 +30,10 @@ pub const Style = struct {
     dim: bool = false,
     italic: bool = false,
     underline: bool = false,
+    strikethrough: bool = false,
     inverse: bool = false,
+    // Borrowed until copyFrom stores an owned copy for the terminal diff.
+    link: []const u8 = "",
 
     pub fn eql(a: Style, b: Style) bool {
         return Color.eql(a.fg, b.fg) and
@@ -39,7 +42,9 @@ pub const Style = struct {
             a.dim == b.dim and
             a.italic == b.italic and
             a.underline == b.underline and
-            a.inverse == b.inverse;
+            a.strikethrough == b.strikethrough and
+            a.inverse == b.inverse and
+            std.mem.eql(u8, a.link, b.link);
     }
 
     pub fn isDefault(self: Style) bool {
@@ -90,11 +95,12 @@ pub const Frame = struct {
     w: usize,
     h: usize,
     cells: []Cell,
+    link_arena: std.heap.ArenaAllocator,
 
     pub const InitError = std.mem.Allocator.Error || error{InvalidSize};
     pub const PosError = error{OutOfBounds};
     pub const WriteError = PosError || error{InvalidUtf8};
-    pub const CopyError = error{SizeMismatch};
+    pub const CopyError = std.mem.Allocator.Error || error{SizeMismatch};
 
     pub fn init(alloc: std.mem.Allocator, w: usize, h: usize) InitError!Frame {
         if (w == 0 or h == 0) return error.InvalidSize;
@@ -107,15 +113,18 @@ pub const Frame = struct {
             .w = w,
             .h = h,
             .cells = cells,
+            .link_arena = std.heap.ArenaAllocator.init(alloc),
         };
     }
 
     pub fn deinit(self: *Frame, alloc: std.mem.Allocator) void {
+        self.link_arena.deinit();
         alloc.free(self.cells);
         self.* = undefined;
     }
 
     pub fn clear(self: *Frame) void {
+        _ = self.link_arena.reset(.retain_capacity);
         @memset(self.cells, .{});
     }
 
@@ -171,7 +180,18 @@ pub const Frame = struct {
 
     pub fn copyFrom(self: *Frame, other: *const Frame) CopyError!void {
         if (self.w != other.w or self.h != other.h) return error.SizeMismatch;
-        std.mem.copyForwards(Cell, self.cells, other.cells);
+        if (self == other) return;
+        self.clear();
+        var last_link: []const u8 = "";
+        var owned_link: []const u8 = "";
+        for (self.cells, other.cells) |*dst, src| {
+            if (!std.mem.eql(u8, last_link, src.style.link)) {
+                last_link = src.style.link;
+                owned_link = try self.link_arena.allocator().dupe(u8, last_link);
+            }
+            dst.* = src;
+            dst.style.link = owned_link;
+        }
     }
 
     pub fn eql(self: *const Frame, other: *const Frame) bool {

@@ -105,7 +105,7 @@ pub const Transcript = struct {
     }
 
     pub const AppendError = std.mem.Allocator.Error || error{InvalidUtf8};
-    pub const RenderError = frame.Frame.PosError || error{InvalidUtf8};
+    pub const RenderError = frame.Frame.InitError || frame.Frame.PosError || error{InvalidUtf8};
 
     pub fn init(alloc: std.mem.Allocator) Transcript {
         return .{ .alloc = alloc };
@@ -305,7 +305,7 @@ pub const Transcript = struct {
         var prev_vis: ?*Block = null;
         for (self.blocks.items) |*b| {
             if (!self.blockVisible(b)) continue;
-            const blk_rows = blockLineCount(b, count_w);
+            const blk_rows = try blockLineCount(self.alloc, b, count_w);
             if (blk_rows == 0) continue;
             if (prev_vis) |prev| {
                 if (needsGap(prev, b)) total += 1;
@@ -347,7 +347,7 @@ pub const Transcript = struct {
             var prev_rendered: ?*Block = null;
             for (self.blocks.items) |*b| {
                 if (!self.blockVisible(b)) continue;
-                if (blockLineCount(b, text_w) == 0) continue;
+                if (try blockLineCount(self.alloc, b, text_w) == 0) continue;
 
                 // 1-line gap between blocks
                 if (!first_vis and (prev_rendered == null or needsGap(prev_rendered.?, b))) {
@@ -416,7 +416,6 @@ pub const Transcript = struct {
     }
 
     fn renderMdBlock(self: *Transcript, ctx: *RenderCtx, md: *markdown.Renderer, b: *const Block) RenderError!void {
-        _ = self;
         const txt = b.text();
         md.* = .{};
         var md_wit = mdWrapIter(txt, ctx.text_w);
@@ -435,6 +434,24 @@ pub const Transcript = struct {
                     }
                     pending_md = sep_line;
                 }
+            }
+
+            if (markdown.hasLinks(line)) {
+                var rendered = try renderLinkLine(self.alloc, md, line, b.st);
+                defer rendered.frm.deinit(self.alloc);
+                var rows = CellWrapIter{ .cells = rendered.frm.cells[0..rendered.n], .w = ctx.text_w };
+                while (rows.next()) |cells| {
+                    if (ctx.skipped < ctx.skip) {
+                        ctx.skipped += 1;
+                        continue;
+                    }
+                    if (ctx.row >= ctx.rect.h) break;
+                    const y = ctx.rect.y + ctx.row;
+                    if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+                    for (cells, 0..) |cell, col| try ctx.frm.setCell(ctx.content_x + col, y, cell);
+                    ctx.row += 1;
+                }
+                continue;
             }
 
             if (ctx.skipped < ctx.skip) {
@@ -591,10 +608,10 @@ pub const Transcript = struct {
         return true;
     }
 
-    fn blockLineCount(b: *const Block, w: usize) usize {
+    fn blockLineCount(alloc: std.mem.Allocator, b: *const Block, w: usize) RenderError!usize {
         if (b.kind == .image) return image.img_rows;
         if (b.line_mode == .ellipsis) return if (w == 0) 0 else 1;
-        if (b.kind == .text or b.kind == .user) return countMdLines(b.text(), w);
+        if (b.kind == .text or b.kind == .user) return countMdLines(alloc, b.text(), w);
         return countLines(b.text(), w);
     }
 
@@ -986,7 +1003,7 @@ pub const MdWrapIter = struct {
             self.pos = if (i < self.text.len) i + 1 else i;
 
             if (line.len == 0) return line;
-            if (tbl.isTableLine(line)) return line;
+            if (tbl.isTableLine(line) or markdown.hasLinks(line)) return line;
 
             self.line_wit = wrapIter(line, self.w);
         }
@@ -1006,11 +1023,12 @@ pub fn countLines(text: []const u8, w: usize) usize {
     return n;
 }
 
-fn countMdLines(text: []const u8, w: usize) usize {
+fn countMdLines(alloc: std.mem.Allocator, text: []const u8, w: usize) Transcript.RenderError!usize {
     if (w == 0) return 0;
     if (text.len == 0) return 0;
     var n: usize = 0;
     var it = mdWrapIter(text, w);
+    var md = markdown.Renderer{};
     var pending: ?[]const u8 = null;
     while (true) {
         const line = if (pending) |p| blk: {
@@ -1036,10 +1054,61 @@ fn countMdLines(text: []const u8, w: usize) usize {
             }
         }
 
-        n += 1;
+        if (markdown.hasLinks(line)) {
+            var rendered = try renderLinkLine(alloc, &md, line, .{});
+            defer rendered.frm.deinit(alloc);
+            var rows = CellWrapIter{ .cells = rendered.frm.cells[0..rendered.n], .w = w };
+            while (rows.next() != null) n += 1;
+        } else {
+            md.advanceSkipped(line);
+            n += 1;
+        }
     }
     return n;
 }
+
+// Parse links before wrapping, so every segment keeps the complete destination.
+fn renderLinkLine(alloc: std.mem.Allocator, md: *markdown.Renderer, line: []const u8, st: frame.Style) Transcript.RenderError!struct { frm: frame.Frame, n: usize } {
+    var frm = try frame.Frame.init(alloc, @max(line.len, 1), 1);
+    errdefer frm.deinit(alloc);
+    const n = try md.renderLine(&frm, 0, 0, line, frm.w, st);
+    return .{ .frm = frm, .n = n };
+}
+
+const CellWrapIter = struct {
+    cells: []const frame.Cell,
+    w: usize,
+    pos: usize = 0,
+    empty: bool = false,
+
+    fn next(self: *CellWrapIter) ?[]const frame.Cell {
+        if (self.w == 0) return null;
+        if (self.cells.len == 0 and !self.empty) {
+            self.empty = true;
+            return self.cells;
+        }
+        if (self.pos >= self.cells.len) return null;
+        const start = self.pos;
+        var end = @min(start + self.w, self.cells.len);
+        if (end < self.cells.len) {
+            if (self.cells[end].cp == frame.Frame.wide_pad) end -= 1;
+            if (end == start) {
+                self.pos = @min(start + 2, self.cells.len);
+                return self.cells[start..start];
+            }
+            var space = end;
+            while (space > start) {
+                space -= 1;
+                if (self.cells[space].cp == ' ') {
+                    self.pos = space + 1;
+                    return self.cells[start..space];
+                }
+            }
+        }
+        self.pos = end;
+        return self.cells[start..end];
+    }
+};
 
 // -- Per-span styled write --
 
@@ -2520,4 +2589,37 @@ test "updateAgent error phase gets error style" {
     const t = theme.get();
     try std.testing.expect(frame.Color.eql(tr.blocks.items[0].st.bg, t.tool_error_bg));
     try std.testing.expect(frame.Color.eql(tr.blocks.items[0].st.fg, t.err));
+}
+
+test "wrapped named and long links retain their complete destination" {
+    const url = "https://example.com/very/long/path?first=value&second=other#section";
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+    try tr.append(.{ .text = "[GitHub](https://github.com)\n" ++ url });
+    var frm = try frame.Frame.init(std.testing.allocator, 18, 12);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 18, .h = 12 });
+    try std.testing.expectEqualStrings("https://github.com", (try frm.cell(1, 0)).style.link);
+    var linked_cells: usize = 0;
+    var rows: usize = 0;
+    for (0..frm.h) |y| {
+        var linked_row = false;
+        for (0..frm.w) |x| {
+            const cell = try frm.cell(x, y);
+            if (std.mem.eql(u8, cell.style.link, url)) {
+                linked_cells += 1;
+                linked_row = true;
+            }
+        }
+        if (linked_row) rows += 1;
+    }
+    try std.testing.expectEqual(url.len, linked_cells);
+    try std.testing.expect(rows > 1);
+    tr.scrollUp(3);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 18, .h = 3 });
+    var visible_link = false;
+    for (frm.cells[0 .. 3 * frm.w]) |cell| {
+        if (std.mem.eql(u8, cell.style.link, url)) visible_link = true;
+    }
+    try std.testing.expect(visible_link);
 }
