@@ -247,3 +247,23 @@ metadata. Refresh it with `python3 tools/update-openai-models.py`, then run
 `zig build`. This updates the bundled snapshot; pz does not fetch it at startup.
 The startup screen shows short hints and skill names; `/hotkeys` lists the full
 keyboard help.
+
+`web` returns readable Markdown by default: HTML scripts/navigation/sidebar noise is removed,
+article JSON (`textHtml`, `bodyHtml`, `contentHtml`, `articleBody`) becomes title
+and body with an explicit notice that metadata was omitted. Other JSON stays
+compact JSON. RSS/Atom feeds become headings, links, dates and descriptions.
+Browser/JavaScript verification pages are reported as blocked content. Output defaults to 80 numbered lines and 8 KiB; use `from_line`
+and `to_line` to continue. Auto mode downloads at most 4 MiB and requires
+`python3` (standard library only). Use `json_path` to select a dot-separated
+field, including array indices, for example `{"url":"https://example.org/api/article","json_path":"data.textHtml"}`.
+Use `format: "raw"` for the original response body with the existing output cap;
+raw mode works without Python and cannot be combined with `json_path` or `pattern`.
+Use `pattern` for case-insensitive regex matches within the extracted content
+(reuses installed `rg`, without a shell pipeline). For example:
+
+```json
+{"url":"https://storage.yandexcloud.net/lolka-electron/releases/latest-linux.yml","pattern":"^version:.*"}
+{"url":"https://www.reaper.fm/download.php","pattern":"REAPER [0-9]+\\.[0-9]+(\\.[0-9]+)?"}
+```
+
+Extraction is offline; shared HTTP fetching and network policy are unchanged.

@@ -28,6 +28,11 @@ pub const Request = struct {
     body: ?[]const u8 = null,
     follow_redirects: bool = true,
     max_redirects: u8 = 5,
+    format: enum { auto, raw } = .auto,
+    json_path: ?[]const u8 = null,
+    pattern: ?[]const u8 = null,
+    from_line: u32 = 1,
+    to_line: ?u32 = null,
 };
 
 const cred_names = [_][]const u8{
