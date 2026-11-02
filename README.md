@@ -249,11 +249,17 @@ The startup screen shows short hints and skill names; `/hotkeys` lists the full
 keyboard help.
 
 `web` returns readable Markdown by default: HTML scripts/navigation/sidebar noise is removed,
-article JSON (`textHtml`, `bodyHtml`, `contentHtml`, `articleBody`) becomes title
+Explicit article-body containers are preferred over page surroundings; tables
+retain rows and columns as Markdown, using the first nonempty row as the header. Article JSON (`textHtml`, `bodyHtml`, `contentHtml`, `articleBody`) becomes title
 and body with an explicit notice that metadata was omitted. Other JSON stays
 compact JSON. RSS/Atom feeds become headings, links, dates and descriptions.
 Browser/JavaScript verification pages are reported as blocked content. Output defaults to 80 numbered lines and 8 KiB; use `from_line`
-and `to_line` to continue. Auto mode downloads at most 4 MiB and requires
+and `to_line` to read a range. Every page reports `last_complete_line` and an
+exact `next from_line=..., line_offset=...` (or `next=none`). The byte limit is
+applied while choosing complete lines; tables that do not fit the remaining
+page budget move to the next page. Tables exceeding a full page still split.
+A single oversized line is split at a
+UTF-8 boundary; resume it with the returned `line_offset`. Auto mode downloads at most 4 MiB and requires
 `python3` (standard library only). Use `json_path` to select a dot-separated
 field, including array indices, for example `{"url":"https://example.org/api/article","json_path":"data.textHtml"}`.
 Use `format: "raw"` for the original response body with the existing output cap;

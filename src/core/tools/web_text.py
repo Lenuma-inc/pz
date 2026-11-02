@@ -22,6 +22,9 @@ class Text(HTMLParser):
         self.stack = []
         self.regions = []
         self.pre = 0
+        self.tables = []
+        self.headings = []
+        self.list_pending = False
 
     def hidden(self):
         return bool(self.stack and self.stack[-1][1])
@@ -32,16 +35,29 @@ class Text(HTMLParser):
         region = None
         href = ''
         if not hidden:
-            priority = 3 if tag == 'main' or attrs.get('role') == 'main' else 2 if attrs.get('id') in {'content', 'main-content', 'main_content'} else 1 if tag == 'article' or attrs.get('itemprop') == 'articleBody' else 0
+            classes = set(attrs.get('class', '').split())
+            explicit_body = attrs.get('itemprop') == 'articleBody' or bool(classes & {'article-formatted-body', 'tm-article-body'})
+            article_body = bool(classes & {'entry-content', 'post-content', 'article-content'})
+            priority = 5 if explicit_body else 4 if article_body else 3 if tag == 'main' or attrs.get('role') == 'main' else 2 if attrs.get('id') in {'content', 'main-content', 'main_content'} else 1 if tag == 'article' or attrs.get('itemprop') == 'articleBody' else 0
             if priority:
                 region = [priority, len(self.parts), None]
                 self.regions.append(region)
-            if tag in self.BLOCK:
+            if tag == 'h1':
+                self.headings.append([len(self.parts), None])
+            if tag == 'table':
+                self.tables.append(dict(start=len(self.parts), rows=[], row=[], cell=None, caption='', caption_start=None))
+                self.parts.append('')
+            if self.tables and tag == 'caption':
+                self.tables[-1]['caption_start'] = len(self.parts)
+            if self.tables and tag in {'td', 'th'}:
+                self.tables[-1]['cell'] = len(self.parts)
+            if tag in self.BLOCK and (not self.list_pending or tag == 'li'):
                 self.parts.append('\n')
             if tag in {'h1', 'h2', 'h3', 'h4'}:
                 self.parts.append('#' * int(tag[1]) + ' ')
             if tag == 'li':
                 self.parts.append('- ')
+                self.list_pending = True
             if tag == 'pre':
                 self.pre += 1
                 self.parts.append('```\n')
@@ -60,6 +76,32 @@ class Text(HTMLParser):
         while len(self.stack) > index:
             name, hidden, region, href = self.stack.pop()
             if not hidden:
+                if self.tables:
+                    table = self.tables[-1]
+                    if name == 'caption' and table['caption_start'] is not None:
+                        table['caption'] = ''.join(self.parts[table['caption_start']:]).strip()
+                    if name in {'td', 'th'} and table['cell'] is not None:
+                        cell = ' '.join(''.join(self.parts[table['cell']:]).split()).replace('|', '\\|')
+                        table['row'].append(cell)
+                        table['cell'] = None
+                    if name == 'tr' and table['row']:
+                        table['rows'].append(table['row'])
+                        table['row'] = []
+                    if name == 'table':
+                        self.tables.pop()
+                        rows = [row for row in table['rows'] if any(cell.strip() for cell in row)]
+                        if rows:
+                            width = max(map(len, rows))
+                            rows = [row + [''] * (width - len(row)) for row in rows]
+                            rows.insert(1, ['---'] * width)
+                            rendered = '\n' + (table['caption'] + '\n' if table['caption'] else '') + '\n'.join('| ' + ' | '.join(row) + ' |' for row in rows) + '\n'
+                            self.parts[table['start']] = rendered
+                            for i in range(table['start'] + 1, len(self.parts)):
+                                self.parts[i] = ''
+                if name == 'li':
+                    self.list_pending = False
+                if name == 'h1' and self.headings:
+                    self.headings[-1][1] = len(self.parts)
                 if href:
                     self.parts.append('](' + href.replace(')', '%29') + ')')
                 if name == 'pre':
@@ -72,14 +114,23 @@ class Text(HTMLParser):
 
     def handle_data(self, data):
         if not self.hidden():
+            if data.strip():
+                self.list_pending = False
             self.parts.append(data if self.pre else re.sub(r'\s+', ' ', data))
 
     def text(self):
-        # Prefer the page's main container over small article cards on homepages.
-        if self.regions:
-            priority = max(r[0] for r in self.regions)
+        # Prefer one explicit article body; multiple bodies usually mean a listing.
+        regions = self.regions
+        bodies = []
+        for rank, start, end in regions:
+            if rank == 4 and (not bodies or start >= bodies[-1]):
+                bodies.append(end if end is not None else len(self.parts))
+        if len(bodies) > 1:
+            regions = [r for r in regions if r[0] != 4]
+        if regions:
+            priority = max(r[0] for r in regions)
             ranges = []
-            for rank, start, end in self.regions:
+            for rank, start, end in regions:
                 if rank != priority:
                     continue
                 end = end if end is not None else len(self.parts)
@@ -87,6 +138,10 @@ class Text(HTMLParser):
                     ranges[-1][1] = max(ranges[-1][1], end)
                 else:
                     ranges.append([start, end])
+            if priority >= 4 and not any(ranges[0][0] <= start < ranges[-1][1] for start, _ in self.headings):
+                preceding = [(start, end) for start, end in self.headings if end is not None and end <= ranges[0][0]]
+                if preceding:
+                    ranges.insert(0, list(preceding[-1]))
             parts = [part for start, end in ranges for part in self.parts[start:end]]
         else:
             parts = self.parts
@@ -167,7 +222,7 @@ def extract(raw, mode='auto', path='', base=''):
                     for key in ('textHtml', 'bodyHtml', 'contentHtml', 'articleBody'):
                         if isinstance(node.get(key), str) and node[key].strip():
                             title = node.get('titleHtml', node.get('title', ''))
-                            return '[Article text extracted from JSON; metadata omitted]\n' + html_text(str(title) + '\n' + node[key], base)
+                            return '[Article text extracted from JSON; metadata omitted]\n' + html_text(str(title), base) + '\n' + html_text(node[key], base)
                     candidates.extend(node.values())
             return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
     if value.startswith('<'):

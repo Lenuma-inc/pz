@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Preserve HTML table columns as Markdown, promote the first nonempty row to the header, and keep list markers with their text.
+- Prefer explicit article bodies over recommendation cards and surrounding page content.
+- Apply web output limits during pagination, defer tables to a fresh page when needed, and report the last complete line and exact continuation, including byte offsets for oversized lines.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

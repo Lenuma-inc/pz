@@ -32,6 +32,7 @@ pub const Request = struct {
     json_path: ?[]const u8 = null,
     pattern: ?[]const u8 = null,
     from_line: u32 = 1,
+    line_offset: u32 = 0,
     to_line: ?u32 = null,
 };
 
