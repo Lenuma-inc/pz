@@ -52,6 +52,12 @@ pub const Paths = struct {
             }
             var path: []const u8 = self.buf[0..len];
             if (!literal) path = std.mem.trimEnd(u8, path, ",;:!?)]}");
+            // Zig builtins in pasted code and diagnostics are not @file references.
+            if (!literal and std.mem.startsWith(u8, path, "@")) {
+                var end: usize = 1;
+                while (end < path.len and (std.ascii.isAlphanumeric(path[end]) or path[end] == '_')) : (end += 1) {}
+                if (end > 1 and end < path.len and path[end] == '(') continue;
+            }
             const uri = std.mem.startsWith(u8, path, "file:///");
             // Paths inside pasted code are context; multiline drops use one path per line.
             if (!uri and !std.mem.startsWith(u8, path, "@") and std.mem.indexOfAny(u8, self.text, "\r\n") != null) {
@@ -243,6 +249,20 @@ test "attachment paths ignore pasted shell code and keep multiline file drops" {
     ));
     var paths = Paths{ .text = "Review these files:\n'/tmp/first file.txt'\n/tmp/second.png\nAlso read @/tmp/third.txt" };
     for ([_][]const u8{ "/tmp/first file.txt", "/tmp/second.png", "/tmp/third.txt" }) |expected| {
+        try std.testing.expectEqualStrings(expected, (try paths.next()).?);
+    }
+    try std.testing.expect(try paths.next() == null);
+}
+
+test "attachment paths ignore Zig builtins in compiler logs" {
+    try std.testing.expect(!isPrompt(
+        "src/core/providers/limits.zig:102:17: error: import of file outside module path\n" ++
+            "    try @import(\"../../test/helpers.zig\").expectSnapText(@src(), \"used week:0%\", value);\n" ++
+            "    const syslog_mock = @import(\"../test/syslog_mock.zig\");",
+    ));
+    try std.testing.expect(!isPrompt("try @import(\"../test/helpers.zig\"); @src()"));
+    var paths = Paths{ .text = "@src/core/attach.zig @README.md '@/tmp/file(name).txt'" };
+    for ([_][]const u8{ "src/core/attach.zig", "README.md", "/tmp/file(name).txt" }) |expected| {
         try std.testing.expectEqualStrings(expected, (try paths.next()).?);
     }
     try std.testing.expect(try paths.next() == null);
