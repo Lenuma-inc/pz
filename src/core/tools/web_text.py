@@ -27,12 +27,18 @@ class Text(HTMLParser):
         self.headings = []
         self.sections = []
         self.list_pending = False
+        self.lists = []
+        self.has_script = False
+        self.app_mount = False
+        self.requires_js = False
 
     def hidden(self):
         return bool(self.stack and self.stack[-1][1])
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        self.has_script |= tag == 'script'
+        self.app_mount |= tag in {'div', 'main'} and attrs.get('id') in {'root', 'app', '__next', '__nuxt'}
         hidden = self.hidden() or tag in self.HIDDEN or 'hidden' in attrs or attrs.get('aria-hidden', '').lower() == 'true' or attrs.get('role') in {'navigation', 'banner', 'contentinfo', 'complementary'}
         region = None
         href = ''
@@ -62,8 +68,17 @@ class Text(HTMLParser):
             if tag in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}:
                 self.parts.append('#' * int(tag[1]) + ' ')
             if tag == 'li':
-                self.parts.append('- ')
+                if self.lists and self.lists[-1][0] == 'ol':
+                    if re.fullmatch(r'-?[0-9]{1,9}', attrs.get('value', '')):
+                        self.lists[-1][1] = int(attrs['value'])
+                    self.parts.append(str(self.lists[-1][1]) + '. ')
+                    self.lists[-1][1] += 1
+                else:
+                    self.parts.append('- ')
                 self.list_pending = True
+            if tag in {'ol', 'ul'}:
+                start = attrs.get('start', '')
+                self.lists.append([tag, int(start) if re.fullmatch(r'-?[0-9]{1,9}', start) else 1])
             if tag == 'pre':
                 self.pre += 1
                 self.parts.append('```\n')
@@ -72,16 +87,25 @@ class Text(HTMLParser):
                 if attrs.get('href') and target.startswith(('https://', 'http://', '/', '#')):
                     href = (target, len(self.parts))
                     self.parts.append('[')
+        code_start = len(self.parts) if tag == 'code' and not hidden and not self.pre else None
         if tag not in self.VOID:
-            self.stack.append((tag, hidden, region, href))
+            self.stack.append((tag, hidden, region, href, code_start))
 
     def handle_endtag(self, tag):
         index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i][0] == tag), None)
         if index is None:
             return
         while len(self.stack) > index:
-            name, hidden, region, href = self.stack.pop()
+            name, hidden, region, href, code_start = self.stack.pop()
             if not hidden:
+                if name in {'ol', 'ul'}:
+                    self.lists.pop()
+                if code_start is not None:
+                    value = ' '.join(''.join(self.parts[code_start:]).split())
+                    if value:
+                        fence = '`' * (max((len(m[0]) for m in re.finditer(r'`+', value)), default=0) + 1)
+                        padding = ' ' if value.startswith('`') or value.endswith('`') else ''
+                        self.parts[code_start:] = [fence + padding + value + padding + fence] + [''] * (len(self.parts) - code_start - 1)
                 if self.tables:
                     table = self.tables[-1]
                     if name == 'caption' and table['caption_start'] is not None:
@@ -124,6 +148,8 @@ class Text(HTMLParser):
                 region[2] = len(self.parts)
 
     def handle_data(self, data):
+        if self.stack and self.stack[-1][0] == 'noscript':
+            self.requires_js |= bool(re.search(r'(?:enable|requires?|turn on)\b[^.\n]{0,80}\bjavascript\b|javascript\b[^.\n]{0,80}\b(?:required|disabled)', data, re.I))
         if not self.hidden():
             if data.strip():
                 self.list_pending = False
@@ -376,18 +402,24 @@ def extract(raw, mode='auto', path='', base=''):
                     candidates.extend(node.values())
             return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
     if value.startswith('<'):
-        text = html_text(raw, base)
+        parser = Text(base)
+        parser.feed(raw)
+        parser.close()
+        text = parser.text()
         if len(text) < 200:
             flight = rsc_text(raw, base)
             if len(flight) > len(text):
                 return '[Text extracted from Next.js/RSC data]\n' + flight
+            # shortcut: conservative shell detection; expand markers only with real-page fixtures.
+            if parser.requires_js or (parser.app_mount and parser.has_script and not text):
+                return '[JavaScript rendering required: the server returned an app shell. Full page content was not retrieved.]' + ('\n' + text if text else '')
         return text
     return raw
 
 
 def search(text, pattern):
     # Reuse grep's installed, linear-time regex engine instead of backtracking re.
-    if not pattern or text.startswith('[Access blocked:'):
+    if not pattern or text.startswith(('[Access blocked:', '[JavaScript rendering required:')):
         return text
     result = subprocess.run(['rg', '--no-config', '--only-matching', '--ignore-case', '--color', 'never', '--', pattern], input=text, text=True, capture_output=True, timeout=5)
     if result.returncode not in {0, 1}:
@@ -400,7 +432,8 @@ if __name__ == '__main__':
         raw = sys.stdin.buffer.read(LIMIT + 1)
         if len(raw) > LIMIT:
             raise ValueError('response exceeds extraction limit')
-        text = extract(raw.decode('utf-8', errors='replace'), sys.argv[1], sys.argv[2], sys.argv[3])
+        decoded = raw.decode('utf-8', errors='replace')
+        text = extract(decoded, sys.argv[1], sys.argv[2], sys.argv[3])
         print(search(text, sys.argv[4] if len(sys.argv) > 4 else ''), end='')
     except (ValueError, KeyError, IndexError, TypeError, RecursionError, OSError, subprocess.SubprocessError) as exc:
         sys.exit(str(exc))

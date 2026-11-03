@@ -305,22 +305,26 @@ test "basic tools: edit diffs separate lines without final newlines" {
     try snap(@src(), "• Edited a (+1 -1)\n@@ -1,1 +1,1 @@\n-old\n+new\n", text);
 }
 
-test "basic tools: web bounds status and body together" {
+test "basic tools: raw web pages a response larger than its output budget" {
     const mock = @import("http_mock.zig");
-    var server = try mock.Server.init(alloc, &.{.{ .resp = .{ .body = "abcdef" } }});
+    const payload = try alloc.alloc(u8, 128 * 1024);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    @memcpy(payload[0..6], "first\n");
+    var server = try mock.Server.init(alloc, &.{.{ .resp = .{ .body = payload } }});
     defer server.deinit();
     const thread = try server.spawn();
     var joined = false;
     defer if (!joined) server.join(thread) catch {};
     const url = try server.urlAlloc(alloc, "/");
     defer alloc.free(url);
-    var rt = builtin.Runtime.init(.{ .alloc = alloc, .max_bytes = 8, .egress = .{ .allow_private_addrs = true, .egress = .{ .rules = &.{.{ .pattern = "runtime/web/*", .effect = .allow }} } } });
+    var rt = builtin.Runtime.init(.{ .alloc = alloc, .max_bytes = 512, .egress = .{ .allow_private_addrs = true, .egress = .{ .rules = &.{.{ .pattern = "runtime/web/*", .effect = .allow }} } } });
     defer rt.deinit();
-    const res = try run(&rt, .web, .{ .web = .{ .url = url } });
+    const res = try run(&rt, .web, .{ .web = .{ .url = url, .format = .raw, .to_line = 1 } });
     defer rt.deinitResult(res);
-    try snap(@src(), "HTTP 200", res.out[0].chunk);
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-    try std.testing.expect(res.out[0].truncated);
+    try std.testing.expect(std.mem.startsWith(u8, res.out[0].chunk, "HTTP 200 | raw text: 2 lines\n1: first\n"));
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "next from_line=2, line_offset=0") != null);
+    try std.testing.expect(res.out[0].chunk.len <= 512);
     joined = true;
     try server.join(thread);
 }

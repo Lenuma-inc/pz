@@ -2,6 +2,42 @@
 const std = @import("std");
 const sys = @import("pz_io");
 const web = @import("web.zig");
+const audit = @import("../audit.zig");
+
+/// Preserve article lines while applying the existing conservative redaction.
+pub fn redactAlloc(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var private_key = false;
+    while (lines.next()) |line| {
+        const key_start = std.mem.indexOf(u8, line, "-----BEGIN ") != null and std.mem.indexOf(u8, line, "PRIVATE KEY-----") != null;
+        const key_end = std.mem.indexOf(u8, line, "-----END ") != null and std.mem.indexOf(u8, line, "PRIVATE KEY-----") != null;
+        // shortcut: a sensitive marker hides its whole line; use span redaction if minified pages need it.
+        const redacted = try audit.redactTextAlloc(alloc, line, if (private_key or key_start) .secret else .@"pub");
+        defer alloc.free(redacted);
+        private_key = (private_key or key_start) and !key_end;
+        try out.writer.writeAll(redacted);
+        if (lines.index != null) try out.writer.writeByte('\n');
+    }
+    return out.toOwnedSlice();
+}
+
+test "web redaction preserves surrounding article lines and hides credentials" {
+    const a = std.testing.allocator;
+    const text = try redactAlloc(a, "# Article\nConfigure .env here\nUseful explanation\nAuthorization: Bearer private-value\nConclusion\n");
+    defer a.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "# Article\n[path:"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "\nUseful explanation\n[secret:") != null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "\nConclusion\n"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "private-value") == null);
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "\n"));
+    const key = try redactAlloc(a, "Before\n-----BEGIN PRIVATE KEY-----\nencoded-private-material\n-----END PRIVATE KEY-----\nAfter");
+    defer a.free(key);
+    try std.testing.expect(std.mem.startsWith(u8, key, "Before\n[secret:"));
+    try std.testing.expect(std.mem.endsWith(u8, key, "\nAfter"));
+    try std.testing.expect(std.mem.indexOf(u8, key, "encoded-private-material") == null);
+}
 
 pub fn extractAlloc(alloc: std.mem.Allocator, body: []const u8, req: web.Request) ![]u8 {
     if (req.format == .raw) {
@@ -127,7 +163,7 @@ pub fn pageAlloc(alloc: std.mem.Allocator, body: []const u8, status: u16, req: w
     const total = std.mem.count(u8, body, "\n") + @intFromBool(body.len > 0 and body[body.len - 1] != '\n');
     var out = std.Io.Writer.Allocating.init(alloc);
     errdefer out.deinit();
-    try out.writer.print("HTTP {d} | extracted text: {d} lines\n", .{ status, total });
+    try out.writer.print("HTTP {d} | {s}: {d} lines\n", .{ status, if (req.format == .raw) @as([]const u8, "raw text") else "extracted text", total });
     if (out.written().len + 160 >= limit) return error.TooLarge;
     const end_line = req.to_line orelse (req.from_line +| 79);
     var lines = std.mem.splitScalar(u8, body, '\n');
@@ -151,7 +187,7 @@ pub fn pageAlloc(alloc: std.mem.Allocator, body: []const u8, status: u16, req: w
         const prefix = if (start == 0) try std.fmt.bufPrint(&prefix_buf, "{d}: ", .{n}) else try std.fmt.bufPrint(&prefix_buf, "{d} (+{d} bytes): ", .{ n, start });
         const available = limit - out.written().len - 160;
         const remaining = line[start..];
-        if (last != null and start == 0 and !in_code and tableRow(line)) {
+        if (req.format != .raw and last != null and start == 0 and !in_code and tableRow(line)) {
             var probe = lines;
             if (probe.next()) |divider| {
                 if (tableDivider(divider)) {
@@ -312,6 +348,40 @@ test "web text pagination moves tables to a fresh page when necessary" {
     defer a.free(oversized);
     try std.testing.expect(std.mem.indexOf(u8, oversized, "1: | Configuration") != null);
     try std.testing.expect(std.mem.indexOf(u8, oversized, "next from_line=") != null);
+}
+
+test "web text preserves ordered list counters and inline code delimiters" {
+    const a = std.testing.allocator;
+    const text = try extractAlloc(a, "<main><ol start='3'><li>Run <code>git status</code></li><li value='8'>Use <code>`name`</code><ul><li>Nested</li></ul></li><li>Done</li></ol><p>Empty <code></code>code</p><pre><code>  keep\n  indent</code></pre></main>", .{ .url = "https://example.org" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("3. Run `git status`\n8. Use `` `name` ``\n- Nested\n9. Done\nEmpty code\n```\n  keep\n  indent\n```", text);
+    const invalid = try extractAlloc(a, "<ol start='bad'><li value='bad'>First</li><li>Second</li></ol>", .{ .url = "https://example.org" });
+    defer a.free(invalid);
+    try std.testing.expectEqualStrings("1. First\n2. Second", invalid);
+}
+
+test "web text distinguishes empty app shells from useful server rendered content" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{
+        "<div id='root'></div><script src='/app.js'></script>",
+        "<main>Loading</main><noscript>Please enable JavaScript to continue.</noscript>",
+    }) |html| {
+        const text = try extractAlloc(a, html, .{ .url = "https://example.org", .pattern = "missing" });
+        defer a.free(text);
+        try std.testing.expect(std.mem.startsWith(u8, text, "[JavaScript rendering required:"));
+        const raw = try extractAlloc(a, html, .{ .url = "https://example.org", .format = .raw });
+        defer a.free(raw);
+        try std.testing.expectEqualStrings(html, raw);
+    }
+    for ([_][]const u8{
+        "<div id='root'><p>Useful short page</p></div><script src='/app.js'></script>",
+        "<p>Useful short page</p><noscript>No JavaScript analytics.</noscript>",
+        "<main>Useful short page</main><script>const example = 'enable JavaScript';</script>",
+    }) |html| {
+        const text = try extractAlloc(a, html, .{ .url = "https://example.org" });
+        defer a.free(text);
+        try std.testing.expectEqualStrings("Useful short page", text);
+    }
 }
 
 test "web text bounded Next.js Flight fallback" {

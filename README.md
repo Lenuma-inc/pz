@@ -238,7 +238,7 @@ checked with ffprobe; this checks metadata, not full decoding or visual quality.
 
 `agent` runs a child agent; `swarm` provides live workers with spawn, send/recv,
 wait, stop and close operations. Spawn peers before waiting when collaboration
-is needed. LSP and external web search are outside this tool set.
+is needed. LSP is outside this tool set.
 
 ## Models and keyboard help
 
@@ -248,28 +248,31 @@ metadata. Refresh it with `python3 tools/update-openai-models.py`, then run
 The startup screen shows short hints and skill names; `/hotkeys` lists the full
 keyboard help.
 
-`web` returns readable Markdown by default: HTML scripts/navigation/sidebar noise is removed,
-Explicit article-body containers are preferred over page surroundings; tables
-retain rows and columns as Markdown, using the first nonempty row as the header. Article JSON (`textHtml`, `bodyHtml`, `contentHtml`, `articleBody`) becomes title
-and body with an explicit notice that metadata was omitted. Other JSON stays
-compact JSON. RSS/Atom feeds become headings, links, dates and descriptions.
-Browser/JavaScript verification pages are reported as blocked content. Output defaults to 80 numbered lines and 8 KiB; use `from_line`
-and `to_line` to read a range. Every page reports `last_complete_line` and an
-exact `next from_line=..., line_offset=...` (or `next=none`). The byte limit is
-applied while choosing complete lines; tables that do not fit the remaining
-page budget move to the next page. Tables exceeding a full page still split.
-A single oversized line is split at a
-UTF-8 boundary; resume it with the returned `line_offset`. Auto mode downloads at most 4 MiB and requires
-`python3` (standard library only). Use `json_path` to select a dot-separated
-field, including array indices, for example `{"url":"https://example.org/api/article","json_path":"data.textHtml"}`.
-Use `format: "raw"` for the original response body with the existing output cap;
-raw mode works without Python and cannot be combined with `json_path` or `pattern`.
-Use `pattern` for case-insensitive regex matches within the extracted content
-(reuses installed `rg`, without a shell pipeline). For example:
+## Web
+
+`web` fetches a URL and extracts readable Markdown.
 
 ```json
-{"url":"https://storage.yandexcloud.net/lolka-electron/releases/latest-linux.yml","pattern":"^version:.*"}
-{"url":"https://www.reaper.fm/download.php","pattern":"REAPER [0-9]+\\.[0-9]+(\\.[0-9]+)?"}
+{"url":"https://example.org/article"}
 ```
 
-Extraction is offline; shared HTTP fetching and network policy are unchanged.
+Fetching returns readable Markdown: article text, links, tables, numbered lists
+and code. Navigation, scripts and sidebar noise are removed. Article JSON becomes
+labelled title/body text; other JSON stays compact. RSS/Atom feeds become readable
+entries. Next.js/RSC data is used when ordinary HTML has little content.
+JavaScript app shells and browser verification pages are reported explicitly;
+pz does not execute JavaScript or solve browser challenges.
+
+Auto output defaults to 80 numbered lines and 8 KiB. Use `from_line` and `to_line` for
+ranges, or the returned `next from_line=..., line_offset=...` to continue.
+Oversized lines split at UTF-8 boundaries. Both modes download at most 4 MiB;
+the output budget is applied after line selection. Auto extraction
+requires `python3` (standard library only).
+
+Use `json_path` to select a dot-separated JSON field, including array indices.
+Use `pattern` for case-insensitive regex matches in extracted text (requires
+`rg`). Use `format: "raw"` for response text without extraction or Python;
+it supports the same line ranges and continuation, and cannot be combined with
+`json_path` or `pattern`. Both modes redact sensitive lines while retaining
+surrounding content. A sensitive marker in a minified, single-line response
+still hides that entire line.
