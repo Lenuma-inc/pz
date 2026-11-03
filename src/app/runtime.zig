@@ -2943,8 +2943,6 @@ fn runTui(
         const restored = try resume_ctx.restore(sid.*);
         if (!restored) {
             try showStartup(alloc, run_cmd.io, &ui, true, home, tools_rt.mcp);
-        } else {
-            try showMcpStartup(alloc, &ui, tools_rt.mcp);
         }
     } else {
         try showStartup(alloc, run_cmd.io, &ui, false, home, tools_rt.mcp);
