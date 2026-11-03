@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-04
+
+### Fixed
+- Allow `find -name AGENTS.md` without granting access to protected files.
+- Sanitize invalid UTF-8 in collapsed tool output before rendering to prevent TUI crashes.
+- Fix agent harness module boundaries and test compilation errors.
+- Prevent audit spool and escalation approval tests from looping indefinitely.
+
 ## [0.5.2] - 2026-11-03
 
 ### Added
