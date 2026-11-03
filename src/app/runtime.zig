@@ -3625,7 +3625,7 @@ fn runTui(
                         },
                         .toggle_tools => {
                             if (pre) |p| alloc.free(p);
-                            ui.tr.show_tools = !ui.tr.show_tools;
+                            ui.tr.toggleToolOutput();
                             try ui.draw(out);
                         },
                         .toggle_thinking => {
@@ -5437,7 +5437,7 @@ fn handleSlashCommand(
                 \\  Ctrl+P         Cycle model
                 \\  Shift+Ctrl+P   Reverse cycle model
                 \\  Ctrl+L         Select model
-                \\  Ctrl+O         Toggle tool output
+                \\  Ctrl+O         Expand/collapse tool output
                 \\  Ctrl+T         Toggle thinking blocks
                 \\  Ctrl+G         External editor
                 \\  Ctrl+V         Paste image

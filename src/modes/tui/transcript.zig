@@ -43,18 +43,28 @@ const Block = struct {
     buf: std.ArrayListUnmanaged(u8),
     st: frame.Style,
     spans: std.ArrayListUnmanaged(Span) = .empty,
+    alternate_buf: std.ArrayListUnmanaged(u8) = .empty,
+    alternate_spans: std.ArrayListUnmanaged(Span) = .empty,
     tool_gid: u64 = 0,
     tool_phase: ToolPhase = .none,
     agent_phase: AgentPhase = .none,
     line_mode: LineMode = .wrap,
 
     pub fn deinit(self: *Block, alloc: std.mem.Allocator) void {
+        self.alternate_buf.deinit(alloc);
+        self.alternate_spans.deinit(alloc);
         self.spans.deinit(alloc);
         self.buf.deinit(alloc);
     }
 
     pub fn text(self: *const Block) []const u8 {
         return self.buf.items;
+    }
+
+    fn toggleOutput(self: *Block) void {
+        if (self.alternate_buf.items.len == 0) return;
+        std.mem.swap(std.ArrayListUnmanaged(u8), &self.buf, &self.alternate_buf);
+        std.mem.swap(std.ArrayListUnmanaged(Span), &self.spans, &self.alternate_spans);
     }
 
     fn styleAt(self: *const Block, pos: usize) frame.Style {
@@ -84,9 +94,15 @@ pub const Transcript = struct {
     md: markdown.Renderer = .{},
     scroll_off: usize = 0,
     show_tools: bool = true,
+    tools_expanded: bool = false,
     show_thinking: bool = true,
     img_refs: [8]ImageRef = undefined,
     img_ref_n: u8 = 0,
+
+    pub fn toggleToolOutput(self: *Transcript) void {
+        self.tools_expanded = !self.tools_expanded;
+        for (self.blocks.items) |*b| b.toggleOutput();
+    }
 
     pub fn scrollUp(self: *Transcript, n: usize) void {
         self.scroll_off +|= n;
@@ -767,10 +783,23 @@ pub const Transcript = struct {
             }
         }
 
-        return self.pushAnsi(seq, .tool, " ... ({d} earlier lines, ctrl+o to expand)\n", .{hidden}, shown[skip..], .{
+        var full = try parseAnsi(self.alloc, shown, .{
             .fg = theme.get().tool_output,
             .bg = theme.get().tool_success_bg,
         });
+        errdefer {
+            full.buf.deinit(self.alloc);
+            full.spans.deinit(self.alloc);
+        }
+        const idx = try self.pushAnsi(seq, .tool, " ... ({d} earlier lines, ctrl+o to expand)\n", .{hidden}, shown[skip..], .{
+            .fg = theme.get().tool_output,
+            .bg = theme.get().tool_success_bg,
+        });
+        const block = &self.blocks.items[idx];
+        block.alternate_buf = full.buf;
+        block.alternate_spans = full.spans;
+        if (self.tools_expanded) block.toggleOutput();
+        return idx;
     }
 
     fn colorDiffAlloc(alloc: std.mem.Allocator, text: []const u8) !?[]u8 {
@@ -2622,4 +2651,24 @@ test "wrapped named and long links retain their complete destination" {
         if (std.mem.eql(u8, cell.style.link, url)) visible_link = true;
     }
     try std.testing.expect(visible_link);
+}
+
+test "tool output expands and collapses without hiding blocks or losing ANSI styles" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+    const output = "\x1b[31mfirst\x1b[0m\n2\n3\n4\n5\n6\n7\nlast\n";
+    try tr.append(.{ .tool_result = .{ .id = "t1", .output = output, .is_err = false } });
+    try std.testing.expect(std.mem.indexOf(u8, tr.blocks.items[0].text(), "earlier lines") != null);
+    tr.toggleToolOutput();
+    try std.testing.expect(tr.show_tools);
+    try std.testing.expectEqualStrings("first\n2\n3\n4\n5\n6\n7\nlast\n", tr.blocks.items[0].text());
+    try std.testing.expect(frame.Color.eql(tr.blocks.items[0].styleAt(0).fg, .{ .idx = 1 }));
+    try tr.append(.{ .tool_result = .{ .id = "t2", .output = output, .is_err = false } });
+    try std.testing.expectEqualStrings(tr.blocks.items[0].text(), tr.blocks.items[1].text());
+    tr.toggleToolOutput();
+    for (tr.blocks.items) |*block| {
+        try std.testing.expect(tr.blockVisible(block));
+        try std.testing.expect(std.mem.indexOf(u8, block.text(), "earlier lines") != null);
+        try std.testing.expect(std.mem.indexOf(u8, block.text(), "first") == null);
+    }
 }
