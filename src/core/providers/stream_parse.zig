@@ -339,6 +339,7 @@ const SnapEv = union(enum) {
     message: providers.Message,
     text: []const u8,
     thinking: []const u8,
+    reasoning: []const u8,
     tool_call: ToolCall,
     tool_result: ToolResult,
     usage: providers.Usage,
@@ -353,6 +354,7 @@ fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Event) ![]SnapEv {
         .message => |msg| try out.append(alloc, .{ .message = msg }),
         .text => |text| try out.append(alloc, .{ .text = text }),
         .thinking => |text| try out.append(alloc, .{ .thinking = text }),
+        .reasoning => |text| try out.append(alloc, .{ .reasoning = text }),
         .tool_call => |call| try out.append(alloc, .{ .tool_call = .{
             .id = call.id,
             .name = call.name,

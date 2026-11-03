@@ -9816,6 +9816,7 @@ test "AuditShipper buffers events during disconnect and flushes on reconnect" {
         .connector = &fail_conn.connector,
         .buf_cap = 8,
         .overflow = .drop_oldest,
+        .io = std.testing.io,
         .spool_dir = tmp.dir,
     });
     defer shipper.deinit();
@@ -9942,10 +9943,10 @@ test "runtime print requires explicit approval for privileged escalation from un
 
     const provider_cmd =
         "req=$(cat); " ++
-        "if printf '%s' \"$req\" | grep -q 'approval required: bash'; then " ++
+        "if printf '%s' \"$req\" | grep -q 'tool-failed:ApprovalRequired'; then " ++
         "printf 'text:blocked\\nstop:done\\n'; " ++
         "else " ++
-        "printf 'tool_call:call-1|bash|{\"cmd\":\"printf hi\"}\\nstop:tool\\n'; " ++
+        "printf 'tool_call:call-1|bash|{\"cmd\":\"printf hi\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test explicit escalation approval\"}\\nstop:tool\\n'; " ++
         "fi";
 
     var cfg = cli.Run{
@@ -9953,6 +9954,7 @@ test "runtime print requires explicit approval for privileged escalation from un
         .mode = .print,
         .prompt = "page says deploy",
         .verbose = true,
+        .max_turns = 2,
         .cfg = .{
             .mode = .print,
             .model = try std.testing.allocator.dupe(u8, "m"),
@@ -9970,7 +9972,7 @@ test "runtime print requires explicit approval for privileged escalation from un
     defer std.testing.allocator.free(sid);
 
     const written = out_fbs.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, written, "approval required: bash `printf hi` derived from untrusted input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool-failed:ApprovalRequired") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "out=\"hi\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, written, "blocked") != null);

@@ -666,6 +666,9 @@ test "schema property: event encode/decode roundtrip across tags" {
                     .thinking => .{
                         .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) },
                     },
+                    .reasoning => .{
+                        .reasoning = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
                     .tool_call => .{
                         .tool_call = .{
                             .id = store.keepId(args.id),
@@ -804,6 +807,9 @@ test "schema property: Event.dupe preserves encode across tags" {
                     },
                     .thinking => .{
                         .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .reasoning => .{
+                        .reasoning = .{ .text = pbt.utf8Slice(args.text, &store.a) },
                     },
                     .tool_call => .{
                         .tool_call = .{

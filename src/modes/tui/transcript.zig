@@ -190,6 +190,8 @@ pub const Transcript = struct {
                 self.tagToolAt(idx, toolGroup(tc.id), .call);
             },
             .tool_result => |tr| {
+                // Reject before collapsing can hide invalid bytes in alternate_buf.
+                try ensureUtf8(tr.output);
                 const gid = toolGroup(tr.id);
                 self.setToolCallStatus(gid, tr.is_err);
                 if (tr.is_err) {
@@ -2350,6 +2352,28 @@ test "info text has dim fg and no bg" {
     try std.testing.expect(frame.Color.eql(c1.style.fg, t.dim));
     // No bg fill for info text (default bg)
     try std.testing.expect(c1.style.bg.isDefault());
+}
+
+test "collapsed tool result rejects invalid utf8 before storing hidden output" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+    // The visible tail is valid; only the hidden first line contains a split character.
+    const output = "\xe2\x94\n1\n2\n3\n4\n5\n6\n7\n8\n";
+    try std.testing.expectError(error.InvalidUtf8, tr.append(.{ .tool_result = .{
+        .id = "truncated",
+        .output = output,
+        .is_err = false,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), tr.count());
+
+    const safe = try @import("../../core/utf8.zig").Lossy.init(std.testing.allocator, output);
+    defer safe.deinit(std.testing.allocator);
+    try tr.append(.{ .tool_result = .{ .id = "truncated", .output = safe.text, .is_err = false } });
+    var frm = try frame.Frame.init(std.testing.allocator, 50, 12);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 12 });
+    tr.blocks.items[0].toggleOutput();
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 12 });
 }
 
 test "tool result success uses tool output fg" {

@@ -1,7 +1,7 @@
 //! Test harness: agent exit-code scenarios.
 const sys = @import("pz_io");
 const std = @import("std");
-const agent = @import("core_agent");
+const agent = @import("core").agent;
 
 pub fn main(init: std.process.Init) !void {
     sys.io = init.io;

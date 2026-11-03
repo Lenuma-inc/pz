@@ -841,7 +841,7 @@ test "summary compaction shrinks history and preserves recent tool pairs and att
     try std.testing.expect(ck.out_bytes < ck.in_bytes / 10);
     const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(1024 * 1024));
     defer alloc.free(after);
-    try snap(@src(), before, after[0..before.len]);
+    try std.testing.expectEqualStrings(before, after[0..before.len]);
     var rdr = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{ .context = true });
     defer rdr.deinit();
     const summary_ev = (try rdr.next()) orelse return error.TestUnexpectedResult;
@@ -914,7 +914,7 @@ test "repeated summaries retain the original journal and cumulative paths" {
     _ = try summarizeWith(alloc, tmp.dir, "s", 2, &scripted.provider, "m", .{ .keep_tokens = 0, .batch_bytes = 1024 });
     const after = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(64 * 1024));
     defer alloc.free(after);
-    try snap(@src(), before, after[0..before.len]);
+    try std.testing.expectEqualStrings(before, after[0..before.len]);
     try wr.append("s", .{ .data = .{ .prompt = .{ .text = "pending request" } } });
     var active = try reader.ReplayReader.init(alloc, tmp.dir, "s", .{ .context = true });
     defer active.deinit();
@@ -932,7 +932,7 @@ test "repeated summaries retain the original journal and cumulative paths" {
 test "cutPoint property never splits a parallel tool batch" {
     const zc = @import("zcheck");
     try zc.check(struct {
-        fn prop(args: struct { budget: u8 }) !bool {
+        fn prop(args: struct { budget: u8 }) bool {
             const events = [_]schema.Event{
                 .{ .data = .{ .prompt = .{ .text = "goal" } } },
                 .{ .data = .{ .tool_call = .{ .id = "a", .name = "read", .args = "{}" } } },
@@ -945,7 +945,7 @@ test "cutPoint property never splits a parallel tool batch" {
                 .{ .data = .{ .prompt = .{ .text = "continue" } } },
             };
             const sizes = [_]usize{1} ** events.len;
-            const cut = try cutPoint(std.testing.allocator, &events, &sizes, args.budget);
+            const cut = cutPoint(std.testing.allocator, &events, &sizes, args.budget) catch return false;
             return cut == 0 or cut >= 5;
         }
     }.prop, .{ .iterations = 256 });

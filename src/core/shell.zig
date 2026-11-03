@@ -401,7 +401,20 @@ fn wordsTouchProtectedPath(alloc: Allocator, words: []const []u8, depth: usize) 
         }
     }
 
-    for (words[i..]) |word| {
+    var find_predicates = std.mem.eql(u8, std.fs.path.basename(words[i]), "find");
+    var j = i;
+    while (j < words.len) : (j += 1) {
+        const word = words[j];
+        if (find_predicates) {
+            if (std.mem.eql(u8, word, "-exec") or std.mem.eql(u8, word, "-execdir") or
+                std.mem.eql(u8, word, "-ok") or std.mem.eql(u8, word, "-okdir"))
+                find_predicates = false;
+            // Name predicates match filenames; they do not open the named path.
+            if ((std.mem.eql(u8, word, "-name") or std.mem.eql(u8, word, "-iname")) and j + 1 < words.len) {
+                j += 1;
+                continue;
+            }
+        }
         if (policy.isProtectedPath(word)) return true;
     }
     return false;
@@ -517,6 +530,21 @@ test "env wrapper preserves protected path detection" {
 
 test "exec wrapper preserves protected path detection" {
     try testing.expect(try touchesProtectedPath(talloc, "exec cat AGENTS.md"));
+}
+
+test "find name predicates allow protected names without allowing access" {
+    for ([_][]const u8{
+        "find . -name AGENTS.md -print",
+        "pwd; git status --short; find .. -name AGENTS.md -print",
+        "env FOO=1 /usr/bin/find . -iname 'AGENTS.md'",
+    }) |cmd| try testing.expect(!try touchesProtectedPath(talloc, cmd));
+    for ([_][]const u8{
+        "find AGENTS.md -print",
+        "find . -name AGENTS.md -exec cat AGENTS.md \\;",
+        "find . -exec cat -name AGENTS.md \\;",
+        "find . -name AGENTS.md -fprint AGENTS.md",
+        "find . -name AGENTS.md; cat AGENTS.md",
+    }) |cmd| try testing.expect(try touchesProtectedPath(talloc, cmd));
 }
 
 test "xargs shell wrapper preserves protected path detection" {

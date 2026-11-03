@@ -51,14 +51,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const core_agent_mod = b.createModule(.{
-        .root_source_file = b.path("src/core/agent.zig"),
+    const core_mod = b.createModule(.{
+        .root_source_file = b.path("src/core.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
-    core_agent_mod.addImport("pz_io", io_mod);
+    core_mod.addImport("pz_io", io_mod);
 
     const exe = b.addExecutable(.{
         .name = "pz",
@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     agent_exit_harness.root_module.addImport("pz_io", io_mod);
-    agent_exit_harness.root_module.addImport("core_agent", core_agent_mod);
+    agent_exit_harness.root_module.addImport("core", core_mod);
     const agent_child_harness = b.addExecutable(.{
         .name = "agent-child-harness",
         .root_module = b.createModule(.{
@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     agent_child_harness.root_module.addImport("pz_io", io_mod);
-    agent_child_harness.root_module.addImport("core_agent", core_agent_mod);
+    agent_child_harness.root_module.addImport("core", core_mod);
     test_options.addOptionPath("agent_child_harness_path", agent_child_harness.getEmittedBin());
 
     const exe_tests = b.addTest(.{

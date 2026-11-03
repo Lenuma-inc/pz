@@ -2,7 +2,7 @@
 const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
-const agent = @import("core_agent");
+const agent = @import("core").agent;
 
 const Mode = enum {
     hello,
