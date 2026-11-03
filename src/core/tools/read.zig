@@ -7,8 +7,11 @@ const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
 const Acc = shared.Acc;
+const attach = @import("../attach.zig");
+const api = @import("../providers/api.zig");
 
 pub const Err = error{
+    BinaryFile,
     KindMismatch,
     InvalidArgs,
     NotFound,
@@ -53,8 +56,30 @@ pub const Handler = struct {
         }
 
         const to_line = args.to_line orelse shared.satAdd(u32, from_line, 19);
-        const selected = try readSelected(self, args.path, from_line, to_line);
+        var selected = readSelected(self, args.path, from_line, to_line) catch |err| switch (err) {
+            error.BinaryFile => return shared.fail(call, .invalid_args, "Cannot read this binary format as text. For video, extract PNG/JPEG frames with ffmpeg and read those files."),
+            else => return err,
+        };
         errdefer self.alloc.free(selected.chunk);
+        if (selected.image) |image| {
+            return .{ .call_id = call.id, .started_at_ms = self.now_ms, .ended_at_ms = self.now_ms, .out = &.{}, .image = image, .final = .{ .ok = .{} } };
+        }
+        var keep = selected.chunk.len;
+        // A byte limit may split the final UTF-8 codepoint.
+        if (selected.full_bytes > keep) {
+            var start = keep;
+            while (start > 0 and selected.chunk[start - 1] & 0xc0 == 0x80) start -= 1;
+            if (start > 0) {
+                start -= 1;
+                const n = std.unicode.utf8ByteSequenceLength(selected.chunk[start]) catch 1;
+                if (n > keep - start) keep = start;
+            }
+        }
+        if (!std.unicode.utf8ValidateSlice(selected.chunk[0..keep])) {
+            self.alloc.free(selected.chunk);
+            return shared.fail(call, .invalid_args, "Cannot read binary or non-UTF-8 files as text.");
+        }
+        selected.chunk = self.alloc.realloc(selected.chunk, keep) catch return error.OutOfMemory;
 
         return shared.buildResult(self.alloc, call.id, self.now_ms, selected.chunk, self.max_bytes, selected.full_bytes) catch return error.OutOfMemory;
     }
@@ -67,6 +92,7 @@ pub const Handler = struct {
 const Selected = struct {
     chunk: []u8,
     full_bytes: usize,
+    image: ?api.Image = null,
 };
 
 fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) Err!Selected {
@@ -82,6 +108,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
     var acc = Acc.init(self.alloc, self.max_bytes);
     defer acc.deinit();
 
+    var first = true;
     var scratch: [4096]u8 = undefined;
     while (true) {
         const n = file.readStreaming(sys.io, &.{scratch[0..]}) catch |read_err| {
@@ -90,9 +117,28 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
         };
         if (n == 0) break;
 
+        if (first) {
+            first = false;
+            if (attach.imageMime(scratch[0..n])) |mime| {
+                var data = Acc.init(self.alloc, attach.max_bytes);
+                defer data.deinit();
+                try data.append(scratch[0..n]);
+                while (true) {
+                    const count = file.readStreaming(sys.io, &.{&scratch}) catch |err| {
+                        if (err == error.EndOfStream) break;
+                        return shared.mapFsErr(err);
+                    };
+                    if (count == 0) break;
+                    try data.append(scratch[0..count]);
+                    if (data.full_bytes > attach.max_bytes) return error.TooLarge;
+                }
+                return .{ .chunk = &.{}, .full_bytes = 0, .image = .{ .media_type = mime, .data = try data.takeOwned() } };
+            }
+        }
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const b = scratch[i];
+            if (b == 0 or (b < 0x20 and b != '\n' and b != '\r' and b != '\t' and b != 0x0c)) return error.BinaryFile;
             if (in_range) try acc.appendByte(b);
 
             if (b == '\n') {
@@ -415,4 +461,54 @@ test "read handler denies hardlinked file" {
         .src = .model,
         .at_ms = 0,
     }, sink));
+}
+
+test "read rejects binary data and preserves truncated UTF-8 text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    const cases = [_]struct { data: []const u8, limit: usize, failed: bool, expected: []const u8 = "" }{
+        .{ .data = "hello\x00world", .limit = 128, .failed = true },
+        .{ .data = "\xff\xfeinvalid", .limit = 128, .failed = true },
+        .{ .data = "Привет 🐧\n", .limit = 128, .failed = false, .expected = "Привет 🐧\n" },
+        .{ .data = "a🐧z", .limit = 3, .failed = false, .expected = "a" },
+        .{ .data = "a🐧z", .limit = 2, .failed = false, .expected = "a" },
+    };
+    for (cases) |case| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = case.data });
+        const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = case.limit });
+        const res = try handler.run(.{
+            .id = "binary",
+            .kind = .read,
+            .args = .{ .read = .{ .path = "input" } },
+            .src = .model,
+            .at_ms = 0,
+        }, noop.sink());
+        defer handler.deinitResult(res);
+        try std.testing.expectEqual(case.failed, res.final == .failed);
+        if (case.failed) {
+            try std.testing.expectEqual(@as(usize, 0), res.out.len);
+        } else {
+            try std.testing.expectEqualStrings(case.expected, res.out[0].chunk);
+        }
+    }
+}
+
+test "read returns images as bounded binary payloads regardless of line range" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    const data = "\xff\xd8\xff\xe0\x00\x10JFIF";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frame.jpg", .data = data });
+    const handler = Handler.init(.{ .alloc = std.testing.allocator, .max_bytes = 2 });
+    const res = try handler.run(.{ .id = "frame", .kind = .read, .args = .{ .read = .{ .path = "frame.jpg", .from_line = 50 } }, .src = .model, .at_ms = 0 }, noop.sink());
+    defer handler.deinitResult(res);
+    try std.testing.expect(res.final == .ok);
+    try std.testing.expectEqual(@as(usize, 0), res.out.len);
+    try std.testing.expectEqualStrings("image/jpeg", res.image.?.media_type);
+    try std.testing.expectEqualStrings(data, res.image.?.data);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frame.jpg", .data = data ++ "x" ** attach.max_bytes });
+    try std.testing.expectError(error.TooLarge, handler.run(.{ .id = "large", .kind = .read, .args = .{ .read = .{ .path = "frame.jpg" } }, .src = .model, .at_ms = 0 }, noop.sink()));
 }

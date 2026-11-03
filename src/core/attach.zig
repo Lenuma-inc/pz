@@ -187,7 +187,7 @@ fn validateText(data: []const u8) !void {
     }
 }
 
-fn imageMime(bytes: []const u8) ?[]const u8 {
+pub fn imageMime(bytes: []const u8) ?[]const u8 {
     const formats = .{
         .{ "\x89PNG\r\n\x1a\n", "image/png" },
         .{ "\xff\xd8\xff", "image/jpeg" },

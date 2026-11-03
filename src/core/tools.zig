@@ -278,6 +278,7 @@ pub const Result = struct {
     out: []const Output,
     out_owned: bool = false,
     out_streamed: bool = false,
+    image: ?@import("providers/api.zig").Image = null,
     final: Final,
 
     pub const Final = union(Tag) {

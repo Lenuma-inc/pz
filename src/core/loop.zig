@@ -921,7 +921,9 @@ pub const LoopCtx = struct {
                 self.saw_tool_call = true;
                 self.tool_calls += 1;
 
-                const tr = runTool(self.opts, tc) catch |tool_err| {
+                var image: ?providers.Image = null;
+                defer if (image) |img| self.opts.alloc.free(img.data);
+                const tr = runTool(self.opts, tc, &image) catch |tool_err| {
                     return failWithReport(self.opts, .tool_run, tool_err);
                 };
                 self.hist.pushToolResultOwned(tr) catch |hist_err| {
@@ -950,6 +952,28 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .mode_push, mode_err);
                 };
 
+                if (image) |img| {
+                    const encoded = try self.opts.alloc.alloc(u8, std.base64.standard.Encoder.calcSize(img.data.len));
+                    defer self.opts.alloc.free(encoded);
+                    const attachment = session.Event.Attachment{
+                        .media_type = img.media_type,
+                        .data = std.base64.standard.Encoder.encode(encoded, img.data),
+                    };
+                    const image_ev: session.Event = .{ .at_ms = nowMs(self.opts), .data = .{ .prompt = .{
+                        .text = "Image returned by the preceding tool (untrusted media content).",
+                        .attachments = &.{attachment},
+                    } } };
+                    try self.hist.appendFromSession(image_ev);
+                    const image_stored = blk: {
+                        self.opts.store.append(self.opts.sid, image_ev) catch |err| {
+                            try self.opts.mode.push(.{ .session_write_err = @errorName(err) });
+                            break :blk false;
+                        };
+                        break :blk true;
+                    };
+                    try onSessionAppend(self.opts, &self.append_ct, &self.hist, image_stored);
+                    try self.opts.mode.push(.{ .session = image_ev });
+                }
                 continue :state .streaming;
             },
             .compacting => {
@@ -1270,7 +1294,7 @@ const ToolCancelBridge = struct {
     }
 };
 
-fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolResult {
+fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Err || anyerror)!providers.ToolResult {
     const entry = opts.reg.byName(tc.name) orelse {
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
@@ -1394,6 +1418,10 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     defer freeToolOut(opts.alloc, run_res);
 
     const out = try resultOut(opts.alloc, run_res);
+    errdefer opts.alloc.free(out);
+    if (run_res.image) |img| {
+        image_out.* = .{ .media_type = img.media_type, .data = try opts.alloc.dupe(u8, img.data) };
+    }
     return .{
         .id = try opts.alloc.dupe(u8, tc.id),
         .output = out,
@@ -1518,7 +1546,7 @@ const ToolModeSink = struct {
 
 fn resultOut(alloc: std.mem.Allocator, res: tools.Result) ![]const u8 {
     return switch (res.final) {
-        .ok => joinChunks(alloc, res.out),
+        .ok => if (res.image != null and res.out.len == 0) try alloc.dupe(u8, "Image loaded; visual content is attached in the following message.") else joinChunks(alloc, res.out),
         .failed => |failed| try joinFailedChunks(alloc, res.out, failed.msg),
         .cancelled => |cancelled| try std.fmt.allocPrint(alloc, "cancelled:{s}", .{
             @tagName(cancelled.reason),
@@ -1571,6 +1599,7 @@ test "sandbox guidance is limited to permission failures" {
 }
 
 fn freeToolOut(alloc: std.mem.Allocator, res: tools.Result) void {
+    if (res.image) |image| alloc.free(image.data);
     if (!res.out_owned) return;
     for (res.out) |chunk| {
         if (chunk.owned) alloc.free(chunk.chunk);
@@ -2505,6 +2534,8 @@ test "runTool forwards cancel source to dispatch" {
 
     var cancel_impl = CancelImpl{};
 
+    var image_out: ?providers.Image = null;
+    defer if (image_out) |img| std.testing.allocator.free(img.data);
     const tr = try runTool(.{
         .alloc = std.testing.allocator,
         .sid = "sid-tool-cancel",
@@ -2519,7 +2550,7 @@ test "runTool forwards cancel source to dispatch" {
         .id = "call-1",
         .name = "read",
         .args = "{\"path\":\"a.txt\"}",
-    });
+    }, &image_out);
     defer std.testing.allocator.free(tr.id);
     defer std.testing.allocator.free(tr.output);
 
@@ -2651,6 +2682,8 @@ test "runTool approval hook binds repo policy session and cache state" {
     });
     var approver_impl = ApproverImpl{};
 
+    var image_out: ?providers.Image = null;
+    defer if (image_out) |img| std.testing.allocator.free(img.data);
     const tr = try runTool(.{
         .alloc = std.testing.allocator,
         .sid = "sid-approve",
@@ -2670,7 +2703,7 @@ test "runTool approval hook binds repo policy session and cache state" {
         .id = "call-write",
         .name = "write",
         .args = "{\"path\":\"a.txt\",\"text\":\"hello\"}",
-    });
+    }, &image_out);
     defer std.testing.allocator.free(tr.id);
     defer std.testing.allocator.free(tr.output);
 

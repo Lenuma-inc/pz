@@ -263,6 +263,7 @@ pub fn buildSlicedResult(
 
 /// Free a tools.Result whose out slice is owned.
 pub fn deinitResult(alloc: std.mem.Allocator, res: tools.Result) void {
+    if (res.image) |image| alloc.free(image.data);
     if (!res.out_owned) return;
     for (res.out) |out| {
         if (out.owned) alloc.free(out.chunk);
