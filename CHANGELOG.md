@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-03
+
+### Added
+- Bounded extraction of Next.js/RSC content when server-rendered HTML contains little text, with explicit notices for JavaScript app shells.
+- Image support in the read tool, with binary files rejected from text reads.
+
+### Fixed
+- Preserve article titles, feed cards, landing-page sections, ordered list counters and inline code during Markdown extraction.
+- Redact sensitive lines instead of hiding an entire web article; keep multiline private-key material hidden.
+- Download raw web responses up to 4 MiB independently of the output budget, with line selection and exact continuation.
+- Expand tool output with Ctrl+O.
+- Avoid repeating the MCP startup block when resuming a session.
+- Ignore Zig builtins in pasted logs instead of treating them as file attachments.
+
 ## [0.5.1] - 2026-11-03
 
 ### Fixed
