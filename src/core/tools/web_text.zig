@@ -346,3 +346,44 @@ test "web text selects prose inside broad containers without trimming short page
     defer a.free(explicit);
     try std.testing.expectEqualStrings("Selected body", explicit);
 }
+
+test "web text preserves Habr style explicit article bodies with card titles" {
+    const a = std.testing.allocator;
+    const html = "<main><h1>Моя лента</h1><article><h2><a href='/ru/articles/1/'>Первая статья</a></h2><div class='article-formatted-body'>Первый анонс</div></article><article><h2><a href='/ru/articles/2/'>Вторая статья</a></h2><div itemprop='articleBody'>Второй анонс</div></article></main>";
+    const text = try extractAlloc(a, html, .{ .url = "https://habr.com/ru/feed/" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("# Моя лента\n## [Первая статья](https://habr.com/ru/articles/1/)\nПервый анонс\n## [Вторая статья](https://habr.com/ru/articles/2/)\nВторой анонс", text);
+}
+
+test "web text retains landing sections and directory links instead of selecting one block" {
+    const a = std.testing.allocator;
+    const prose = "This detailed description explains the product and its practical benefits to developers and teams who want to learn more about the available features.";
+    const html = "<main><h1>Product</h1><section><h2>Links</h2><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p></section><section><h2>Analytics</h2><a href='/analytics'><span>Learn</span>\n<span>more</span></a></section><section><h2><a href='/linux'>Linux tutorials</a></h2><p>Getting started</p></section></main>";
+    const text = try extractAlloc(a, html, .{ .url = "https://example.org/" });
+    defer a.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "## Links") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "## Analytics\n[Learn more](https://example.org/analytics)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "## [Linux tutorials](https://example.org/linux)\nGetting started") != null);
+}
+
+test "web text removes navigation roles and empty list markers but retains code" {
+    const a = std.testing.allocator;
+    const html = "<div role='navigation'>Duplicate menu</div><div role='banner'>Site banner</div><main><h1>Feed</h1><ul><li><a href='/image'><img src='/logo.png'></a></li><li><a href='/post'>Read\n<span>this post</span></a></li></ul><pre>-\n  code</pre></main><div role='contentinfo'>Footer</div>";
+    const text = try extractAlloc(a, html, .{ .url = "https://example.org" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("# Feed\n- [Read this post](https://example.org/post)\n```\n-\n  code\n```", text);
+}
+
+test "web text identifies Vercel checkpoint without treating ordinary discussions as blocked" {
+    const a = std.testing.allocator;
+    const html = "<html><h1>We're verifying your browser</h1><a href='https://vercel.link/security-checkpoint'>Website owner?</a></html>";
+    const blocked = try extractAlloc(a, html, .{ .url = "https://example.org" });
+    defer a.free(blocked);
+    try std.testing.expect(std.mem.startsWith(u8, blocked, "[Access blocked:"));
+    const raw = try extractAlloc(a, html, .{ .url = "https://example.org", .format = .raw });
+    defer a.free(raw);
+    try std.testing.expectEqualStrings(html, raw);
+    const article = try extractAlloc(a, "<article><h1>Understanding Vercel Security Checkpoint</h1><p>How browser verification works.</p></article>", .{ .url = "https://example.org" });
+    defer a.free(article);
+    try std.testing.expectEqualStrings("# Understanding Vercel Security Checkpoint\nHow browser verification works.", article);
+}

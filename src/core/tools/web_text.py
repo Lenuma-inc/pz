@@ -14,7 +14,7 @@ LIMIT = 4 * 1024 * 1024
 class Text(HTMLParser):
     VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
     HIDDEN = {'script', 'style', 'noscript', 'template', 'svg', 'nav', 'footer', 'aside', 'head', 'button', 'form'}
-    BLOCK = {'p', 'div', 'section', 'article', 'main', 'br', 'li', 'tr', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol'}
+    BLOCK = {'p', 'div', 'section', 'article', 'main', 'br', 'li', 'tr', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol'}
 
     def __init__(self, base=''):
         super().__init__(convert_charrefs=True)
@@ -25,6 +25,7 @@ class Text(HTMLParser):
         self.pre = 0
         self.tables = []
         self.headings = []
+        self.sections = []
         self.list_pending = False
 
     def hidden(self):
@@ -32,7 +33,7 @@ class Text(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        hidden = self.hidden() or tag in self.HIDDEN or 'hidden' in attrs or attrs.get('aria-hidden') == 'true'
+        hidden = self.hidden() or tag in self.HIDDEN or 'hidden' in attrs or attrs.get('aria-hidden', '').lower() == 'true' or attrs.get('role') in {'navigation', 'banner', 'contentinfo', 'complementary'}
         region = None
         href = ''
         if not hidden:
@@ -47,6 +48,8 @@ class Text(HTMLParser):
                 self.regions.append(region)
             if tag == 'h1':
                 self.headings.append([len(self.parts), None])
+            if tag == 'h2':
+                self.sections.append(len(self.parts))
             if tag == 'table':
                 self.tables.append(dict(start=len(self.parts), rows=[], row=[], cell=None, caption='', caption_start=None))
                 self.parts.append('')
@@ -56,7 +59,7 @@ class Text(HTMLParser):
                 self.tables[-1]['cell'] = len(self.parts)
             if tag in self.BLOCK and (not self.list_pending or tag == 'li'):
                 self.parts.append('\n')
-            if tag in {'h1', 'h2', 'h3', 'h4'}:
+            if tag in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}:
                 self.parts.append('#' * int(tag[1]) + ' ')
             if tag == 'li':
                 self.parts.append('- ')
@@ -67,7 +70,7 @@ class Text(HTMLParser):
             if tag == 'a':
                 target = urljoin(self.base, attrs.get('href', ''))
                 if attrs.get('href') and target.startswith(('https://', 'http://', '/', '#')):
-                    href = target
+                    href = (target, len(self.parts))
                     self.parts.append('[')
         if tag not in self.VOID:
             self.stack.append((tag, hidden, region, href))
@@ -106,7 +109,12 @@ class Text(HTMLParser):
                 if name == 'h1' and self.headings:
                     self.headings[-1][1] = len(self.parts)
                 if href:
-                    self.parts.append('](' + href.replace(')', '%29') + ')')
+                    target, start = href
+                    label = re.sub(r'\s+', ' ', ''.join(self.parts[start + 1:])).strip()
+                    # Keep part indices stable for regions, headings and tables.
+                    self.parts[start] = '[' + label + '](' + target.replace(')', '%29') + ')' if label else ''
+                    for i in range(start + 1, len(self.parts)):
+                        self.parts[i] = ''
                 if name == 'pre':
                     self.pre -= 1
                     self.parts.append('\n```')
@@ -125,14 +133,15 @@ class Text(HTMLParser):
         # Prefer one explicit article body; multiple bodies usually mean a listing.
         regions = self.regions
         bodies = []
+        body_priority = max((r[0] for r in regions if r[0] >= 4), default=4)
         for rank, start, end in regions:
-            if rank == 4 and (not bodies or start >= bodies[-1]):
+            if rank == body_priority and (not bodies or start >= bodies[-1]):
                 bodies.append(end if end is not None else len(self.parts))
         if len(bodies) > 1:
-            regions = [r for r in regions if r[0] != 4]
+            # Multiple explicit articleBody blocks are a feed, not one article.
+            # Retain their enclosing cards so titles and permalinks survive.
+            regions = [r for r in regions if r[0] < 4]
         if regions:
-            if not any(r[0] > 0 for r in regions):
-                regions = regions + [[0, 0, len(self.parts)]]
             priority = max(r[0] for r in regions)
             ranges = []
             for rank, start, end in regions:
@@ -149,7 +158,10 @@ class Text(HTMLParser):
                 preceding = [(start, end) for start, end in self.headings if end is not None and end <= ranges[0][0]]
                 if preceding:
                     ranges.insert(0, list(preceding[-1]))
-            if priority < 4 and len(bodies) <= 1 and len(ranges) == 1:
+            # A multi-section landing page or directory is not a single prose
+            # article. Do not discard shorter product sections or linked cards.
+            section_count = sum(any(lo <= index < hi for lo, hi in ranges) for index in self.sections)
+            if priority < 4 and len(bodies) <= 1 and len(ranges) == 1 and section_count < 2:
                 start, end = ranges[0]
                 def score(lo, hi):
                     text = ''.join(self.parts[lo:hi])
@@ -186,7 +198,7 @@ class Text(HTMLParser):
         for line in text.splitlines():
             if line.strip() == '```':
                 code = not code
-            if line.strip():
+            if line.strip() and (code or line.strip() != '-'):
                 lines.append(line.rstrip() if code else line.strip())
         return '\n'.join(lines)
 
@@ -331,7 +343,8 @@ def extract(raw, mode='auto', path='', base=''):
         return raw
     value = raw.lstrip()
     lower = raw.lower()
-    if ('<title>just a moment' in lower and ('cf-chl-' in lower or 'challenges.cloudflare.com' in lower)) or ('<form' in lower and 'name="solution"' in lower and 'requestsubmit' in lower):
+    vercel_checkpoint = 'vercel.link/security-checkpoint' in lower and ('verifying your browser' in lower or 'vercel security checkpoint' in lower)
+    if vercel_checkpoint or ('<title>just a moment' in lower and ('cf-chl-' in lower or 'challenges.cloudflare.com' in lower)) or ('<form' in lower and 'name="solution"' in lower and 'requestsubmit' in lower):
         return '[Access blocked: the server returned a browser/JavaScript verification page. Article content was not retrieved.]'
     if re.match(r'<(?:\?xml\b|rss\b|feed\b|rdf:rdf\b)', value, re.I):
         try:
