@@ -313,3 +313,36 @@ test "web text pagination moves tables to a fresh page when necessary" {
     try std.testing.expect(std.mem.indexOf(u8, oversized, "1: | Configuration") != null);
     try std.testing.expect(std.mem.indexOf(u8, oversized, "next from_line=") != null);
 }
+
+test "web text bounded Next.js Flight fallback" {
+    const a = std.testing.allocator;
+    const script = "<script nonce='x'>self.__next_f.push([1,\"0:[\\\"$\\\",\\\"main\\\",null,{\\\"children\\\":[\\\"$L1\\\",\\\"$2\\\"]}]\\n1:[\\\"$\\\",\\\"h1\\\",null,{\\\"children\\\":\\\"RSC article\\\"}]\\n2:[\\\"$\\\",\\\"p\\\",null,{\\\"children\\\":\\\"Recovered body & text\\\",\\\"secret\\\":\\\"DO NOT SHOW\\\"}]\\n\"])</script>";
+    const text = try extractAlloc(a, "<main>Loading</main>" ++ script, .{ .url = "https://example.org" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("[Text extracted from Next.js/RSC data]\n# RSC article\nRecovered body & text", text);
+    const existing = "<main>" ++ ("Useful server-rendered content. " ** 10) ++ "</main>";
+    const kept = try extractAlloc(a, existing ++ script, .{ .url = "https://example.org" });
+    defer a.free(kept);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "RSC") == null);
+    const malformed = try extractAlloc(a, "<main>Loading</main><script>self.__next_f.push(not_json())</script>", .{ .url = "https://example.org" });
+    defer a.free(malformed);
+    try std.testing.expectEqualStrings("Loading", malformed);
+    const cycle = try extractAlloc(a, "<script>self.__next_f.push([1,\"0:[\\\"$\\\",\\\"p\\\",null,{\\\"children\\\":\\\"$0\\\"}]\\n\"])</script>", .{ .url = "https://example.org" });
+    defer a.free(cycle);
+    try std.testing.expectEqualStrings("", cycle);
+}
+
+test "web text selects prose inside broad containers without trimming short pages" {
+    const a = std.testing.allocator;
+    const prose = "A detailed article paragraph explains the measurements and their implications for readers, with enough context to distinguish it from navigation.";
+    const html = "<main><h1>Article title</h1><div><a href='/ads'>" ++ ("Promoted link " ** 30) ++ "</a></div><div><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p></div></main>";
+    const text = try extractAlloc(a, html, .{ .url = "https://example.org" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("# Article title\n" ++ prose ++ "\n" ++ prose ++ "\n" ++ prose, text);
+    const short = try extractAlloc(a, "Introduction<div><p>Small body</p></div>Conclusion", .{ .url = "https://example.org" });
+    defer a.free(short);
+    try std.testing.expectEqualStrings("Introduction\nSmall body\nConclusion", short);
+    const explicit = try extractAlloc(a, "<main><div class='article-content'><p>Selected body</p></div><div>Other content</div></main>", .{ .url = "https://example.org" });
+    defer a.free(explicit);
+    try std.testing.expectEqualStrings("Selected body", explicit);
+}

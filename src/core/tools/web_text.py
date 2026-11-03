@@ -1,5 +1,6 @@
 """Bounded, offline HTML/JSON extraction for web's model-facing output."""
 import json
+from html import escape
 import sys
 import subprocess
 import re
@@ -39,7 +40,9 @@ class Text(HTMLParser):
             explicit_body = attrs.get('itemprop') == 'articleBody' or bool(classes & {'article-formatted-body', 'tm-article-body'})
             article_body = bool(classes & {'entry-content', 'post-content', 'article-content'})
             priority = 5 if explicit_body else 4 if article_body else 3 if tag == 'main' or attrs.get('role') == 'main' else 2 if attrs.get('id') in {'content', 'main-content', 'main_content'} else 1 if tag == 'article' or attrs.get('itemprop') == 'articleBody' else 0
-            if priority:
+            # Keep a bounded set of unlabelled containers for conservative
+            # article scoring when semantic markup is absent or too broad.
+            if priority or (tag in {'div', 'section'} and len(self.regions) < 256):
                 region = [priority, len(self.parts), None]
                 self.regions.append(region)
             if tag == 'h1':
@@ -128,6 +131,8 @@ class Text(HTMLParser):
         if len(bodies) > 1:
             regions = [r for r in regions if r[0] != 4]
         if regions:
+            if not any(r[0] > 0 for r in regions):
+                regions = regions + [[0, 0, len(self.parts)]]
             priority = max(r[0] for r in regions)
             ranges = []
             for rank, start, end in regions:
@@ -138,10 +143,40 @@ class Text(HTMLParser):
                     ranges[-1][1] = max(ranges[-1][1], end)
                 else:
                     ranges.append([start, end])
+            if priority == 0:
+                ranges = [[0, len(self.parts)]]
             if priority >= 4 and not any(ranges[0][0] <= start < ranges[-1][1] for start, _ in self.headings):
                 preceding = [(start, end) for start, end in self.headings if end is not None and end <= ranges[0][0]]
                 if preceding:
                     ranges.insert(0, list(preceding[-1]))
+            if priority < 4 and len(bodies) <= 1 and len(ranges) == 1:
+                start, end = ranges[0]
+                def score(lo, hi):
+                    text = ''.join(self.parts[lo:hi])
+                    links = sum(len(match[1]) for match in re.finditer(r'\[([^\]]*)\]\([^\n)]*\)', text))
+                    plain = re.sub(r'\[([^\]]*)\]\([^\n)]*\)', r'\1', text)
+                    paragraphs = [line.strip() for line in plain.splitlines() if len(line.strip()) >= 80]
+                    size = len(plain.strip())
+                    if size < 300 or len(paragraphs) < 3 or links > size * 0.35:
+                        return 0
+                    return size - 3 * links
+                baseline = score(start, end)
+                best = None
+                for rank, lo, hi in regions:
+                    hi = hi if hi is not None else len(self.parts)
+                    if lo < start or hi > end or (lo == start and hi == end):
+                        continue
+                    candidate = score(lo, hi)
+                    # Prefer a compact prose block only when it retains most
+                    # of the useful text. Listings and short pages stay intact.
+                    if candidate > 0 and candidate >= baseline * 0.9:
+                        if best is None or candidate > best[0] or (candidate == best[0] and hi - lo < best[2] - best[1]):
+                            best = (candidate, lo, hi)
+                if best:
+                    ranges = [[best[1], best[2]]]
+                    preceding = [(lo, hi) for lo, hi in self.headings if hi is not None and hi <= best[1]]
+                    if preceding:
+                        ranges.insert(0, list(preceding[-1]))
             parts = [part for start, end in ranges for part in self.parts[start:end]]
         else:
             parts = self.parts
@@ -154,6 +189,108 @@ class Text(HTMLParser):
             if line.strip():
                 lines.append(line.rstrip() if code else line.strip())
         return '\n'.join(lines)
+
+
+class FlightScripts(HTMLParser):
+    """Collect inline Flight data only; never evaluate JavaScript."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.active = False
+        self.scripts = []
+
+    def handle_starttag(self, tag, attrs):
+        self.active = tag == 'script' and not dict(attrs).get('src')
+
+    def handle_endtag(self, tag):
+        if tag == 'script':
+            self.active = False
+
+    def handle_data(self, data):
+        if self.active:
+            self.scripts.append(data)
+
+
+def rsc_text(raw, base=''):
+    # Bound parsing, reference expansion and output independently. Unsupported
+    # Flight records are ignored rather than interpreted as executable code.
+    if len(raw) > LIMIT or 'self.__next_f.push' not in raw:
+        return ''
+    parser = FlightScripts()
+    parser.feed(raw)
+    decoder = json.JSONDecoder()
+    chunks = []
+    for script in parser.scripts:
+        for match in re.finditer(r'self\.__next_f\.push\s*\(\s*', script):
+            try:
+                value, end = decoder.raw_decode(script, match.end())
+            except (ValueError, RecursionError):
+                continue
+            if script[end:].lstrip().startswith(')') and isinstance(value, list) and len(value) == 2 and value[0] == 1 and isinstance(value[1], str):
+                chunks.append(value[1])
+            if len(chunks) >= 4096:
+                break
+        if len(chunks) >= 4096:
+            break
+    records = {}
+    for line in ''.join(chunks).splitlines():
+        key, sep, payload = line.partition(':')
+        if sep and re.fullmatch(r'[0-9a-fA-F]{1,8}', key) and payload.startswith(('[', '{', '"')):
+            try:
+                records[key.lower()] = json.loads(payload)
+            except (ValueError, RecursionError):
+                pass
+        if len(records) >= 4096:
+            break
+    budget = [20000, LIMIT]
+    active = set()
+
+    def render(node, depth=0):
+        budget[0] -= 1
+        if depth > 64 or budget[0] < 0 or budget[1] <= 0:
+            return ''
+        if isinstance(node, str):
+            ref = re.fullmatch(r'\$(?:L)?([0-9a-fA-F]{1,8})', node)
+            if ref:
+                key = ref[1].lower()
+                if key in active:
+                    return ''
+                active.add(key)
+                result = render(records.get(key), depth + 1)
+                active.remove(key)
+                return result
+            if node.startswith('$'):
+                return ''
+            text = escape(node[:budget[1]])
+            budget[1] -= len(text)
+            return text
+        if isinstance(node, list):
+            if len(node) >= 4 and node[0] == '$' and isinstance(node[3], dict):
+                tag, props = node[1], node[3]
+                if isinstance(tag, str) and tag in Text.HIDDEN:
+                    return ''
+                body = render(props.get('children'), depth + 1)
+                if isinstance(tag, str) and tag in Text.BLOCK | {'a', 'code', 'strong', 'em', 'table', 'td', 'th'}:
+                    href = props.get('href')
+                    attr = ' href="' + escape(href, quote=True) + '"' if tag == 'a' and isinstance(href, str) else ''
+                    return '<' + tag + attr + '>' + body + '</' + tag + '>'
+                return body
+            return ''.join(render(item, depth + 1) for item in node[:4096])
+        if isinstance(node, dict):
+            # Component props are not prose: only follow the children field.
+            return render(node.get('children'), depth + 1)
+        return ''
+
+    result = html_text(render(records.get('0')), base)
+    if result:
+        return result
+    # Routing envelopes may not expose children. Consider only explicit React
+    # element records, never metadata objects or standalone string records.
+    referenced = set()
+    for node in records.values():
+        if isinstance(node, list) and len(node) >= 4 and node[0] == '$':
+            referenced.update(re.findall(r'"\$(?:L)?([0-9a-fA-F]{1,8})"', json.dumps(node)))
+    roots = [node for key, node in records.items() if key not in {ref.lower() for ref in referenced} and isinstance(node, list) and len(node) >= 4 and node[0] == '$']
+    return html_text(render(roots), base)
 
 
 def html_text(value, base=''):
@@ -226,7 +363,12 @@ def extract(raw, mode='auto', path='', base=''):
                     candidates.extend(node.values())
             return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
     if value.startswith('<'):
-        return html_text(raw, base)
+        text = html_text(raw, base)
+        if len(text) < 200:
+            flight = rsc_text(raw, base)
+            if len(flight) > len(text):
+                return '[Text extracted from Next.js/RSC data]\n' + flight
+        return text
     return raw
 
 
