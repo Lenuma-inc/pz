@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-04
+
+### Fixed
+- Treat existing absolute file and directory paths as prompts rather than slash commands, including directory names containing spaces.
+- Avoid slash-command completion for existing filesystem paths without automatically quoting dropped paths.
+- Distinguish protected-path access and command parsing failures from sandbox denial, avoiding misleading requests for repeated approval.
+
 ## [0.5.3] - 2026-11-04
 
 ### Fixed
