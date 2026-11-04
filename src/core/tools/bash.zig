@@ -20,6 +20,8 @@ pub const Err = error{
     InvalidArgs,
     NotFound,
     Denied,
+    ProtectedPathDenied,
+    CommandParseFailed,
     TooLarge,
     Io,
     OutOfMemory,
@@ -97,7 +99,7 @@ pub const Handler = struct {
         for (args.env) |kv| {
             if (!isValidEnv(kv.key, kv.val)) return error.InvalidArgs;
         }
-        if (try deniesProtectedCmd(self.alloc, args.cmd)) return error.Denied;
+        try checkProtectedCmd(self.alloc, args.cmd);
 
         var env_len: usize = 0;
         while (std.c.environ[env_len] != null) : (env_len += 1) {}
@@ -252,6 +254,20 @@ pub const Handler = struct {
         shared.deinitResult(self.alloc, res);
     }
 };
+
+fn checkProtectedCmd(alloc: std.mem.Allocator, cmd: []const u8) Err!void {
+    const denied = shell.touchesProtectedPath(alloc, cmd) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.CommandParseFailed,
+    };
+    if (denied) return error.ProtectedPathDenied;
+}
+
+test "protected command checks distinguish parse failures from protected paths" {
+    try std.testing.expectError(error.CommandParseFailed, checkProtectedCmd(std.testing.allocator, "echo 'unterminated"));
+    try std.testing.expectError(error.ProtectedPathDenied, checkProtectedCmd(std.testing.allocator, "cat .pz/settings.json"));
+    try checkProtectedCmd(std.testing.allocator, "echo hello");
+}
 
 pub fn deniesProtectedCmd(alloc: std.mem.Allocator, cmd: []const u8) Err!bool {
     return shell.touchesProtectedPath(alloc, cmd) catch |err| switch (err) {
@@ -1044,7 +1060,7 @@ test "bash handler denies direct protected state access" {
         .at_ms = 0,
     };
 
-    try std.testing.expectError(error.Denied, handler.run(call, sink));
+    try std.testing.expectError(error.ProtectedPathDenied, handler.run(call, sink));
 }
 
 test "bash handler denies wrapped protected state access" {
@@ -1066,7 +1082,7 @@ test "bash handler denies wrapped protected state access" {
         .at_ms = 0,
     };
 
-    try std.testing.expectError(error.Denied, handler.run(call, sink));
+    try std.testing.expectError(error.ProtectedPathDenied, handler.run(call, sink));
 }
 
 test "bash handler reads files outside workspace in Linux workspace sandbox" {

@@ -1406,6 +1406,8 @@ fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Er
                 try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. For bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.", .{@errorName(run_err)})
             else
                 try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. {s}", .{ @errorName(run_err), switch (run_err) {
+                    error.CommandParseFailed => "The protected-path checker could not parse this shell command. Execution was blocked even if sandbox approval was granted. Simplify the command; requesting sandbox approval again will not fix this parse failure.",
+                    error.ProtectedPathDenied => "The command accesses a protected agent configuration path. Sandbox approval does not override this protection. Do not request the same permission again.",
                     error.NotFound => "A path or executable was not found. Check the path and runtime dependencies before retrying.",
                     error.PolicyMismatch => "The child agent policy handshake failed. Report the configuration failure; user network approval cannot override it.",
                     error.ApprovalRequired => "This action requires interactive approval, which is unavailable in this mode.",
