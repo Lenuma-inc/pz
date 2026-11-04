@@ -115,6 +115,16 @@ pub const Paths = struct {
     }
 };
 
+/// Existing absolute paths are prompt text, including directories and names with spaces.
+pub fn isExistingPathPrompt(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (!std.fs.path.isAbsolute(trimmed)) return false;
+    if (std.Io.Dir.cwd().statFile(sys.io, trimmed, .{})) |_| return true else |_| {}
+    const end = std.mem.indexOfAny(u8, trimmed, " \t\r\n") orelse return false;
+    if (std.Io.Dir.cwd().statFile(sys.io, trimmed[0..end], .{})) |_| return true else |_| {}
+    return false;
+}
+
 pub fn isPrompt(text: []const u8) bool {
     var paths = Paths{ .text = text };
     return (paths.next() catch return true) != null;

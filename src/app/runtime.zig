@@ -4966,8 +4966,31 @@ fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8, home: ?[]const u8)
 }
 
 fn isFilePrompt(line: []const u8) bool {
-    const end = std.mem.indexOfAny(u8, line, " \t\r\n") orelse line.len;
-    return attach.isPrompt(line[0..end]);
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (attach.isExistingPathPrompt(trimmed)) return true;
+    const end = std.mem.indexOfAny(u8, trimmed, " \t\r\n") orelse trimmed.len;
+    const first = trimmed[0..end];
+    return attach.isPrompt(first);
+}
+
+test "existing absolute directories are prompts without quotes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "native_games", .fromMode(0o700));
+    try tmp.dir.createDir(std.testing.io, "directory with spaces", .fromMode(0o700));
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    for ([_][]const u8{ "native_games", "directory with spaces" }) |name| {
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, name });
+        defer alloc.free(path);
+        try std.testing.expect(isFilePrompt(path));
+        const padded = try std.fmt.allocPrint(alloc, "{s} ", .{path});
+        defer alloc.free(padded);
+        try std.testing.expect(isFilePrompt(padded));
+    }
+    try std.testing.expect(!isFilePrompt("/help"));
+    try std.testing.expect(!isFilePrompt("/export /tmp/report.pdf"));
 }
 
 test "absolute file paths are prompts while slash commands retain arguments" {

@@ -377,7 +377,7 @@ pub const Ui = struct {
         self.picker = null;
 
         const text = self.ed.text();
-        if (text.len > 0 and text[0] == '/') {
+        if (text.len > 0 and text[0] == '/' and !@import("../../core/attach.zig").isExistingPathPrompt(text)) {
             self.clearPathItems();
             const prefix = text[1..];
             if (std.mem.indexOfScalar(u8, prefix, ' ')) |sp| {
