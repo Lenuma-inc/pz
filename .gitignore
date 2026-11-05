@@ -2,6 +2,10 @@ __pycache__
 .zig-cache/
 zig-out/
 zig-pkg/
+pz/
+src/
+pkg/
+*.patch
 .pz/
 .dots/
 PLAN.md
