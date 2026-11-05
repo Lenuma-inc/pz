@@ -52,6 +52,12 @@ pub const Paths = struct {
             }
             var path: []const u8 = self.buf[0..len];
             if (!literal) path = std.mem.trimEnd(u8, path, ",;:!?)]}");
+            // Diagnostics quote builtin names without a call (including removed builtins).
+            if (quoted_len != null and std.mem.startsWith(u8, path, "@")) {
+                const line_start = if (std.mem.lastIndexOfAny(u8, self.text[0..start], "\r\n")) |i| i + 1 else 0;
+                const prefix = std.mem.trimEnd(u8, self.text[line_start..start], " \t");
+                if (std.mem.endsWith(u8, prefix, "invalid builtin function:")) continue;
+            }
             // Zig builtins in pasted code and diagnostics are not @file references.
             if (!literal and std.mem.startsWith(u8, path, "@")) {
                 var end: usize = 1;
@@ -265,6 +271,13 @@ test "attachment paths ignore pasted shell code and keep multiline file drops" {
 }
 
 test "attachment paths ignore Zig builtins in compiler logs" {
+    try std.testing.expect(!isPrompt(
+        "install\n" ++
+            "src/services/native_appstream.zig:5:11: error: invalid builtin function: '@cImport'\n" ++
+            "const c = @cImport({\n" ++
+            "          ^~~~~~~~\n" ++
+            "failed command: /usr/bin/zig build-exe -I/usr/include/gtk-4.0 -Mroot=src/main.zig -lc",
+    ));
     try std.testing.expect(!isPrompt(
         "src/core/providers/limits.zig:102:17: error: import of file outside module path\n" ++
             "    try @import(\"../../test/helpers.zig\").expectSnapText(@src(), \"used week:0%\", value);\n" ++

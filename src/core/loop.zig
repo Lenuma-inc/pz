@@ -523,9 +523,16 @@ const Hist = struct {
         var count: usize = 0;
         var total: usize = 0;
         while (try paths.next()) |path| {
+            // Missing references in pasted logs remain text, without rolling back the prompt.
+            const loaded = attach.readAlloc(self.alloc, path) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => return err,
+            };
             count += 1;
-            if (count > attach.max_files) return error.TooManyAttachments;
-            const loaded = try attach.readAlloc(self.alloc, path);
+            if (count > attach.max_files) {
+                freePart(self.alloc, loaded.part);
+                return error.TooManyAttachments;
+            }
             // Transfer the payload before any further fallible work so rollback owns it.
             const label = std.fmt.allocPrint(self.alloc, "Attached file: {s}\n[{s}]", .{ path, loaded.note }) catch |err| {
                 freePart(self.alloc, loaded.part);
@@ -5872,8 +5879,14 @@ test "files history reads multiple attachments and rolls back a failed batch" {
     });
     const bad = try std.fmt.allocPrint(alloc, "'{s}/note.txt' '{s}/missing'", .{ root, root });
     defer alloc.free(bad);
-    try std.testing.expectError(error.FileNotFound, hist.pushTextDup(.user, bad));
-    try std.testing.expectEqual(@as(usize, 5), hist.items.items.len);
+    try hist.pushTextDup(.user, bad);
+    try std.testing.expectEqual(@as(usize, 8), hist.items.items.len);
+    try std.testing.expectEqualStrings(bad, hist.items.items[5].item.part.text);
+    try std.testing.expectEqualStrings("FILE_CONTENT_42", hist.items.items[7].item.part.text);
+    const missing = "Explain @/nonexistent/pz-missing-reference.txt";
+    try hist.pushTextDup(.user, missing);
+    try std.testing.expectEqual(@as(usize, 9), hist.items.items.len);
+    try std.testing.expectEqualStrings(missing, hist.items.items[8].item.part.text);
     try std.testing.checkAllAllocationFailures(alloc, struct {
         fn run(a: std.mem.Allocator, text: []const u8) !void {
             var history = Hist{ .alloc = a };
