@@ -1,4 +1,5 @@
 //! Offline extraction affects web output only; shared HTTP consumers keep raw bytes.
+const repeat = @import("../../test/repeat.zig").text;
 const std = @import("std");
 const sys = @import("pz_io");
 const web = @import("web.zig");
@@ -281,7 +282,7 @@ test "web text pagination reports exact whole line continuation within byte limi
 
 test "web text oversized Unicode line resumes at exact byte offset" {
     const a = std.testing.allocator;
-    const body = "Привет" ** 50;
+    const body = repeat("Привет", 50);
     const first = try pageAlloc(a, body, 200, .{ .url = "https://example.org" }, 256);
     defer a.free(first);
     try std.testing.expect(first.len <= 256);
@@ -314,7 +315,7 @@ test "web text retains news titles with multiple article bodies and table captio
 
 test "web text pagination continues after default line limit" {
     const a = std.testing.allocator;
-    const page = try pageAlloc(a, "line\n" ** 100, 200, .{ .url = "https://example.org" }, 8192);
+    const page = try pageAlloc(a, repeat("line\n", 100), 200, .{ .url = "https://example.org" }, 8192);
     defer a.free(page);
     try std.testing.expect(std.mem.indexOf(u8, page, "80: line\nlast_complete_line=80; next from_line=81, line_offset=0") != null);
     try std.testing.expectError(error.TooLarge, pageAlloc(a, "text", 200, .{ .url = "https://example.org" }, 192));
@@ -331,7 +332,7 @@ test "web text prefers explicit body over recommendation cards and joins list pa
 test "web text pagination moves tables to a fresh page when necessary" {
     const a = std.testing.allocator;
     const table = "| Configuration | Tokens | Time |\n| --- | --- | --- |\n| Model A | 42k | 15 min |\n| Model B | 52k | 12 min |";
-    const body = "intro " ** 15 ++ "\n" ++ table ++ "\nConclusion";
+    const body = repeat("intro ", 15) ++ "\n" ++ table ++ "\nConclusion";
     const first = try pageAlloc(a, body, 200, .{ .url = "https://example.org" }, 400);
     defer a.free(first);
     try std.testing.expect(std.mem.indexOf(u8, first, "Configuration") == null);
@@ -344,7 +345,7 @@ test "web text pagination moves tables to a fresh page when necessary" {
     defer a.free(range);
     try std.testing.expect(std.mem.indexOf(u8, range, "Configuration") == null);
     try std.testing.expect(std.mem.indexOf(u8, range, "next from_line=2, line_offset=0") != null);
-    const oversized = try pageAlloc(a, table ++ "\n| Model C | 100k | 30 min |\n" ** 20, 200, .{ .url = "https://example.org" }, 400);
+    const oversized = try pageAlloc(a, table ++ repeat("\n| Model C | 100k | 30 min |\n", 20), 200, .{ .url = "https://example.org" }, 400);
     defer a.free(oversized);
     try std.testing.expect(std.mem.indexOf(u8, oversized, "1: | Configuration") != null);
     try std.testing.expect(std.mem.indexOf(u8, oversized, "next from_line=") != null);
@@ -390,7 +391,7 @@ test "web text bounded Next.js Flight fallback" {
     const text = try extractAlloc(a, "<main>Loading</main>" ++ script, .{ .url = "https://example.org" });
     defer a.free(text);
     try std.testing.expectEqualStrings("[Text extracted from Next.js/RSC data]\n# RSC article\nRecovered body & text", text);
-    const existing = "<main>" ++ ("Useful server-rendered content. " ** 10) ++ "</main>";
+    const existing = "<main>" ++ (repeat("Useful server-rendered content. ", 10)) ++ "</main>";
     const kept = try extractAlloc(a, existing ++ script, .{ .url = "https://example.org" });
     defer a.free(kept);
     try std.testing.expect(std.mem.indexOf(u8, kept, "RSC") == null);
@@ -405,7 +406,7 @@ test "web text bounded Next.js Flight fallback" {
 test "web text selects prose inside broad containers without trimming short pages" {
     const a = std.testing.allocator;
     const prose = "A detailed article paragraph explains the measurements and their implications for readers, with enough context to distinguish it from navigation.";
-    const html = "<main><h1>Article title</h1><div><a href='/ads'>" ++ ("Promoted link " ** 30) ++ "</a></div><div><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p></div></main>";
+    const html = "<main><h1>Article title</h1><div><a href='/ads'>" ++ (repeat("Promoted link ", 30)) ++ "</a></div><div><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p><p>" ++ prose ++ "</p></div></main>";
     const text = try extractAlloc(a, html, .{ .url = "https://example.org" });
     defer a.free(text);
     try std.testing.expectEqualStrings("# Article title\n" ++ prose ++ "\n" ++ prose ++ "\n" ++ prose, text);

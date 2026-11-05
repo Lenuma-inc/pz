@@ -1,3 +1,4 @@
+const repeat = @import("repeat.zig").text;
 const std = @import("std");
 const tools = @import("../core/tools.zig");
 const builtin = @import("../core/tools/builtin.zig");
@@ -103,7 +104,7 @@ test "basic tools: edit and write bound responses without truncating files" {
     defer cwd.deinit();
     var rt = builtin.Runtime.init(.{ .alloc = alloc, .max_bytes = 64 });
     defer rt.deinit();
-    const text = "changed\n" ** 100;
+    const text = repeat("changed\n", 100);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "old\n" });
     const edited = try run(&rt, .edit, .{ .edit = .{ .path = "a", .old = "old\n", .new = text } });
     defer rt.deinitResult(edited);
@@ -138,13 +139,13 @@ test "basic tools: bounded source output and search defaults avoid context dumps
     defer cwd.deinit();
     var rt = builtin.Runtime.init(.{ .alloc = alloc });
     defer rt.deinit();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large", .data = "long line " ** 2000 ++ "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large", .data = repeat("long line ", 2000) ++ "\n" });
     const read = try run(&rt, .read, .{ .read = .{ .path = "large" } });
     defer rt.deinitResult(read);
     try std.testing.expectEqual(@as(usize, 8192), read.out[0].chunk.len);
     try std.testing.expect(read.out[0].truncated);
     try std.testing.expect(read.out[1].stream == .meta);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "matches", .data = "needle\n" ** 60 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "matches", .data = repeat("needle\n", 60) });
     const found = try run(&rt, .grep, .{ .grep = .{ .path = "matches", .pattern = "needle" } });
     defer rt.deinitResult(found);
     try std.testing.expectEqual(@as(usize, 40), std.mem.count(u8, found.out[0].chunk, "\n"));
@@ -160,10 +161,10 @@ test "basic tools: grep previews long matching lines without dumping files" {
     defer cwd.deinit();
     var rt = builtin.Runtime.init(.{ .alloc = alloc });
     defer rt.deinit();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "needle " ++ "x" ** 10000 ++ "\nunrelated\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "needle " ++ repeat("x", 10000) ++ "\nunrelated\n" });
     const res = try run(&rt, .grep, .{ .grep = .{ .path = "a", .pattern = "needle" } });
     defer rt.deinitResult(res);
-    try snap(@src(), "a:1:needle " ++ "x" ** 233 ++ " [... omitted end of long line]\n", res.out[0].chunk);
+    try snap(@src(), "a:1:needle " ++ repeat("x", 233) ++ " [... omitted end of long line]\n", res.out[0].chunk);
 }
 
 test "basic tools: default edit write and patch diffs stay within 4 KiB" {
@@ -173,13 +174,13 @@ test "basic tools: default edit write and patch diffs stay within 4 KiB" {
     defer cwd.deinit();
     var rt = builtin.Runtime.init(.{ .alloc = alloc });
     defer rt.deinit();
-    const text = "changed\n" ** 1000;
+    const text = repeat("changed\n", 1000);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "old\n" });
     const edited = try run(&rt, .edit, .{ .edit = .{ .path = "a", .old = "old\n", .new = text } });
     defer rt.deinitResult(edited);
     const written = try run(&rt, .write, .{ .write = .{ .path = "b", .text = text } });
     defer rt.deinitResult(written);
-    const diff = "@@ -1 +1,1000 @@\n-old\n" ++ "+changed\n" ** 1000;
+    const diff = "@@ -1 +1,1000 @@\n-old\n" ++ repeat("+changed\n", 1000);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "c", .data = "old\n" });
     const patched = try run(&rt, .patch, .{ .patch = .{ .path = "c", .patch = diff } });
     defer rt.deinitResult(patched);

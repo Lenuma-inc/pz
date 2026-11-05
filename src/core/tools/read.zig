@@ -1,4 +1,5 @@
 //! File read tool with path guarding and line-range support.
+const repeat = @import("../../test/repeat.zig").text;
 const sys = @import("pz_io");
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
@@ -218,12 +219,12 @@ test "read handler defaults to twenty lines and honors explicit expansion" {
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "first\n" ** 20 ++ "next\n" ** 20 ++ "tail\n" ** 20 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = repeat("first\n", 20) ++ repeat("next\n", 20) ++ repeat("tail\n", 20) });
     const handler = Handler.init(.{ .alloc = alloc, .max_bytes = 4096 });
     const cases = [_]struct { from: ?u32, to: ?u32, expected: []const u8 }{
-        .{ .from = null, .to = null, .expected = "first\n" ** 20 },
-        .{ .from = 21, .to = null, .expected = "next\n" ** 20 },
-        .{ .from = 1, .to = 40, .expected = "first\n" ** 20 ++ "next\n" ** 20 },
+        .{ .from = null, .to = null, .expected = repeat("first\n", 20) },
+        .{ .from = 21, .to = null, .expected = repeat("next\n", 20) },
+        .{ .from = 1, .to = 40, .expected = repeat("first\n", 20) ++ repeat("next\n", 20) },
         .{ .from = std.math.maxInt(u32), .to = null, .expected = "" },
     };
     for (cases) |case| {
@@ -509,6 +510,6 @@ test "read returns images as bounded binary payloads regardless of line range" {
     try std.testing.expectEqual(@as(usize, 0), res.out.len);
     try std.testing.expectEqualStrings("image/jpeg", res.image.?.media_type);
     try std.testing.expectEqualStrings(data, res.image.?.data);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frame.jpg", .data = data ++ "x" ** attach.max_bytes });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frame.jpg", .data = data ++ repeat("x", attach.max_bytes) });
     try std.testing.expectError(error.TooLarge, handler.run(.{ .id = "large", .kind = .read, .args = .{ .read = .{ .path = "frame.jpg" } }, .src = .model, .at_ms = 0 }, noop.sink()));
 }

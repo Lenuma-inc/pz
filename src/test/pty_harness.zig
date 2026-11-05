@@ -156,7 +156,7 @@ const CStringList = struct {
     }
 
     fn appendDupZ(self: *CStringList, text: []const u8) !void {
-        const dup = try self.alloc.dupeZ(u8, text);
+        const dup = try self.alloc.dupeSentinel(u8, text, 0);
         try self.items.append(self.alloc, dup.ptr);
     }
 };
@@ -2349,7 +2349,7 @@ fn runPtyInteractive(
     }
     try cenvp.items.append(alloc, null); // sentinel
 
-    const cwd_z = try alloc.dupeZ(u8, cwd);
+    const cwd_z = try alloc.dupeSentinel(u8, cwd, 0);
     defer alloc.free(cwd_z);
 
     // openpty

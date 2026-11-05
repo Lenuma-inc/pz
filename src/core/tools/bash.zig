@@ -1,4 +1,5 @@
 //! Bash tool: shell command execution with sandbox and policy.
+const repeat = @import("../../test/repeat.zig").text;
 const sys = @import("pz_io");
 const builtin = @import("builtin");
 const std = @import("std");
@@ -619,7 +620,7 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
     const path_guard = @import("path_guard.zig");
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "unrelated.txt", .data = "unrelated\n" ** 10000 });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "unrelated.txt", .data = repeat("unrelated\n", 10000) });
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,

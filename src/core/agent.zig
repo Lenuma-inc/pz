@@ -52,7 +52,7 @@ pub const version_mismatch_exit_code: u8 = 78;
 
 pub fn driverPathAlloc(alloc: std.mem.Allocator) ![:0]u8 {
     // Re-exec the running image even after an update unlinks its on-disk path.
-    if (@import("builtin").os.tag == .linux) return alloc.dupeZ(u8, "/proc/self/exe");
+    if (@import("builtin").os.tag == .linux) return alloc.dupeSentinel(u8, "/proc/self/exe", 0);
     return std.process.executablePathAlloc(sys.io, alloc);
 }
 

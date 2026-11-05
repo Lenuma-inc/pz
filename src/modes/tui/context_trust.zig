@@ -1,4 +1,5 @@
 //! Local-only review of context instructions; no model sees the preview.
+const repeat = @import("../../test/repeat.zig").text;
 const std = @import("std");
 const overlay = @import("overlay.zig");
 const editor = @import("editor.zig");
@@ -180,7 +181,7 @@ test "context review wheel reaches end of a 900 line file without wrapping" {
 
 test "context review scroll renders multilingual code blocks" {
     const alloc = std.testing.allocator;
-    const content = "# Guidelines\n```python\nПривет → 世界 😀\n```\n```json\nПривет → 世界 😀\n```\n" ** 100;
+    const content = repeat("# Guidelines\n```python\nПривет → 世界 😀\n```\n```json\nПривет → 世界 😀\n```\n", 100);
     var review = try Review.init(alloc, "/project/AGENTS.md", content);
     defer review.deinit(alloc);
     var frm = try @import("frame.zig").Frame.init(alloc, 160, 45);

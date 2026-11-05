@@ -1,4 +1,5 @@
 //! Session compaction: summarize history to fit context window.
+const repeat = @import("../../test/repeat.zig").text;
 const sys = @import("pz_io");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -819,8 +820,8 @@ test "summary compaction shrinks history and preserves recent tool pairs and att
         .{ .data = .{ .model = .{ .id = "m", .provider = "p" } } },
         .{ .data = .{ .prompt = .{ .text = "original goal" } } },
         .{ .data = .{ .tool_call = .{ .id = "old", .name = "write", .args = "{\"path\":\"a\"}" } } },
-        .{ .data = .{ .tool_result = .{ .id = "old", .output = "large old diff\n" ** 10000 } } },
-        .{ .data = .{ .text = .{ .text = "old response\n" ** 1000 } } },
+        .{ .data = .{ .tool_result = .{ .id = "old", .output = repeat("large old diff\n", 10000) } } },
+        .{ .data = .{ .text = .{ .text = repeat("old response\n", 1000) } } },
         .{ .data = .{ .stop = .{ .reason = .done } } },
     };
     const recent = [_]schema.Event{
@@ -872,7 +873,7 @@ test "summary compaction leaves journal intact on failed incomplete or growing s
     const cases = [_]struct { steps: []const mock.Step, err: anyerror }{
         .{ .steps = &.{.{ .ev = .{ .stop = .{ .reason = .max_out } } }}, .err = error.SummaryFailed },
         .{ .steps = &.{.{ .ev = .{ .text = "incomplete" } }}, .err = error.SummaryFailed },
-        .{ .steps = &.{ .{ .ev = .{ .text = "too long\n" ** 100 } }, .{ .ev = .{ .stop = .{ .reason = .done } } } }, .err = error.SummaryDidNotShrink },
+        .{ .steps = &.{ .{ .ev = .{ .text = repeat("too long\n", 100) } }, .{ .ev = .{ .stop = .{ .reason = .done } } } }, .err = error.SummaryDidNotShrink },
     };
     for (cases) |case| {
         var scripted = try mock.ScriptedProvider.init(case.steps);
@@ -895,7 +896,7 @@ test "repeated summaries retain the original journal and cumulative paths" {
     const old = [_]schema.Event{
         .{ .data = .{ .prompt = .{ .text = "original goal and constraints" } } },
         .{ .data = .{ .tool_call = .{ .id = "a", .name = "write", .args = "{\"path\":\"a\",\"content\":\"data\"}" } } },
-        .{ .data = .{ .tool_result = .{ .id = "a", .output = "old output\n" ** 100 } } },
+        .{ .data = .{ .tool_result = .{ .id = "a", .output = repeat("old output\n", 100) } } },
         .{ .data = .{ .stop = .{ .reason = .done } } },
     };
     for (old) |ev| try wr.append("s", ev);
@@ -907,7 +908,7 @@ test "repeated summaries retain the original journal and cumulative paths" {
     _ = try summarizeWith(alloc, tmp.dir, "s", 1, &scripted.provider, "m", .{ .keep_tokens = 0 });
     try wr.append("s", .{ .data = .{ .prompt = .{ .text = "corrected user request" } } });
     try wr.append("s", .{ .data = .{ .tool_call = .{ .id = "b", .name = "read", .args = "{\"path\":\"b\",\"offset\":1}" } } });
-    try wr.append("s", .{ .data = .{ .tool_result = .{ .id = "b", .output = "new output\n" ** 100 } } });
+    try wr.append("s", .{ .data = .{ .tool_result = .{ .id = "b", .output = repeat("new output\n", 100) } } });
     try wr.append("s", .{ .data = .{ .stop = .{ .reason = .done } } });
     const before = try tmp.dir.readFileAlloc(std.testing.io, "s.jsonl", alloc, .limited(64 * 1024));
     defer alloc.free(before);
@@ -944,7 +945,7 @@ test "cutPoint property never splits a parallel tool batch" {
                 .{ .data = .{ .stop = .{ .reason = .done } } },
                 .{ .data = .{ .prompt = .{ .text = "continue" } } },
             };
-            const sizes = [_]usize{1} ** events.len;
+            const sizes = @as([events.len]usize, @splat(1));
             const cut = cutPoint(std.testing.allocator, &events, &sizes, args.budget) catch return false;
             return cut == 0 or cut >= 5;
         }
@@ -969,7 +970,7 @@ test "summary projection bounds UTF8 output and labels binary attachments" {
     const events = [_]schema.Event{
         .{ .data = .{ .thinking = .{ .text = "PRIVATE_THINKING" } } },
         .{ .data = .{ .prompt = .{ .text = "inspect image", .attachments = &.{.{ .data = "BINARY_BASE64", .media_type = "image/png" }} } } },
-        .{ .data = .{ .tool_result = .{ .id = "call", .output = "HEAD" ++ "Ж" ** 5000 ++ "TAIL", .is_err = true } } },
+        .{ .data = .{ .tool_result = .{ .id = "call", .output = "HEAD" ++ repeat("Ж", 5000) ++ "TAIL", .is_err = true } } },
     };
     const generated = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
     defer freeGeneratedSummary(alloc, generated);
