@@ -59,6 +59,7 @@ pub const Panels = struct {
     tot_cr: u64 = 0,
     tot_cw: u64 = 0,
     ctx_limit: u64 = 0,
+    context_windows: ?*const std.StringHashMapUnmanaged(u64) = null,
     run_state: RunState = .idle,
     turns: u32 = 0,
     compaction_until_ms: i64 = 0,

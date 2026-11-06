@@ -59,6 +59,7 @@ pub fn findModel(name: []const u8) ?ModelInfo {
 }
 
 pub fn contextWindow(name: []const u8) ?u32 {
+    if (@import("openai_models.zig").find(name)) |model| return model.context_window;
     return if (findModel(name)) |m| m.ctx_win else null;
 }
 

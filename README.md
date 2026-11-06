@@ -155,6 +155,24 @@ Canonical `pz` state lives under `.pz/`:
 - `~/.agents/skills/`, `~/.pz/skills/` and `./.pz/skills/` — skill definitions, with later directories overriding earlier ones by directory name
 - `AGENTS.md` — policy-controlled context files
 
+For models missing from the built-in context-window registry, set the verified
+window size (in tokens) by exact model ID in `settings.json`:
+
+```json
+{
+  "contextWindows": {
+    "your-model-id": 131072
+  }
+}
+```
+
+Values must be positive integers. Explicit values override the built-in registry;
+a later configuration file replaces the entire `contextWindows` map. Unknown
+models have no assumed window: the UI omits the context percentage and automatic
+percentage-based compaction is disabled until a window is configured. Manual
+compaction remains available. Use the limit documented by your model provider,
+not the illustrative value above.
+
 ## License
 
 MIT

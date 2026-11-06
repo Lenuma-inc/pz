@@ -94,8 +94,10 @@ pub const Config = struct {
     audit_overflow: core.policy.AuditOverflow = .drop_oldest,
     syslog_fwd: ?SyslogFwd = null,
     mcp_servers_json: ?[]u8 = null,
+    context_windows: std.StringHashMapUnmanaged(u64) = .empty,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
+        freeContextWindows(alloc, &self.context_windows);
         if (self.syslog_fwd) |*fwd| fwd.deinit(alloc);
         const info = @typeInfo(Config).@"struct";
         if (@hasField(@TypeOf(info), "fields")) {
@@ -236,6 +238,7 @@ const SettingsCfg = struct {
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
     mcpServers: ?std.json.Value = null,
+    contextWindows: ?std.json.Value = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
     syslog_host: ?[]const u8 = null,
@@ -331,6 +334,7 @@ pub fn discover(
     if (!out.policy_lock.cfg) {
         if (try loadFile(alloc, io, dir, parsed.cfg)) |file_cfg| {
             defer file_cfg.deinit();
+            if (file_cfg.value.contextWindows) |value| try setContextWindows(alloc, &out, value);
             if (file_cfg.value.mcpServers) |value| try setMcp(alloc, &out, value);
             try applyRawCfg(
                 alloc,
@@ -434,6 +438,7 @@ const FileCfg = struct {
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
     mcpServers: ?std.json.Value = null,
+    contextWindows: ?std.json.Value = null,
 };
 
 fn loadFile(
@@ -509,6 +514,7 @@ fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
 }
 
 fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) !void {
+    if (pi.contextWindows) |value| try setContextWindows(alloc, cfg, value);
     if (pi.mcpServers) |value| try setMcp(alloc, cfg, value);
     try applyRawCfg(
         alloc,
@@ -1117,4 +1123,43 @@ test "MCP configuration rejects invalid servers before launching processes" {
     defer tmp.cleanup();
     try writeAutoCfg(tmp.dir, "{\"mcpServers\":{\"linux\":{\"command\":\"\"}}}");
     try std.testing.expectError(error.InvalidMcpConfig, discover(std.testing.allocator, std.testing.io, tmp.dir, try args.parse(&.{}), .{}));
+}
+
+fn freeContextWindows(alloc: std.mem.Allocator, windows: *std.StringHashMapUnmanaged(u64)) void {
+    var keys = windows.keyIterator();
+    while (keys.next()) |key| alloc.free(key.*);
+    windows.deinit(alloc);
+}
+
+fn setContextWindows(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
+    if (value != .object) return error.InvalidContextWindow;
+    var windows: std.StringHashMapUnmanaged(u64) = .empty;
+    errdefer freeContextWindows(alloc, &windows);
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.*.len == 0 or entry.value_ptr.* != .integer or entry.value_ptr.integer <= 0)
+            return error.InvalidContextWindow;
+        const key = try alloc.dupe(u8, entry.key_ptr.*);
+        errdefer alloc.free(key);
+        try windows.put(alloc, key, @intCast(entry.value_ptr.integer));
+    }
+    freeContextWindows(alloc, &cfg.context_windows);
+    cfg.context_windows = windows;
+}
+
+test "context window overrides validate values and own model names" {
+    const alloc = std.testing.allocator;
+    var cfg = Config{ .mode = .tui, .model = try alloc.dupe(u8, "m"), .provider = try alloc.dupe(u8, "p"), .session_dir = try alloc.dupe(u8, "s") };
+    defer cfg.deinit(alloc);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"gpt-6.1-sol\":131072}", .{});
+    try setContextWindows(alloc, &cfg, parsed.value);
+    parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 131072), cfg.context_windows.get("gpt-6.1-sol").?);
+    for ([_][]const u8{ "0", "{}", "{\"m\":0}", "{\"m\":-1}", "{\"m\":\"200000\"}" }) |raw| {
+        const bad = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+        defer bad.deinit();
+        if (std.mem.eql(u8, raw, "{}")) continue;
+        try std.testing.expectError(error.InvalidContextWindow, setContextWindows(alloc, &cfg, bad.value));
+        try std.testing.expectEqual(@as(u64, 131072), cfg.context_windows.get("gpt-6.1-sol").?);
+    }
 }

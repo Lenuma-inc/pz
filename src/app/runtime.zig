@@ -2811,7 +2811,8 @@ fn runTui(
     var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, safe_model.text, safe_provider.text, safe_cwd.text, safe_branch.text, run_cmd.cfg.theme);
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
-    ui.panels.ctx_limit = modelCtxWindow(model);
+    ui.panels.context_windows = &run_cmd.cfg.context_windows;
+    ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
     ui.panels.is_sub = is_sub;
 
     _ = tui_term.installSigwinch();
@@ -3241,7 +3242,7 @@ fn runTui(
                                             },
                                         };
                                         try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
-                                        ui.panels.ctx_limit = modelCtxWindow(model);
+                                        ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
                                         try syncThinking(alloc, &ui, model, &thinking, &popts);
                                         try syncSessionModel(&ui, store, sid.*, model, provider_label);
                                         try ui.setProvider(provider_label);
@@ -3619,7 +3620,7 @@ fn runTui(
                         .cycle_model => {
                             if (pre) |p| alloc.free(p);
                             model = try cycleModel(alloc, model, &model_owned, models_list);
-                            ui.panels.ctx_limit = modelCtxWindow(model);
+                            ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
                             try syncSessionModel(&ui, store, sid.*, model, provider_label);
                             try ui.draw(out);
@@ -3719,7 +3720,7 @@ fn runTui(
                         .reverse_cycle_model => {
                             if (pre) |p| alloc.free(p);
                             model = try reverseCycleModel(alloc, model, &model_owned, models_list);
-                            ui.panels.ctx_limit = modelCtxWindow(model);
+                            ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
                             try syncSessionModel(&ui, store, sid.*, model, provider_label);
                             try ui.draw(out);
@@ -6320,7 +6321,7 @@ fn restoreSessionIntoUi(
         try ui.panels.provider.ensureTotalCapacity(alloc, m.provider.len);
         try ui.setModel(m.id);
         try ui.setProvider(m.provider);
-        ui.panels.ctx_limit = modelCtxWindow(m.id);
+        ui.panels.ctx_limit = modelCtxWindow(m.id, ui.panels.context_windows);
     }
     ui.ed.clear();
     std.mem.swap(@TypeOf(ui.ed.hist), &ui.ed.hist, &history.hist);
@@ -6824,7 +6825,10 @@ fn resolveDefaultProvider(provider: []const u8) []const u8 {
     return if (std.mem.eql(u8, provider, "default")) "" else provider;
 }
 
-fn modelCtxWindow(model: []const u8) u64 {
+fn modelCtxWindow(model: []const u8, overrides: ?*const std.StringHashMapUnmanaged(u64)) u64 {
+    if (overrides) |windows| {
+        if (windows.get(model)) |limit| return limit;
+    }
     const table = .{
         .{ "opus-4-6", 1000000 },
         .{ "opus-4-5", 200000 },
@@ -6842,7 +6846,7 @@ fn modelCtxWindow(model: []const u8) u64 {
     inline for (table) |entry| {
         if (std.mem.indexOf(u8, model, entry[0]) != null) return entry[1];
     }
-    return 200000; // sensible default
+    return core.providers.models.contextWindow(model) orelse 0; // Unknown is not a measured 200k window.
 }
 
 fn isPathLike(raw: []const u8) bool {
@@ -16316,4 +16320,16 @@ test "MCP startup slash command handles inventories larger than four KiB" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "MCP-LARGE-OUTPUT-END") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "WriteFailed") == null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "MCP-STDERR-MUST-NOT-REACH-TUI") == null);
+}
+
+test "model context windows use explicit overrides and registry without guessing" {
+    var windows: std.StringHashMapUnmanaged(u64) = .empty;
+    defer windows.deinit(std.testing.allocator);
+    try windows.put(std.testing.allocator, "gpt-6.1-sol", 131072);
+    try std.testing.expectEqual(@as(u64, 131072), modelCtxWindow("gpt-6.1-sol", &windows));
+    try std.testing.expectEqual(@as(u64, 272000), modelCtxWindow("gpt-6.1-sol", null));
+    try std.testing.expectEqual(@as(u64, 500000), modelCtxWindow("gpt-6.1-terra", null));
+    try std.testing.expectEqual(@as(u64, 0), modelCtxWindow("unknown-model", null));
+    try std.testing.expectEqual(@as(u64, 128000), modelCtxWindow("gpt-4o", null));
+    try std.testing.expectEqual(@as(u64, 1000000), modelCtxWindow("claude-opus-4-6", null));
 }
