@@ -522,17 +522,25 @@ const Hist = struct {
         var paths = attach.Paths{ .text = text };
         var count: usize = 0;
         var total: usize = 0;
-        while (try paths.next()) |path| {
-            // Missing references in pasted logs remain text, without rolling back the prompt.
+        // Attachment problems keep the reference as prompt text. A file that is
+        // too large, unsupported or unreadable must not abort the turn or drop
+        // the user's message, especially when a path only appears in prose.
+        while (true) {
+            const path = (paths.next() catch break) orelse break;
             const loaded = attach.readAlloc(self.alloc, path) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => continue,
-                else => return err,
+                error.OutOfMemory => return err,
+                else => continue,
             };
-            count += 1;
-            if (count > attach.max_files) {
+            const size = switch (loaded.part) {
+                .text => |data| data.len,
+                .image => |image| image.data.len,
+                else => 0,
+            };
+            if (count >= attach.max_files or total + size > attach.max_bytes) {
                 freePart(self.alloc, loaded.part);
-                return error.TooManyAttachments;
+                break;
             }
+            count += 1;
             // Transfer the payload before any further fallible work so rollback owns it.
             const label = std.fmt.allocPrint(self.alloc, "Attached file: {s}\n[{s}]", .{ path, loaded.note }) catch |err| {
                 freePart(self.alloc, loaded.part);
@@ -543,12 +551,7 @@ const Hist = struct {
                 return err;
             };
             try self.pushPartOwned(role, loaded.part);
-            total += switch (loaded.part) {
-                .text => |data| data.len,
-                .image => |image| image.data.len,
-                else => 0,
-            };
-            if (total > attach.max_bytes) return error.AttachmentsTooLarge;
+            total += size;
         }
     }
 
@@ -5894,6 +5897,29 @@ test "files history reads multiple attachments and rolls back a failed batch" {
             try history.pushTextDup(.user, text);
         }
     }.run, .{prompt});
+}
+
+test "files history keeps oversized references as prompt text" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+
+    const big = try alloc.alloc(u8, attach.max_bytes + 1);
+    defer alloc.free(big);
+    @memset(big, 'x');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big.bin", .data = big });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "binary.bin", .data = "binary\x00payload" });
+    const prompt = try std.fmt.allocPrint(alloc, "Inspect '{s}/big.bin' and '{s}/binary.bin'", .{ root, root });
+    defer alloc.free(prompt);
+
+    var hist = Hist{ .alloc = alloc };
+    defer hist.deinit();
+    try hist.pushTextDup(.user, prompt);
+
+    try std.testing.expectEqual(@as(usize, 1), hist.items.items.len);
+    try std.testing.expectEqualStrings(prompt, hist.items.items[0].item.part.text);
 }
 
 test "files property arbitrary path tokens terminate without out-of-bounds access" {
