@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+### Added
+- Arch Linux PKGBUILD for building tagged releases on x86_64 and aarch64.
+
+### Fixed
+- Preserve user prompts when referenced attachments are missing, unreadable, unsupported or exceed attachment limits; keep successfully loaded attachments.
+- Ignore quoted Zig builtin names in compiler diagnostics instead of treating them as attachment paths.
+- Replace removed Zig APIs in runtime helpers and test fixtures to restore build and test compatibility.
+
 ## [0.5.4] - 2026-11-04
 
 ### Fixed

@@ -1,5 +1,5 @@
 pkgname=pz
-pkgver=0.5.4
+pkgver=0.6.0
 pkgrel=1
 pkgdesc='Coding agent with built-in sandboxing, policy enforcement, and auditing'
 arch=('x86_64' 'aarch64')
@@ -15,17 +15,11 @@ optdepends=(
   'github-cli: sharing sessions as GitHub gists'
 )
 # The tagged Git checkout supplies the commit metadata required by build.zig.
-source=(
-  "pz::git+${url}.git#tag=v${pkgver}"
-  "zig-0.17-compat.patch::${url}/commit/cc87a1b01488ca3ea846b6f2f3f60b25b9fe87e5.patch"
-)
-sha256sums=('acdeb2d4ad45f507486d6bcfca58b97e5f36030828142d26394b31faafb980d8'
-            'a087a1b227c79ae18bce470a4cdbe717a431c1f4a7ca1a49330ba4afe77d7551')
+source=("pz::git+${url}.git#tag=v${pkgver}")
+sha256sums=('SKIP')
 
 prepare() {
   cd "$srcdir/pz"
-  # Backport cc87a1b01488ca3ea846b6f2f3f60b25b9fe87e5 until the next release.
-  patch -Np1 -i "$srcdir/zig-0.17-compat.patch"
   export ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-cache"
   zig build --fetch
 }
