@@ -544,7 +544,7 @@ fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolA
         .ls => .{ .res_kind = .file, .op = "list", .target = parsed_args.ls.path, .argv = parsed_args.ls.path },
         .agent => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.agent.agent_id, .argv = parsed_args.agent.agent_id },
         .swarm => .{ .res_kind = .cmd, .op = @tagName(parsed_args.swarm.op), .target = parsed_args.swarm.id orelse "swarm", .argv = parsed_args.swarm.id orelse "swarm" },
-        .web => .{ .res_kind = .net, .op = "request", .target = parsed_args.web.url, .argv = parsed_args.web.url },
+        .web => .{ .res_kind = .net, .op = if (parsed_args.web.query != null) "search" else "request", .target = parsed_args.web.query orelse parsed_args.web.url, .argv = parsed_args.web.query orelse parsed_args.web.url },
         .ask => .{ .res_kind = .cfg, .op = "ask", .target = "ask", .argv = "ask" },
         .skill => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.skill.name, .argv = parsed_args.skill.name },
         .patch => .{ .res_kind = .file, .op = "write", .target = parsed_args.patch.path, .argv = parsed_args.patch.path },

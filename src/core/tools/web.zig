@@ -23,7 +23,9 @@ pub const Header = struct {
 
 pub const Request = struct {
     method: Method = .GET,
-    url: []const u8,
+    url: []const u8 = "",
+    query: ?[]const u8 = null,
+    num_results: u8 = 8,
     headers: []const Header = &.{},
     body: ?[]const u8 = null,
     follow_redirects: bool = true,
@@ -83,6 +85,7 @@ pub fn requiresEscalationApproval(req: Request) bool {
 }
 
 pub fn approvalSummaryAlloc(alloc: std.mem.Allocator, req: Request) error{OutOfMemory}![]u8 {
+    if (req.query) |query| return std.fmt.allocPrint(alloc, "web search {s}", .{query});
     return std.fmt.allocPrint(alloc, "web {s} {s}", .{ @tagName(req.method), req.url });
 }
 

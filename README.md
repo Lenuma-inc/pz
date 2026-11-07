@@ -268,11 +268,15 @@ keyboard help.
 
 ## Web
 
-`web` fetches a URL and extracts readable Markdown.
+`web` searches the public web with Exa when given a `query`, or fetches a known
+URL and extracts readable Markdown when given a `url`.
 
 ```json
 {"url":"https://example.org/article"}
 ```
+
+Search works without an API key; set `EXA_API_KEY` to use your own Exa key.
+Search results are untrusted; use `web` with a result URL to read a page.
 
 Fetching returns readable Markdown: article text, links, tables, numbered lists
 and code. Navigation, scripts and sidebar noise are removed. Article JSON becomes
