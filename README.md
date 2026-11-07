@@ -254,9 +254,13 @@ minutes; slowed output without an explicit duration is also capped at five
 minutes. Inspection does not impose that duration limit. Each generated file is
 checked with ffprobe; this checks metadata, not full decoding or visual quality.
 
-`agent` runs a child agent; `swarm` provides live workers with spawn, send/recv,
-wait, stop and close operations. Spawn peers before waiting when collaboration
-is needed. LSP is outside this tool set.
+`agent` runs one child agent. `swarm` coordinates live workers with roles
+(`sme`, `coder`, `test_engineer`, `reviewer`), addressed messages, and lifecycle
+operations. Its workflow is plan/consult, implement one task at a time, test,
+then independently review; SME and reviewer workers have read-only built-in
+tools and no MCP servers. Workers share the project checkout, so parallel code
+changes are not isolated.
+LSP is outside this tool set.
 
 ## Models and keyboard help
 

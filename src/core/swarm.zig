@@ -10,11 +10,14 @@ pub const max_messages = 64;
 pub const max_text = 16 * 1024;
 pub const max_message = 4096;
 
+pub const Role = enum { general, sme, coder, test_engineer, reviewer };
+
 pub const Args = struct {
     op: enum { spawn, send, recv, wait, stop, close, list },
     id: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
     text: ?[]const u8 = null,
+    role: Role = .general,
     timeout_ms: u32 = 30000,
     inference: ?providers.Inference = null,
 };
@@ -27,6 +30,7 @@ const Message = struct {
 pub const Member = struct {
     team: *Team,
     id: []const u8,
+    role: Role = .general,
     worker: ?*Worker = null,
     inference: ?providers.Inference = null,
     canceled: std.atomic.Value(bool) = .init(false),
@@ -50,7 +54,7 @@ pub const Member = struct {
         return switch (args.op) {
             .spawn => blk: {
                 if (self.worker != null) return error.PolicyDenied;
-                try self.team.spawn(args.id orelse return error.InvalidArgs, args.prompt orelse return error.InvalidArgs, args.inference);
+                try self.team.spawn(args.id orelse return error.InvalidArgs, args.prompt orelse return error.InvalidArgs, args.inference, args.role);
                 break :blk std.json.Stringify.valueAlloc(alloc, .{ .id = args.id.?, .state = "running" }, .{});
             },
             .send => blk: {
@@ -167,7 +171,7 @@ pub const Team = struct {
         return null;
     }
 
-    fn spawn(self: *Team, id: []const u8, prompt: []const u8, inference: ?providers.Inference) !void {
+    fn spawn(self: *Team, id: []const u8, prompt: []const u8, inference: ?providers.Inference, role: Role) !void {
         if (id.len == 0 or id.len > 64 or std.mem.eql(u8, id, "parent") or prompt.len == 0 or prompt.len > max_text) return error.InvalidArgs;
         for (id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidArgs;
         try self.check(self.ctx, id);
@@ -181,7 +185,7 @@ pub const Team = struct {
             errdefer self.alloc.free(name);
             const task = try self.alloc.dupe(u8, prompt);
             errdefer self.alloc.free(task);
-            w.* = .{ .member = .{ .team = self, .id = name }, .prompt = task, .started_ms = sys.nowMs() };
+            w.* = .{ .member = .{ .team = self, .id = name, .role = role }, .prompt = task, .started_ms = sys.nowMs() };
             if (inference) |settings| {
                 const model = try self.alloc.dupe(u8, settings.model);
                 errdefer self.alloc.free(model);
