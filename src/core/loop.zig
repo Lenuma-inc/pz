@@ -385,6 +385,8 @@ pub const Opts = struct {
     mode: *ModeSink,
     system_prompt: ?[]const u8 = null,
     provider_opts: providers.Opts = .{},
+    context_window: u64 = 0,
+    context_compactor: ?*Compactor = null,
     max_turns: u16 = 0, // 0 = unlimited
     time: ?*TimeSrc = null,
     cancel: ?*CancelSrc = null,
@@ -706,6 +708,7 @@ pub const LoopCtx = struct {
     req_tools: []providers.Tool,
     turns: u16,
     tool_calls: u32,
+    context_tokens: u64,
     turn_arena: std.heap.ArenaAllocator,
     stream: ?*providers.Stream,
     saw_tool_call: bool,
@@ -801,6 +804,7 @@ pub const LoopCtx = struct {
             .req_tools = req_tools,
             .turns = 0,
             .tool_calls = 0,
+            .context_tokens = 0,
             .turn_arena = std.heap.ArenaAllocator.init(opts.alloc),
             .stream = null,
             .saw_tool_call = false,
@@ -830,6 +834,21 @@ pub const LoopCtx = struct {
                         return failWithReport(self.opts, .mode_push, cancel_err);
                     };
                     continue :state .done;
+                }
+
+                if (self.saw_tool_call and self.opts.context_compactor != null and self.opts.context_window > 0 and
+                    self.context_tokens >= self.opts.context_window *| 80 / 100)
+                {
+                    if (self.stream) |stream| {
+                        stream.deinit();
+                        self.stream = null;
+                    }
+                    if (self.opts.context_compactor.?.run(self.opts.sid, nowMs(self.opts))) |_| {
+                        try reloadHist(self.opts, &self.hist);
+                        self.context_tokens = 0;
+                    } else |_| {
+                        self.context_tokens = 0;
+                    }
                 }
 
                 _ = self.turn_arena.reset(.retain_capacity);
@@ -896,6 +915,10 @@ pub const LoopCtx = struct {
                 };
 
                 const sess_ev = mapProviderEv(ev, nowMs(self.opts));
+                switch (ev) {
+                    .usage => |usage| self.context_tokens = usage.tot_tok,
+                    else => {},
+                }
                 self.hist.appendFromProvider(ev) catch |hist_err| {
                     return failWithReport(self.opts, .stream_next, hist_err);
                 };

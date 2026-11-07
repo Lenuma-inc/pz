@@ -2908,6 +2908,8 @@ fn runTui(
         .approval_loc = approval_loc,
         .approver = &prompt_approver_impl.approver,
         .skip_prompt_guard = is_sub,
+        .session_dir_path = if (no_session) null else session_dir_path,
+        .context_windows = &run_cmd.cfg.context_windows,
     };
     tools_rt.ask_hook = if (is_tty) &prompt_ask_ctx.ask_hook else null;
     defer tools_rt.ask_hook = null;
@@ -3169,6 +3171,8 @@ fn runTui(
             .approval_bind = live_approval_bind,
             .approval_loc = live_approval_loc,
             .skip_prompt_guard = is_sub,
+            .session_dir_path = if (no_session) null else session_dir_path,
+            .context_windows = &run_cmd.cfg.context_windows,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
         var live_ask_ctx = LiveAskCtx{
@@ -3189,7 +3193,7 @@ fn runTui(
         var stop_after_completions = tui_hooks.stop_after_completions;
         syncInputFooter(&ui, input_mode, pending.total());
         if (tui_hooks.submit_text) |prompt| {
-            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, &retried_overflow);
+            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, auto_compact_on, &retried_overflow);
             try ui.draw(out);
         }
 
@@ -3589,7 +3593,7 @@ fn runTui(
                                 continue;
                             }
 
-                            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, &retried_overflow);
+                            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, auto_compact_on, &retried_overflow);
                             try ui.draw(out);
                         },
                         .cancel => {
@@ -4013,6 +4017,7 @@ fn runTui(
                 .provider_label = provider_label,
                 .provider_opts = popts,
                 .system_prompt = sys_prompt,
+                .auto_compact = auto_compact_on,
             });
             if (auto_compact_on) _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false, provider, model);
             turn_ct += 1;
@@ -5893,6 +5898,7 @@ fn startLiveTurnWithPrompt(
     provider_label: []const u8,
     popts: core.providers.Opts,
     sys_prompt: ?[]const u8,
+    auto_compact: bool,
     retried_overflow: *bool,
 ) !void {
     try live_turn.start(live_tctx, .{
@@ -5902,6 +5908,7 @@ fn startLiveTurnWithPrompt(
         .provider_label = provider_label,
         .provider_opts = popts,
         .system_prompt = sys_prompt,
+        .auto_compact = auto_compact,
     });
     retried_overflow.* = false;
     ui.panels.run_state = .streaming;
@@ -8186,6 +8193,8 @@ const TurnCtx = struct {
     approver: ?*core.loop.Approver = null,
     audit_hooks: AuditHooks = .{},
     skip_prompt_guard: bool = false,
+    session_dir_path: ?[]const u8 = null,
+    context_windows: ?*const std.StringHashMapUnmanaged(u64) = null,
 
     const TurnOpts = struct {
         sid: []const u8,
@@ -8194,6 +8203,7 @@ const TurnCtx = struct {
         provider_label: []const u8 = "",
         provider_opts: core.providers.Opts = .{},
         system_prompt: ?[]const u8 = null,
+        auto_compact: bool = true,
     };
 
     fn run(self: *const TurnCtx, opts: TurnOpts) !void {
@@ -8225,6 +8235,13 @@ const TurnCtx = struct {
             .seq = &tool_audit_seq,
         };
 
+        var session_compactor_ctx = SessionLoopCompactor{
+            .alloc = self.alloc,
+            .dir_path = self.session_dir_path,
+            .provider = self.provider,
+            .model = opts.model,
+        };
+
         _ = try core.loop.run(.{
             .alloc = self.alloc,
             .sid = opts.sid,
@@ -8238,6 +8255,8 @@ const TurnCtx = struct {
             .mode = self.mode,
             .system_prompt = opts.system_prompt,
             .provider_opts = opts.provider_opts,
+            .context_window = modelCtxWindow(opts.model, self.context_windows),
+            .context_compactor = if (self.session_dir_path != null and opts.auto_compact) &session_compactor_ctx.compactor else null,
             .max_turns = self.max_turns,
             .cancel = self.cancel,
             .abort_slot = self.abort_slot,
@@ -8250,6 +8269,21 @@ const TurnCtx = struct {
             .auto_approve = self.tools_rt.yolo,
             .skip_prompt_guard = self.skip_prompt_guard,
         });
+    }
+};
+
+const SessionLoopCompactor = struct {
+    alloc: std.mem.Allocator,
+    dir_path: ?[]const u8,
+    provider: *core.providers.Provider,
+    model: []const u8,
+    compactor: core.loop.Compactor = .{ .vt = &core.loop.Compactor.Bind(@This(), run).vt },
+
+    fn run(self: *@This(), sid: []const u8, at_ms: i64) !void {
+        const path = self.dir_path orelse return;
+        const dir = try openDirPath(path, .{});
+        defer dir.close(sys.io);
+        _ = try core.session.compactSession(self.alloc, dir, sid, at_ms, self.provider, self.model);
     }
 };
 
