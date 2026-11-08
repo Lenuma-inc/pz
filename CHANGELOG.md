@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-08
+
+### Added
+- Built-in LSP diagnostics, definitions, references, hover, symbols and call hierarchy with compact output.
+- LSP server configuration, startup status and explicit downloads through a server picker with runtime requirements.
+- Exa search through the web tool, with optional API key.
+- Role-aware swarm workflows.
+
+### Changed
+- Enable MCP and LSP by default while keeping server downloads explicit.
+- Remove What's New from the startup screen.
+- Reuse OpenAI prompt caches by session and improve cache affinity diagnostics.
+- Reduce redundant context and compact before continued model calls.
+- Use Zig 0.17.0 for release builds.
+
+### Fixed
+- Use model metadata for context windows instead of a hardcoded fallback.
+- Fix LSP process spawning, initialization messages and diagnostic capability detection.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
