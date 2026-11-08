@@ -69,9 +69,14 @@ pub fn isPath(path: []const u8) bool {
     return false;
 }
 
+pub fn isStillPath(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    return std.ascii.eqlIgnoreCase(ext, ".jpg") or std.ascii.eqlIgnoreCase(ext, ".jpeg") or std.ascii.eqlIgnoreCase(ext, ".png") or std.ascii.eqlIgnoreCase(ext, ".webp");
+}
+
 pub const ProcessResult = struct { data: ?[]u8, stderr: []u8 };
 
-pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8, start: f64, duration: ?f64, accurate: bool, image_format: []const u8, aspect: []const u8, fit_mode: []const u8, preset: []const u8, audio_format: []const u8, transform: []const u8, speed: f64) !ProcessResult {
+pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8, input2: ?[]const u8, start: f64, duration: ?f64, accurate: bool, image_format: []const u8, aspect: []const u8, fit_mode: []const u8, preset: []const u8, audio_format: []const u8, transform: []const u8, speed: f64, width: u32, height: u32, x: u32, y: u32, ken_burns: bool, pan: []const u8) !ProcessResult {
     if (std.mem.eql(u8, op, "inspect")) {
         const ffprobe = try resolveTool(alloc, "ffprobe");
         defer alloc.free(ffprobe);
@@ -89,10 +94,23 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
     const ffmpeg = try resolveTool(alloc, "ffmpeg");
     defer alloc.free(ffmpeg);
 
+    if (std.mem.eql(u8, op, "verify")) {
+        const result = try std.process.run(alloc, sys.io, .{
+            .argv = &.{ ffmpeg, "-nostdin", "-protocol_whitelist", "file,pipe", "-threads", "1", "-v", "error", "-i", input, "-map", "0:v?", "-map", "0:a?", "-f", "null", "-" },
+            .stdout_limit = .limited(64),
+            .stderr_limit = .limited(2048),
+        });
+        defer alloc.free(result.stdout);
+        if (result.term != .exited or result.term.exited != 0) return .{ .data = null, .stderr = result.stderr };
+        alloc.free(result.stderr);
+        return .{ .data = try alloc.dupe(u8, "Full decode succeeded for all mapped video and audio streams."), .stderr = try alloc.dupe(u8, "") };
+    }
+
     var argv: [64][]const u8 = undefined;
     var len: usize = 0;
     var start_buf: [32]u8 = undefined;
     var duration_buf: [32]u8 = undefined;
+    var zoom_buf: [64]u8 = undefined;
     var tempo_buf: [64]u8 = undefined;
     var filter_buf: ?[]u8 = null;
     defer if (filter_buf) |filter| alloc.free(filter);
@@ -104,6 +122,7 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
     argv[len] = "1"; len += 1;
     argv[len] = "-v"; len += 1;
     argv[len] = "error"; len += 1;
+    if (std.mem.eql(u8, op, "insert")) { argv[len] = "-loop"; len += 1; argv[len] = "1"; len += 1; argv[len] = "-framerate"; len += 1; argv[len] = "30"; len += 1; }
     if (start > 0) {
         argv[len] = "-ss"; len += 1;
         argv[len] = try std.fmt.bufPrint(&start_buf, "{d:.3}", .{start});
@@ -111,6 +130,7 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
     }
     argv[len] = "-i"; len += 1;
     argv[len] = input; len += 1;
+    if (input2) |path| { argv[len] = "-i"; len += 1; argv[len] = path; len += 1; }
     if (duration) |seconds| {
         argv[len] = "-t"; len += 1;
         argv[len] = try std.fmt.bufPrint(&duration_buf, "{d:.3}", .{seconds});
@@ -149,7 +169,51 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
         len += 1;
         argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
         argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
-    } else if (std.mem.eql(u8, op, "fit") or std.mem.eql(u8, op, "transform") or std.mem.eql(u8, op, "speed")) {
+    } else if (std.mem.eql(u8, op, "loudness")) {
+        argv[len] = "-map"; len += 1; argv[len] = "0:v:0?"; len += 1;
+        argv[len] = "-map"; len += 1; argv[len] = "0:a:0"; len += 1;
+        argv[len] = "-c:v"; len += 1; argv[len] = "copy"; len += 1;
+        argv[len] = "-af"; len += 1; argv[len] = "loudnorm=I=-14:TP=-1:LRA=11"; len += 1;
+        argv[len] = "-c:a"; len += 1; argv[len] = "aac"; len += 1;
+        argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
+        argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
+    } else if (std.mem.eql(u8, op, "join")) {
+        if (input2 == null) return error.InvalidVideoOperation;
+        argv[len] = "-filter_complex"; len += 1;
+        argv[len] = "[0:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v0];[1:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v1];[0:a:0]aresample=48000,aformat=channel_layouts=stereo[a0];[1:a:0]aresample=48000,aformat=channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"; len += 1;
+        argv[len] = "-map"; len += 1; argv[len] = "[outv]"; len += 1;
+        argv[len] = "-map"; len += 1; argv[len] = "[outa]"; len += 1;
+        argv[len] = "-c:v"; len += 1; argv[len] = "libx264"; len += 1;
+        argv[len] = "-preset"; len += 1; argv[len] = "medium"; len += 1;
+        argv[len] = "-crf"; len += 1; argv[len] = "22"; len += 1;
+        argv[len] = "-pix_fmt"; len += 1; argv[len] = "yuv420p"; len += 1;
+        argv[len] = "-c:a"; len += 1; argv[len] = "aac"; len += 1;
+        argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
+        argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
+    } else if (std.mem.eql(u8, op, "insert")) {
+        const dims: [2]u32 = if (std.mem.eql(u8, aspect, "landscape")) .{ 1920, 1080 } else if (std.mem.eql(u8, aspect, "portrait")) .{ 1080, 1920 } else if (std.mem.eql(u8, aspect, "square")) .{ 1080, 1080 } else return error.InvalidVideoOperation;
+        const fit = if (std.mem.eql(u8, fit_mode, "crop")) try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=increase,crop={d}:{d},setsar=1", .{ dims[0], dims[1], dims[0], dims[1] }) else try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=decrease,pad={d}:{d}:(ow-iw)/2:(oh-ih)/2:black,setsar=1", .{ dims[0], dims[1], dims[0], dims[1] });
+        defer alloc.free(fit);
+        filter_buf = if (ken_burns) blk: {
+            const frames = @max(1, @as(u32, @intFromFloat(@round((duration orelse return error.InvalidVideoOperation) * 30))));
+            const step = 0.1 / @as(f64, @floatFromInt(frames));
+            var x_buf: [96]u8 = undefined;
+            var y_buf: [96]u8 = undefined;
+            const pan_x = if (std.mem.eql(u8, pan, "left")) try std.fmt.bufPrint(&x_buf, "(iw-iw/zoom)*(1-on/{d})", .{frames}) else if (std.mem.eql(u8, pan, "right")) try std.fmt.bufPrint(&x_buf, "(iw-iw/zoom)*on/{d}", .{frames}) else "iw/2-(iw/zoom/2)";
+            const pan_y = if (std.mem.eql(u8, pan, "up")) try std.fmt.bufPrint(&y_buf, "(ih-ih/zoom)*(1-on/{d})", .{frames}) else if (std.mem.eql(u8, pan, "down")) try std.fmt.bufPrint(&y_buf, "(ih-ih/zoom)*on/{d}", .{frames}) else "ih/2-(ih/zoom/2)";
+            const motion = try std.fmt.bufPrint(&zoom_buf, "zoompan=z='min(1+on*{d:.10},1.1)':x='{s}':y='{s}':d=1:s={d}x{d}:fps=30", .{ step, pan_x, pan_y, dims[0], dims[1] });
+            break :blk try std.fmt.allocPrint(alloc, "{s},{s}", .{ fit, motion });
+        } else try alloc.dupe(u8, fit);
+        argv[len] = "-map"; len += 1; argv[len] = "0:v:0"; len += 1;
+        argv[len] = "-an"; len += 1;
+        argv[len] = "-vf"; len += 1; argv[len] = filter_buf.?; len += 1;
+        argv[len] = "-c:v"; len += 1; argv[len] = "libx264"; len += 1;
+        argv[len] = "-preset"; len += 1; argv[len] = "medium"; len += 1;
+        argv[len] = "-crf"; len += 1; argv[len] = "22"; len += 1;
+        argv[len] = "-pix_fmt"; len += 1; argv[len] = "yuv420p"; len += 1;
+        argv[len] = "-movflags"; len += 1; argv[len] = "+frag_keyframe+empty_moov"; len += 1;
+        argv[len] = "-f"; len += 1; argv[len] = "mp4"; len += 1;
+    } else if (std.mem.eql(u8, op, "fit") or std.mem.eql(u8, op, "resize") or std.mem.eql(u8, op, "crop") or std.mem.eql(u8, op, "transform") or std.mem.eql(u8, op, "speed")) {
         if (std.mem.eql(u8, op, "transform")) {
             const filters = std.StaticStringMap([]const u8).initComptime(.{
                 .{ "clockwise", "transpose=clock" },
@@ -162,8 +226,10 @@ pub fn processAlloc(alloc: std.mem.Allocator, op: []const u8, input: []const u8,
         } else if (std.mem.eql(u8, op, "speed")) {
             if (!std.math.isFinite(speed) or speed < 0.5 or speed > 2) return error.InvalidVideoOperation;
             filter_buf = try std.fmt.allocPrint(alloc, "setpts=(PTS-STARTPTS)/{d:.8}", .{speed});
+        } else if (std.mem.eql(u8, op, "crop")) {
+            filter_buf = try std.fmt.allocPrint(alloc, "crop={d}:{d}:{d}:{d},setsar=1", .{ width, height, x, y });
         } else {
-            const dims: [2]u32 = if (std.mem.eql(u8, aspect, "landscape")) .{ 1920, 1080 } else if (std.mem.eql(u8, aspect, "portrait")) .{ 1080, 1920 } else if (std.mem.eql(u8, aspect, "square")) .{ 1080, 1080 } else return error.InvalidVideoOperation;
+            const dims: [2]u32 = if (std.mem.eql(u8, op, "resize")) .{ width, height } else if (std.mem.eql(u8, aspect, "landscape")) .{ 1920, 1080 } else if (std.mem.eql(u8, aspect, "portrait")) .{ 1080, 1920 } else if (std.mem.eql(u8, aspect, "square")) .{ 1080, 1080 } else return error.InvalidVideoOperation;
             filter_buf = if (std.mem.eql(u8, fit_mode, "crop"))
                 try std.fmt.allocPrint(alloc, "scale={d}:{d}:force_original_aspect_ratio=increase,crop={d}:{d},setsar=1", .{ dims[0], dims[1], dims[0], dims[1] })
             else
@@ -307,7 +373,7 @@ test "media trim honors nonzero start and duration" {
     defer tmp.cleanup();
     const input = try testClip(tmp.dir);
     defer a.free(input);
-    const result = try processAlloc(a, "trim", input, 1, 1, true, "jpg", "original", "contain", "h264", "mp3", "clockwise", 1);
+    const result = try processAlloc(a, "trim", input, null, 1, 1, true, "jpg", "original", "contain", "h264", "mp3", "clockwise", 1, 0, 0, 0, 0, false, "none");
     defer a.free(result.stderr);
     const data = result.data orelse {
         std.debug.print("{s}\n", .{result.stderr});
@@ -322,7 +388,7 @@ test "media trim honors nonzero start and duration" {
 
 fn testRender(dir: std.Io.Dir, input: []const u8, op: []const u8, transform: []const u8, speed: f64) ![:0]u8 {
     const a = std.testing.allocator;
-    const result = try processAlloc(a, op, input, 0, null, false, "jpg", "original", "contain", "h264", "mp3", transform, speed);
+    const result = try processAlloc(a, op, input, null, 0, null, false, "jpg", "original", "contain", "h264", "mp3", transform, speed, 0, 0, 0, 0, false, "none");
     defer a.free(result.stderr);
     const data = result.data orelse {
         std.debug.print("{s}\n", .{result.stderr});

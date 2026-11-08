@@ -218,14 +218,21 @@ pub const Call = struct {
     };
 
     pub const FfmpegArgs = struct {
-        op: enum { inspect, thumbnail, trim, fit, convert, gif, audio, transform, speed, mute },
+        op: enum { inspect, verify, thumbnail, trim, fit, resize, crop, insert, join, convert, gif, audio, transform, speed, mute, loudness },
         input: []const u8,
+        input2: ?[]const u8 = null,
         output: ?[]const u8 = null,
         start_seconds: f64 = 0,
         duration_seconds: ?f64 = null,
         accurate: bool = false,
         aspect: enum { original, landscape, portrait, square } = .original,
         fit_mode: enum { contain, crop } = .contain,
+        width: u32 = 0,
+        height: u32 = 0,
+        x: u32 = 0,
+        y: u32 = 0,
+        ken_burns: bool = false,
+        pan: enum { none, left, right, up, down } = .none,
         preset: enum { h264, hevc, prores, webm } = .h264,
         audio_format: enum { mp3, wav, flac } = .mp3,
         transform: enum { clockwise, counterclockwise, half, horizontal, vertical } = .clockwise,

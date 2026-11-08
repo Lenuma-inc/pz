@@ -239,20 +239,32 @@ fail explicitly. Follow page hints to retrieve remaining results. Private
 repositories and authenticated API access are not implemented. Requests remain
 subject to egress policy.
 
-`ffmpeg` provides fixed local operations: inspect, thumbnails, trim, fit to
-landscape/portrait/square, codec export, GIF creation, audio extraction, rotation,
-mirroring, playback speed and muting.
+`ffmpeg` provides fixed local operations: inspect metadata, verify full decoding,
+thumbnails, trim, fit to landscape/portrait/square, codec export, GIF creation,
+audio extraction and loudness normalization, rotation, mirroring, playback speed
+and muting.
 Use `op=transform` with `transform=clockwise|counterclockwise|half|horizontal|vertical`,
 `op=speed` with a `speed` multiplier from 0.5 to 2 (audio pitch preserved), or
-`op=mute` to drop audio while copying the video stream into MP4. These operations
-write `.mp4`; rotation and speed re-encode H.264/AAC. For speed, `start_seconds`
+`op=resize` sets exact even pixel dimensions with `width` and `height`, preserving
+the full frame with `fit_mode=contain` or filling it with `fit_mode=crop`.
+`op=mute` drops audio while copying the video stream into MP4. `op=loudness`
+normalizes the first audio stream to -14 LUFS for web playback, re-encoding audio
+to AAC while copying video. These operations write `.mp4`; resize, rotation and
+speed re-encode H.264/AAC.
+`op=insert` creates a silent MP4 from a JPG, PNG or WebP still image; provide
+`duration_seconds` and `aspect=landscape|portrait|square`. Set `ken_burns=true`
+for a slow zoom and pan; `fit_mode` controls whether the image is padded or cropped.
+`op=join` concatenates two clips given by `input` and `input2`; both clips need
+audio, and the output is normalized to 1080p H.264/AAC.
+For speed, `start_seconds`
 is source time and optional `duration_seconds` is output time.
 It requires installed `ffmpeg` and `ffprobe`, checks input/output path policy,
 limits inputs to 100 MiB and generated outputs to 64 MiB, and never overwrites
 an existing output file. Rendering operations also limit input duration to five
 minutes; slowed output without an explicit duration is also capped at five
-minutes. Inspection does not impose that duration limit. Each generated file is
-checked with ffprobe; this checks metadata, not full decoding or visual quality.
+minutes. Metadata inspection does not impose that duration limit. Each generated
+file is checked with ffprobe; use `op=verify` to decode all audio and video streams.
+Neither check judges visual quality or whether the edit matches intent.
 
 `agent` runs one child agent. `swarm` coordinates live workers with roles
 (`sme`, `coder`, `test_engineer`, `reviewer`), addressed messages, and lifecycle
