@@ -25,6 +25,9 @@ pub const Request = struct {
     method: Method = .GET,
     url: []const u8 = "",
     query: ?[]const u8 = null,
+    openapi: ?[]const u8 = null,
+    operation_id: ?[]const u8 = null,
+    parameters: ?[]const u8 = null,
     num_results: u8 = 8,
     headers: []const Header = &.{},
     body: ?[]const u8 = null,
@@ -77,6 +80,7 @@ fn isCrossOrigin(orig: ParsedUrl, next: ParsedUrl) bool {
 }
 
 pub fn requiresEscalationApproval(req: Request) bool {
+    if (req.openapi != null) return true;
     if (hasCredentialHeaders(req)) return true;
     return switch (req.method) {
         .GET, .HEAD, .OPTIONS => req.body != null,
@@ -84,8 +88,188 @@ pub fn requiresEscalationApproval(req: Request) bool {
     };
 }
 
+/// Resolve an OpenAPI operation into the ordinary, policy-checked web request.
+// shortcut: OpenAPI JSON with inline operation parameters and JSON bodies only; add YAML/$ref support when a spec needs it.
+pub fn openApiRequestAlloc(alloc: std.mem.Allocator, spec_url: []const u8, operation_id: []const u8, parameters: []const u8, policy: RedirectPolicy) !Request {
+    const spec_fetch = try fetchAlloc(alloc, .{ .url = spec_url, .format = .raw }, policy, 4 * 1024 * 1024);
+    defer alloc.free(spec_fetch.body);
+    if (spec_fetch.status < 200 or spec_fetch.status >= 300) return error.OpenApiFetchFailed;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, spec_fetch.body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const args_parsed = try std.json.parseFromSlice(std.json.Value, alloc, parameters, .{ .allocate = .alloc_always });
+    defer args_parsed.deinit();
+    if (args_parsed.value != .object) return error.InvalidOpenApiParameters;
+    const spec = parsed.value;
+    if (spec != .object) return error.InvalidOpenApiSpec;
+    const paths = (spec.object.get("paths") orelse return error.InvalidOpenApiSpec);
+    if (paths != .object) return error.InvalidOpenApiSpec;
+
+    var server_url: ?[]const u8 = null;
+    if (spec.object.get("servers")) |servers| {
+        if (servers == .array and servers.array.items.len > 0) {
+            const server = servers.array.items[0];
+            if (server == .object) {
+                if (server.object.get("url")) |value| {
+                    if (value == .string) server_url = value.string;
+                }
+            }
+        }
+    }
+    const spec_base = try parseUrl(spec_url);
+    var origin_uri = spec_base.uri;
+    origin_uri.path = .{ .raw = "/" };
+    origin_uri.query = null;
+    origin_uri.fragment = null;
+    const origin = try renderUrlAlloc(alloc, origin_uri);
+    const resolved_server = try resolveOpenApiUrlAlloc(alloc, spec_base, server_url orelse origin);
+    defer alloc.free(resolved_server);
+    const server = try parseUrl(resolved_server);
+    if (isCrossOrigin(spec_base, server)) return error.OpenApiCrossOriginServer;
+
+    var result: ?Request = null;
+    const method_names = [_][]const u8{ "get", "post", "put", "patch", "delete", "head", "options" };
+    var path_it = paths.object.iterator();
+    while (path_it.next()) |path_entry| {
+        const path_item = path_entry.value_ptr.*;
+        if (path_item != .object) continue;
+        for (method_names) |method_name| {
+            const operation = path_item.object.get(method_name) orelse continue;
+            if (operation != .object) continue;
+            const id = operation.object.get("operationId") orelse continue;
+            if (id != .string or !std.mem.eql(u8, id.string, operation_id)) continue;
+            if (result != null) return error.DuplicateOpenApiOperationId;
+            result = try buildOpenApiRequestAlloc(alloc, resolved_server, path_entry.key_ptr.*, method_name, operation, args_parsed.value);
+        }
+    }
+    return result orelse error.OpenApiOperationNotFound;
+}
+
+fn resolveOpenApiUrlAlloc(alloc: std.mem.Allocator, base: ParsedUrl, raw: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, raw, "://") != null) return alloc.dupe(u8, raw);
+    const scratch = try alloc.alloc(u8, raw.len * 2 + compText(base.uri.path).len + 1);
+    defer alloc.free(scratch);
+    @memcpy(scratch[0..raw.len], raw);
+    var aux = scratch[0..];
+    const uri = try std.Uri.resolveInPlace(base.uri, raw.len, &aux);
+    return renderUrlAlloc(alloc, uri);
+}
+
+fn buildOpenApiRequestAlloc(alloc: std.mem.Allocator, server: []const u8, path: []const u8, method_name: []const u8, operation: std.json.Value, args: std.json.Value) !Request {
+    var url = std.ArrayList(u8).empty;
+    defer url.deinit(alloc);
+    const base = std.mem.trimEnd(u8, server, "/");
+    try url.appendSlice(alloc, base);
+    if (!std.mem.startsWith(u8, path, "/")) try url.append(alloc, '/');
+    try url.appendSlice(alloc, path);
+
+    var headers = std.ArrayList(Header).empty;
+    var query_started = false;
+    if (operation.object.get("parameters")) |parameters| {
+        if (parameters != .array) return error.InvalidOpenApiSpec;
+        for (parameters.array.items) |parameter| {
+            if (parameter != .object) return error.InvalidOpenApiSpec;
+            const name = (parameter.object.get("name") orelse return error.InvalidOpenApiSpec);
+            const location = (parameter.object.get("in") orelse return error.InvalidOpenApiSpec);
+            if (name != .string or location != .string) return error.InvalidOpenApiSpec;
+            const value = args.object.get(name.string) orelse {
+                if (parameter.object.get("required")) |required| {
+                    if (required == .bool and required.bool) return error.MissingOpenApiParameter;
+                }
+                continue;
+            };
+            const value_text = try jsonScalarAlloc(alloc, value);
+            if (std.mem.eql(u8, location.string, "path")) {
+                const marker = try std.fmt.allocPrint(alloc, "{{{s}}}", .{name.string});
+                defer alloc.free(marker);
+                const encoded = try urlEncodeAlloc(alloc, value_text);
+                try replaceAllInPlaceAlloc(alloc, &url, marker, encoded);
+            } else if (std.mem.eql(u8, location.string, "query")) {
+                try url.append(alloc, if (query_started) '&' else '?');
+                query_started = true;
+                try appendEncodedPair(alloc, &url, name.string, value_text);
+            } else if (std.mem.eql(u8, location.string, "header")) {
+                try headers.append(alloc, .{ .name = try alloc.dupe(u8, name.string), .value = value_text });
+            } else return error.UnsupportedOpenApiParameter;
+        }
+    }
+    if (std.mem.indexOf(u8, url.items, "{") != null) return error.MissingOpenApiPathParameter;
+    var body: ?[]u8 = null;
+    if (args.object.get("body")) |value| {
+        if (operation.object.get("requestBody") == null) return error.UnexpectedOpenApiBody;
+        body = try std.json.Stringify.valueAlloc(alloc, value, .{});
+        try headers.append(alloc, .{ .name = "content-type", .value = "application/json" });
+    } else if (operation.object.get("requestBody")) |request_body| {
+        if (request_body == .object) {
+            if (request_body.object.get("required")) |required| {
+                if (required == .bool and required.bool) return error.MissingOpenApiBody;
+            }
+        }
+    }
+    return .{
+        .method = openApiMethod(method_name) orelse return error.InvalidOpenApiSpec,
+        .url = try url.toOwnedSlice(alloc),
+        .headers = try headers.toOwnedSlice(alloc),
+        .body = body,
+        .format = .auto,
+    };
+}
+
+fn jsonScalarAlloc(alloc: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    return switch (value) {
+        .string => |s| alloc.dupe(u8, s),
+        .integer => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .float => |n| std.fmt.allocPrint(alloc, "{d}", .{n}),
+        .bool => |b| alloc.dupe(u8, if (b) "true" else "false"),
+        else => error.InvalidOpenApiParameter,
+    };
+}
+
+fn urlEncodeAlloc(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    var writer = std.Io.Writer.Allocating.init(alloc);
+    try std.Uri.Component.percentEncode(&writer.writer, text, openApiUnreserved);
+    return writer.toOwnedSlice();
+}
+
+fn appendEncodedPair(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
+    const encoded_name = try urlEncodeAlloc(alloc, name);
+    try out.appendSlice(alloc, encoded_name);
+    try out.append(alloc, '=');
+    const encoded_value = try urlEncodeAlloc(alloc, value);
+    try out.appendSlice(alloc, encoded_value);
+}
+
+fn replaceAllInPlaceAlloc(alloc: std.mem.Allocator, out: *std.ArrayList(u8), needle: []const u8, replacement: []const u8) !void {
+    var replaced = std.ArrayList(u8).empty;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, out.items, cursor, needle)) |at| {
+        try replaced.appendSlice(alloc, out.items[cursor..at]);
+        try replaced.appendSlice(alloc, replacement);
+        cursor = at + needle.len;
+    }
+    try replaced.appendSlice(alloc, out.items[cursor..]);
+    out.clearRetainingCapacity();
+    try out.appendSlice(alloc, replaced.items);
+    replaced.deinit(alloc);
+}
+
+fn openApiMethod(name: []const u8) ?Method {
+    if (std.mem.eql(u8, name, "get")) return .GET;
+    if (std.mem.eql(u8, name, "post")) return .POST;
+    if (std.mem.eql(u8, name, "put")) return .PUT;
+    if (std.mem.eql(u8, name, "patch")) return .PATCH;
+    if (std.mem.eql(u8, name, "delete")) return .DELETE;
+    if (std.mem.eql(u8, name, "head")) return .HEAD;
+    if (std.mem.eql(u8, name, "options")) return .OPTIONS;
+    return null;
+}
+
+fn openApiUnreserved(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~", c) != null;
+}
+
 pub fn approvalSummaryAlloc(alloc: std.mem.Allocator, req: Request) error{OutOfMemory}![]u8 {
     if (req.query) |query| return std.fmt.allocPrint(alloc, "web search {s}", .{query});
+    if (req.openapi) |spec| return std.fmt.allocPrint(alloc, "web OpenAPI {s} from {s}", .{ req.operation_id orelse "operation", spec });
     return std.fmt.allocPrint(alloc, "web {s} {s}", .{ @tagName(req.method), req.url });
 }
 

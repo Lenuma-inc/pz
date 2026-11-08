@@ -301,3 +301,10 @@ it supports the same line ranges and continuation, and cannot be combined with
 `json_path` or `pattern`. Both modes redact sensitive lines while retaining
 surrounding content. A sensitive marker in a minified, single-line response
 still hides that entire line.
+
+Call an operation from an OpenAPI JSON document with `openapi`, `operation_id`
+and `parameters` (a JSON object string). Put inline path/query/header scalar
+values in the object by parameter name; use `body` for a JSON request body.
+Calls require approval and are limited to operations served from the
+specification's origin. YAML, `$ref`, and server-variable expansion are not
+supported yet.
