@@ -422,6 +422,11 @@ fn buildBodyForAuth(alloc: std.mem.Allocator, req: providers.Request, is_sub: bo
     try js.objectField("store");
     try js.write(false);
 
+    if (req.prompt_cache_key) |key| {
+        try js.objectField("prompt_cache_key");
+        try js.write(key);
+    }
+
     if (!is_sub) {
         try js.objectField("max_output_tokens");
         try js.write(req.opts.max_out orelse default_max_output_tokens);

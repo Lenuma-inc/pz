@@ -873,6 +873,7 @@ pub const LoopCtx = struct {
                 self.stream = self.opts.provider.start(.{
                     .model = self.opts.model,
                     .provider = self.opts.provider_label,
+                    .prompt_cache_key = self.opts.sid,
                     .msgs = req_msgs,
                     .tools = self.req_tools,
                     .opts = self.opts.provider_opts,

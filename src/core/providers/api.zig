@@ -19,6 +19,7 @@ pub const Inference = struct {
 pub const Request = struct {
     model: []const u8,
     provider: ?[]const u8 = null,
+    prompt_cache_key: ?[]const u8 = null,
     msgs: []const Msg,
     tools: []const Tool = &.{},
     opts: Opts = .{},
