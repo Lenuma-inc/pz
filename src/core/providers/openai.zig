@@ -317,6 +317,31 @@ fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?provide
         break :blk details.cached_tokens orelse 0;
     } else 0;
 
+    if (std.c.getenv("PZ_OPENAI_DEBUG")) |debug| {
+        if (std.mem.eql(u8, std.mem.span(debug), "1")) {
+            const debug_json = std.json.parseFromSlice(std.json.Value, ar, data, json_opts) catch null;
+            if (debug_json) |parsed| {
+                defer parsed.deinit();
+                if (parsed.value == .object) {
+                    if (parsed.value.object.get("response")) |response_value| {
+                        if (response_value == .object) {
+                            if (response_value.object.get("usage")) |usage_value| {
+                                const raw_usage = std.json.Stringify.valueAlloc(ar, usage_value, .{}) catch "<serialize failed>";
+                                std.debug.print("[pz openai raw_usage] {s}\n", .{raw_usage});
+                            }
+                        }
+                    }
+                }
+            }
+            std.debug.print("[pz openai usage] input={d} cache_read={d} uncached={d} output={d}\n", .{
+                in_tok,
+                cache_read,
+                in_tok -| cache_read,
+                out_tok,
+            });
+        }
+    }
+
     self.in_tok = in_tok;
     self.out_tok = out_tok;
     self.cache_read = cache_read;

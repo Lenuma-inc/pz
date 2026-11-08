@@ -103,6 +103,8 @@ fn mapEvent(ev: core.providers.Event) core.session.Event {
                     .in_tok = usage.in_tok,
                     .out_tok = usage.out_tok,
                     .tot_tok = usage.tot_tok,
+                    .cache_read = usage.cache_read,
+                    .cache_write = usage.cache_write,
                 },
             },
             .stop => |stop| .{
@@ -157,6 +159,8 @@ const RunUsageSnap = struct {
     in_tok: u64,
     out_tok: u64,
     tot_tok: u64,
+    cache_read: u64,
+    cache_write: u64,
 };
 
 const RunEventsSnap = struct {
@@ -302,6 +306,8 @@ test "exec runs prompt path and persists mapped provider events" {
                 .in_tok = 5,
                 .out_tok = 7,
                 .tot_tok = 12,
+                .cache_read = 3,
+                .cache_write = 2,
             },
         },
         .{
@@ -371,7 +377,7 @@ test "exec runs prompt path and persists mapped provider events" {
                 else => return error.TestUnexpectedResult,
             },
             .usage = switch (store_impl.evs[5].data) {
-                .usage => |out| .{ .in_tok = out.in_tok, .out_tok = out.out_tok, .tot_tok = out.tot_tok },
+                .usage => |out| .{ .in_tok = out.in_tok, .out_tok = out.out_tok, .tot_tok = out.tot_tok, .cache_read = out.cache_read, .cache_write = out.cache_write },
                 else => return error.TestUnexpectedResult,
             },
             .stop = switch (store_impl.evs[6].data) {

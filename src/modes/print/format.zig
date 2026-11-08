@@ -117,10 +117,12 @@ pub const Formatter = struct {
         }
 
         if (self.usage) |usage| {
-            try self.out.print("usage in={d} out={d} total={d}\n", .{
+            try self.out.print("usage in={d} out={d} total={d} cache_read={d} cache_write={d}\n", .{
                 usage.in_tok,
                 usage.out_tok,
                 usage.tot_tok,
+                usage.cache_read,
+                usage.cache_write,
             });
         }
 
@@ -372,7 +374,7 @@ test "formatter emits deterministic canonical output" {
         .{ .thinking = "z-think" },
         .{ .tool_result = .{ .id = "call-2", .output = "res-z", .is_err = true } },
         .{ .tool_call = .{ .id = "call-2", .name = "write", .args = "{\"path\":\"b\"}" } },
-        .{ .usage = .{ .in_tok = 2, .out_tok = 3, .tot_tok = 5 } },
+        .{ .usage = .{ .in_tok = 2, .out_tok = 3, .tot_tok = 5, .cache_read = 4, .cache_write = 1 } },
         .{ .err = "z-err" },
         .{ .stop = .{ .reason = .done } },
         .{ .tool_call = .{ .id = "call-1", .name = "read", .args = "{\"path\":\"a\"}" } },
@@ -407,7 +409,7 @@ test "formatter emits deterministic canonical output" {
         "tool_call id=\"call-2\" name=\"write\" args=\"{\\\"path\\\":\\\"b\\\"}\"\n" ++
         "tool_result id=\"call-1\" is_err=false out=\"res-a\"\n" ++
         "tool_result id=\"call-2\" is_err=true out=\"res-z\"\n" ++
-        "usage in=2 out=3 total=5\n" ++
+        "usage in=2 out=3 total=5 cache_read=4 cache_write=1\n" ++
         "stop reason=err\n" ++
         "err \"a-err\"\n" ++
         "err \"z-err\"\n";

@@ -195,10 +195,12 @@ pub fn retryLoop(
     ar: std.mem.Allocator,
     sleeper: anytype,
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
+    session_id: ?[]const u8,
     cancel: ?*providers.CancelPoll,
 ) !void {
     // Proactive refresh: check token expiry before first attempt
     try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
+    try appendSessionIdHeader(ar, hdrs, session_id);
 
     var attempt: u32 = 0;
     var did_refresh = false;
@@ -232,6 +234,7 @@ pub fn retryLoop(
                 try drainResponse(stream, ar);
                 stream.req.deinit();
                 hdrs.* = try rebuildHdrs(auth, ar);
+                try appendSessionIdHeader(ar, hdrs, session_id);
                 continue;
             } else |_| {
                 return error.RefreshFailed;
@@ -250,6 +253,27 @@ pub fn retryLoop(
         sleeper.sleep(delay);
         if (cancel) |c| if (c.isCanceled()) return error.Canceled;
     }
+}
+
+fn appendSessionIdHeader(
+    alloc: std.mem.Allocator,
+    headers: *std.ArrayListUnmanaged(std.http.Header),
+    session_id: ?[]const u8,
+) !void {
+    if (session_id) |id| try headers.append(alloc, .{ .name = "session-id", .value = id });
+}
+
+test "session id header is added only when provided" {
+    var headers = std.ArrayListUnmanaged(std.http.Header).empty;
+    defer headers.deinit(std.testing.allocator);
+
+    try appendSessionIdHeader(std.testing.allocator, &headers, "sid-1");
+    try std.testing.expectEqual(@as(usize, 1), headers.items.len);
+    try std.testing.expectEqualStrings("session-id", headers.items[0].name);
+    try std.testing.expectEqualStrings("sid-1", headers.items[0].value);
+
+    try appendSessionIdHeader(std.testing.allocator, &headers, null);
+    try std.testing.expectEqual(@as(usize, 1), headers.items.len);
 }
 
 pub fn drainResponse(stream: anytype, ar: std.mem.Allocator) error{OutOfMemory}!void {
@@ -458,13 +482,31 @@ pub fn SseClient(comptime Cfg: type) type {
 
             const ar = stream.arena.allocator();
 
-            const body = try Cfg.buildBody(ar, req, self.auth.auth == .oauth);
+            const is_oauth = self.auth.auth == .oauth;
+            const body = try Cfg.buildBody(ar, req, is_oauth);
+            const uri = Cfg.apiUri(is_oauth);
+            var session_id: ?[]const u8 = null;
+            if (comptime Cfg.provider_tag == auth_mod.Provider.openai) {
+                if (is_oauth) session_id = req.prompt_cache_key;
+            }
+            if (comptime Cfg.provider_tag == auth_mod.Provider.openai) {
+                const debug = std.c.getenv("PZ_OPENAI_DEBUG") orelse null;
+                if (debug) |value| {
+                    if (std.mem.eql(u8, std.mem.span(value), "1")) {
+                        std.debug.print("[pz openai request] auth={s} endpoint=https://{s}{s} session_id_header={s} body={s}\n", .{
+                            if (is_oauth) "oauth" else "api_key",
+                            if (is_oauth) "chatgpt.com" else "api.openai.com",
+                            if (is_oauth) "/backend-api/codex/responses" else "/v1/responses",
+                            if (session_id != null) "present" else "absent",
+                            body,
+                        });
+                    }
+                }
+            }
             var hdrs = try Cfg.buildAuthHeaders(&self.auth, ar);
 
-            const uri = Cfg.apiUri(self.auth.auth == .oauth);
-
             var slp = RealSleeper{ .el = self.el };
-            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, self.cancel);
+            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, session_id, self.cancel);
             errdefer stream.req.deinit();
 
             stream.limits = try @import("limits.zig").parse(Cfg.provider_tag, stream.response.?.head.bytes);
