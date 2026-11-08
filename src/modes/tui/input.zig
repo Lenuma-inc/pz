@@ -591,6 +591,7 @@ fn parseKittyKey(params: []const u8) ?editor.Key {
         return switch (cp) {
             '\t' => .shift_tab,
             '\r', '\n' => .ctrl_j,
+            127 => .backspace,
             else => null,
         };
     }
