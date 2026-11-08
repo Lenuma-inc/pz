@@ -15,7 +15,7 @@ pub const Server = struct {
     headers: ?std.json.Value = null,
     args: []const []const u8 = &.{},
     env: ?std.json.Value = null,
-    enabled: bool = true,
+    enabled: bool = true, // Legacy setting accepted for compatibility; servers are always enabled.
     timeout_ms: u32 = 30000,
 };
 
@@ -229,7 +229,6 @@ pub const Manager = struct {
     const ServerStatus = struct {
         name: []const u8,
         transport: []const u8,
-        enabled: bool,
         client: ?*Peer = null,
         failure: ?[]const u8 = null,
     };
@@ -245,9 +244,8 @@ pub const Manager = struct {
         var it = parsed.value.object.iterator();
         while (it.next()) |kv| {
             const server = try std.json.parseFromValue(Server, a, kv.value_ptr.*, .{});
-            try self.servers.append(a, .{ .name = kv.key_ptr.*, .transport = if (server.value.url != null) "http" else "stdio", .enabled = server.value.enabled });
+            try self.servers.append(a, .{ .name = kv.key_ptr.*, .transport = if (server.value.url != null) "http" else "stdio" });
             const status = &self.servers.items[self.servers.items.len - 1];
-            if (!server.value.enabled) continue;
             const client = try a.create(Peer);
             client.* = Peer.init(alloc, server.value) catch |err| {
                 if (err == error.OutOfMemory) return err;
@@ -379,10 +377,11 @@ test "MCP configuration rejects invalid executable environment and timeout" {
     }
 }
 
-test "MCP disabled servers never execute" {
+test "MCP legacy enabled setting does not skip configured servers" {
     const m = try Manager.create(std.testing.allocator, "{\"test\":{\"command\":\"/does-not-exist\",\"enabled\":false}}");
     defer m.destroy();
     try std.testing.expectEqual(@as(usize, 0), m.entries.items.len);
+    try std.testing.expect(m.servers.items[0].failure != null);
 }
 
 const fixture = @embedFile("../test/fixtures/mcp_server.py");
@@ -730,7 +729,7 @@ pub fn reportAlloc(alloc: std.mem.Allocator, manager: ?*const Manager) ![]u8 {
             for (inventory) |tool| if (std.mem.eql(u8, tool.server, s.name)) {
                 count += 1;
             };
-            servers[i] = .{ .name = s.name, .transport = s.transport, .status = if (!s.enabled) "disabled" else if (s.failure != null) "failed" else if (s.client != null and s.client.?.connected()) "connected" else "disconnected", .@"error" = s.failure, .tool_count = count };
+            servers[i] = .{ .name = s.name, .transport = s.transport, .status = if (s.failure != null) "failed" else if (s.client != null and s.client.?.connected()) "connected" else "disconnected", .@"error" = s.failure, .tool_count = count };
         }
     }
     return std.json.Stringify.valueAlloc(alloc, .{ .servers = servers, .tools = inventory }, .{ .whitespace = .indent_2 });
@@ -743,9 +742,7 @@ pub fn summaryAlloc(alloc: std.mem.Allocator, manager: ?*const Manager) !?[]u8 {
     defer out.deinit();
     for (m.servers.items, 0..) |s, i| {
         if (i != 0) try out.writer.writeByte('\n');
-        if (!s.enabled) {
-            try out.writer.print("{s} (disabled)", .{s.name});
-        } else if (s.failure) |failure| {
+        if (s.failure) |failure| {
             try out.writer.print("{s} (failed: {s})", .{ s.name, failure });
         } else {
             var count: usize = 0;
@@ -825,7 +822,7 @@ test "MCP HTTP authentication errors and redirects are reported without followin
     }
 }
 
-test "MCP inventory and startup summary include disabled and failed servers without credentials" {
+test "MCP inventory and startup summary include failed servers without credentials" {
     const a = std.testing.allocator;
     const m = try Manager.create(a, "{\"disabled\":{\"command\":\"unused-secret\",\"enabled\":false},\"broken\":{\"command\":\"/nonexistent-mcp-program\",\"env\":{\"KEY\":\"secret-value\"}}}");
     defer m.destroy();
@@ -833,7 +830,7 @@ test "MCP inventory and startup summary include disabled and failed servers with
     defer a.free(report);
     const summary = (try summaryAlloc(a, m)).?;
     defer a.free(summary);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "disabled (disabled)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "disabled (failed:") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "broken (failed:") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "secret-value") == null);
     try std.testing.expect(std.mem.indexOf(u8, report, "unused-secret") == null);

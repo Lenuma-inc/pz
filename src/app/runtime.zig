@@ -399,6 +399,7 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
         .edit => |args| args.path,
         .patch => |args| args.path,
         .todo => "runtime/tool/todo",
+        .lsp => |args| args.filePath,
         .mcp => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
         .github => "runtime/tool/github",
         .ffmpeg => |args| args.input,
@@ -446,7 +447,7 @@ const PolicyToolDispatch = struct {
 };
 
 const PolicyToolRegistry = struct {
-    const max_tools = 17 + @import("../core/mcp.zig").max_tools;
+    const max_tools = 18 + @import("../core/mcp.zig").max_tools;
     ctxs: [max_tools]PolicyToolDispatch = undefined,
     entries: [max_tools]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
@@ -549,6 +550,7 @@ fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolA
         .skill => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.skill.name, .argv = parsed_args.skill.name },
         .patch => .{ .res_kind = .file, .op = "write", .target = parsed_args.patch.path, .argv = parsed_args.patch.path },
         .todo => .{ .res_kind = .cmd, .op = "run", .target = "todo", .argv = "todo" },
+        .lsp => .{ .res_kind = .file, .op = @tagName(parsed_args.lsp.operation), .target = parsed_args.lsp.filePath, .argv = parsed_args.lsp.filePath },
         .mcp => .{ .res_kind = .cmd, .op = "call", .target = parsed_args.mcp.name, .argv = parsed_args.mcp.arguments },
         .github => .{ .res_kind = .net, .op = "request", .target = parsed_args.github.repo, .argv = parsed_args.github.path },
         .ffmpeg => .{ .res_kind = .file, .op = @tagName(parsed_args.ffmpeg.op), .target = parsed_args.ffmpeg.input, .argv = parsed_args.ffmpeg.output orelse parsed_args.ffmpeg.input },
@@ -1680,6 +1682,7 @@ fn auditResMap(kind: core.tools.Kind) AuditResMap {
         .skill => .{ .kind = .cmd, .op = "run" },
         .patch => .{ .kind = .file, .op = "write" },
         .todo => .{ .kind = .cmd, .op = "run" },
+        .lsp => .{ .kind = .file, .op = "read" },
         .mcp => .{ .kind = .cmd, .op = "call" },
         .github => .{ .kind = .net, .op = "request" },
         .ffmpeg => .{ .kind = .file, .op = "process" },
@@ -1991,6 +1994,7 @@ const SwarmRun = struct {
         if (member.role == .sme or member.role == .reviewer) {
             cmd.tool_mask &= ~(core.tools.builtin.mask_bash | core.tools.builtin.mask_write | core.tools.builtin.mask_edit | core.tools.builtin.mask_patch | core.tools.builtin.mask_todo | core.tools.builtin.mask_ffmpeg);
             cmd.cfg.mcp_servers_json = null;
+            cmd.cfg.lsp_json = null;
         }
         cmd.prompt = try std.fmt.allocPrint(
             alloc,
@@ -2287,7 +2291,10 @@ fn execWithIoTuiHooks(
         .egress = .{ .egress = .{ .rules = if (pol.enforced()) pol.resolved.doc.rules else &.{.{ .pattern = "runtime/web/*", .effect = .allow }} }, .allow_cross_host = true, .allow_cross_port = true },
     });
     defer tools_rt.deinit();
-    if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
+    if (!pol.enforced()) {
+        try tools_rt.configureLsp(run_cmd.cfg.lsp_json orelse "{}");
+        try tools_rt.configureMcp(run_cmd.cfg.mcp_servers_json orelse "{}");
+    } else if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
 
     var sid: []u8 = &.{};
     var session_dir_path: ?[]u8 = null;
@@ -2950,10 +2957,10 @@ fn runTui(
     if (is_resumed) {
         const restored = try resume_ctx.restore(sid.*);
         if (!restored) {
-            try showStartup(alloc, run_cmd.io, &ui, true, home, tools_rt.mcp);
+            try showStartup(alloc, run_cmd.io, &ui, home, tools_rt);
         }
     } else {
-        try showStartup(alloc, run_cmd.io, &ui, false, home, tools_rt.mcp);
+        try showStartup(alloc, run_cmd.io, &ui, home, tools_rt);
     }
 
     if (run_cmd.session == .auto) try saveSessionModel(store, sid.*, model, provider_label);
@@ -3074,6 +3081,9 @@ fn runTui(
             }
             ui.ov = tui_overlay.Overlay.init(models_list, cur_idx);
         }
+        if (cmd == .select_lsp_download) {
+            ui.ov = lspDownloadOverlay();
+        }
         if (cmd == .select_session) {
             _ = try showResumeOverlay(alloc, &ui, session_dir_path);
         }
@@ -3093,7 +3103,7 @@ fn runTui(
                 } else |_| {}
             }
         }
-        if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
+        if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork or cmd == .select_lsp_download) {
             const cmd_text = init_cmd_writer.written();
             if (cmd_text.len > 0) {
                 try infoTextSafe(alloc, &ui, cmd_text);
@@ -3328,6 +3338,28 @@ fn runTui(
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
+                                    .lsp_download => {
+                                        if (live_turn.isRunning()) {
+                                            try ui.tr.infoText("Finish the current turn before downloading a language server");
+                                            try ui.draw(out);
+                                            continue;
+                                        }
+                                        const name = @import("../core/lsp.zig").downloadName(ui.ov.?.sel);
+                                        ui.ov.?.deinit(alloc);
+                                        ui.ov = null;
+                                        const command = try std.fmt.allocPrint(alloc, "download {s}", .{name});
+                                        defer alloc.free(command);
+                                        try ui.tr.infoText("Downloading language server...");
+                                        try ui.draw(out);
+                                        const result = tools_rt.lspCommand(command) catch |err| {
+                                            const message = try report.cli(alloc, "LSP download", err);
+                                            defer alloc.free(message);
+                                            try infoTextSafe(alloc, &ui, message);
+                                            continue;
+                                        };
+                                        defer alloc.free(result);
+                                        try infoTextSafe(alloc, &ui, result);
+                                    },
                                     .queue => {
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
@@ -3499,6 +3531,11 @@ fn runTui(
                                     }
                                 }
                                 ui.ov = tui_overlay.Overlay.init(models_list, cur_idx);
+                                try ui.draw(out);
+                                continue;
+                            }
+                            if (cmd == .select_lsp_download) {
+                                ui.ov = lspDownloadOverlay();
                                 try ui.draw(out);
                                 continue;
                             }
@@ -4129,13 +4166,14 @@ fn runRpc(
         }
         const cmd = normalizeRpcCmd(raw_cmd);
 
-        const RpcCmd = enum { prompt, model, provider, tools, mcp, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
+        const RpcCmd = enum { prompt, model, provider, tools, mcp, lsp, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
         const rpc_map = std.StaticStringMap(RpcCmd).initComptime(.{
             .{ "prompt", .prompt },
             .{ "model", .model },
             .{ "provider", .provider },
             .{ "tools", .tools },
             .{ "mcp", .mcp },
+            .{ "lsp", .lsp },
             .{ "bg", .bg },
             .{ "login", .login },
             .{ "logout", .logout },
@@ -4295,6 +4333,11 @@ fn runRpc(
                     .cmd = raw_cmd,
                     .provider = provider_label,
                 });
+            },
+            .lsp => {
+                const raw = try tools_rt.lspCommand(req.arg orelse "");
+                defer alloc.free(raw);
+                try writeJsonLine(alloc, out, .{ .type = "rpc_ack", .id = req.id, .cmd = raw_cmd, .lsp = raw });
             },
             .mcp => {
                 const raw = try tools_rt.mcpReport();
@@ -4673,12 +4716,12 @@ fn runRpc(
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_help",
                     .id = req.id,
-                    .commands = "prompt,model,provider,tools,mcp,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
+                    .commands = "prompt,model,provider,tools,mcp,lsp,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
                 });
             },
             .commands => {
                 const commands = [_][]const u8{
-                    "prompt", "model", "provider", "tools", "mcp", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
+                    "prompt", "model", "provider", "tools", "mcp", "lsp", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
                 };
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_commands",
@@ -4955,6 +4998,7 @@ const CmdRes = enum {
     select_fork,
     select_login,
     select_logout,
+    select_lsp_download,
 };
 
 const SlashSkill = enum {
@@ -5041,7 +5085,7 @@ fn handleSlashCommand(
     const cmd = if (sp) |i| body[0..i] else body;
     const arg = if (sp) |i| std.mem.trim(u8, body[i + 1 ..], " \t") else "";
 
-    const Cmd = enum { help, quit, exit, session, model, provider, tools, mcp, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
+    const Cmd = enum { help, quit, exit, session, model, provider, tools, mcp, lsp, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
     const cmd_map = std.StaticStringMap(Cmd).initComptime(.{
         .{ "help", .help },
         .{ "quit", .quit },
@@ -5051,6 +5095,7 @@ fn handleSlashCommand(
         .{ "provider", .provider },
         .{ "tools", .tools },
         .{ "mcp", .mcp },
+        .{ "lsp", .lsp },
         .{ "bg", .bg },
         .{ "upgrade", .upgrade },
         .{ "new", .new },
@@ -5099,6 +5144,7 @@ fn handleSlashCommand(
                 \\  /model [id]        Set/select model
                 \\  /provider <id>     Set/show provider
                 \\  /tools [list|all]  Set/show tools
+                \\  /lsp [list|download [server]]  Status or explicit server download
                 \\  /mcp [list]        MCP servers, status and tools
                 \\  /bg <subcommand>   Background jobs
                 \\  /upgrade           Self-update to latest release
@@ -5168,6 +5214,13 @@ fn handleSlashCommand(
             }
             try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "provider set to {s}\n", .{provider.*});
+        },
+        .lsp => {
+            if (std.mem.eql(u8, arg, "download") and !tools_rt.sandbox_locked) return .select_lsp_download;
+            const inventory = try tools_rt.lspCommand(arg);
+            defer alloc.free(inventory);
+            try out.writeAll(inventory);
+            try out.writeAll("\n");
         },
         .mcp => {
             if (arg.len != 0 and !std.mem.eql(u8, arg, "list")) {
@@ -7005,6 +7058,7 @@ const arg_src_kind_map = std.StaticStringMap(enum {
     provider,
     tools,
     mcp,
+    lsp,
     bg,
     auth_provider,
 }).initComptime(.{
@@ -7012,6 +7066,7 @@ const arg_src_kind_map = std.StaticStringMap(enum {
     .{ "provider", .provider },
     .{ "tools", .tools },
     .{ "mcp", .mcp },
+    .{ "lsp", .lsp },
     .{ "bg", .bg },
     .{ "login", .auth_provider },
     .{ "logout", .auth_provider },
@@ -7076,6 +7131,7 @@ fn resolveArgSrc(text: []const u8, models: []const []const u8) ?[]const []const 
         .provider, .auth_provider => &provider_args,
         .tools => &tool_args,
         .mcp => &.{"list"},
+        .lsp => &.{ "list", "download" },
         .bg => &bg_args,
     };
 }
@@ -7223,7 +7279,7 @@ test "compact startup keeps context and twenty skills visible at 80x24" {
     }
     var ui = try tui_harness.Ui.init(alloc, 80, 24, "m", "p");
     defer ui.deinit();
-    try showStartup(alloc, std.testing.io, &ui, true, home, null);
+    try showStartup(alloc, std.testing.io, &ui, home, null);
     var vs = try @import("../modes/tui/vscreen.zig").VScreen.init(alloc, 80, 24);
     defer vs.deinit();
     var bytes: [32768]u8 = undefined;
@@ -7244,6 +7300,13 @@ test "compact startup keeps context and twenty skills visible at 80x24" {
     try std.testing.expect(std.mem.indexOf(u8, text, "This long description") == null);
 }
 
+fn lspDownloadOverlay() tui_overlay.Overlay {
+    var overlay = tui_overlay.Overlay.init(&@import("../core/lsp.zig").download_labels, 0);
+    overlay.kind = .lsp_download;
+    overlay.title = "Download LSP server";
+    return overlay;
+}
+
 fn showMcpStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, manager: ?*const @import("../core/mcp.zig").Manager) !void {
     const summary = (try @import("../core/mcp.zig").summaryAlloc(alloc, manager)) orelse return;
     defer alloc.free(summary);
@@ -7252,7 +7315,7 @@ fn showMcpStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, manager: ?*cons
     try infoTextSafe(alloc, ui, summary);
 }
 
-fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_resumed: bool, home: ?[]const u8, manager: ?*const @import("../core/mcp.zig").Manager) !void {
+fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, home: ?[]const u8, tools_rt: ?*core.tools.builtin.Runtime) !void {
     const t = tui_theme.get();
 
     // Version banner (matching pi's "pi v0.52.12")
@@ -7301,32 +7364,16 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, is_res
         try infoTextSafe(alloc, ui, names.written());
     }
 
-    try showMcpStartup(alloc, ui, manager);
+    try showMcpStartup(alloc, ui, if (tools_rt) |rt| rt.mcp else null);
 
-    // What's New section (only on fresh sessions)
-    if (!is_resumed) {
-        var state = (try config.PzState.load(alloc, home)) orelse config.PzState{};
-        defer state.deinit(alloc);
-
-        const new_entries = changelog.entriesSince(state.last_hash);
-        if (new_entries.len > 0) {
-            const formatted = try changelog.formatRaw(alloc, new_entries, 10);
-            defer alloc.free(formatted);
-            try ui.tr.styledText("", .{}); // blank line
-            try ui.tr.styledText("[What's New]", .{ .fg = t.md_heading });
-            // Split and display each line; VCS text may contain non-UTF-8
-            var off: usize = 0;
-            while (off < formatted.len) {
-                const eol = std.mem.indexOfScalarPos(u8, formatted, off, '\n') orelse formatted.len;
-                try infoTextSafe(alloc, ui, formatted[off..eol]);
-                off = eol + 1;
-            }
-        }
-
-        // Update state with current git hash
-        const new_state = config.PzState{ .last_hash = cli.build_id };
-        try new_state.save(alloc, home);
-    }
+    try ui.tr.styledText("", .{});
+    try ui.tr.styledText("[LSP]", .{ .fg = t.md_heading });
+    const summary = if (tools_rt) |rt|
+        if (rt.lsp) |*manager| try manager.summaryAlloc() else try rt.lspReport()
+    else
+        try alloc.dupe(u8, "LSP disabled.");
+    defer alloc.free(summary);
+    try infoTextSafe(alloc, ui, summary);
 }
 
 fn discoverSkills(alloc: std.mem.Allocator, home: ?[]const u8) ![]core_skill.SkillInfo {
@@ -16316,7 +16363,7 @@ test "MCP startup section renders server status alongside skills style" {
         try text.writer.print("{s}\n", .{line});
     }
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "[MCP]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text.written(), "linux-mcp-server (disabled)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "linux-mcp-server (failed:") != null);
 }
 
 test "MCP startup slash command handles inventories larger than four KiB" {

@@ -1533,6 +1533,7 @@ pub fn approvalSummaryAlloc(
         .ffmpeg => std.fmt.allocPrint(alloc, "ffmpeg {s}: {s} → {s}", .{ @tagName(parsed_args.ffmpeg.op), parsed_args.ffmpeg.input, parsed_args.ffmpeg.output orelse "(inspect only)" }),
         .agent => std.fmt.allocPrint(alloc, "agent {s}", .{parsed_args.agent.agent_id}),
         .web => tools.web.approvalSummaryAlloc(alloc, parsed_args.web),
+        .lsp => std.fmt.allocPrint(alloc, "LSP {s}: {s}", .{ @tagName(parsed_args.lsp.operation), parsed_args.lsp.filePath }),
         .mcp => std.fmt.allocPrint(alloc, "MCP {s}: {s}", .{ parsed_args.mcp.name, parsed_args.mcp.arguments }),
         else => std.fmt.allocPrint(alloc, "[unknown tool]", .{}),
     };
@@ -1700,6 +1701,7 @@ fn parseCallArgs(
         .todo => .{ .todo = try parseArgs(tools.Call.TodoArgs, alloc, raw) },
         .github => .{ .github = try parseArgs(tools.Call.GithubArgs, alloc, raw) },
         .ffmpeg => .{ .ffmpeg = try parseArgs(tools.Call.FfmpegArgs, alloc, raw) },
+        .lsp => .{ .lsp = try parseArgs(@import("lsp.zig").Args, alloc, raw) },
         .mcp => blk: {
             const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

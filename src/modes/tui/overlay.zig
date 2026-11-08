@@ -8,7 +8,7 @@ const Frame = frame_mod.Frame;
 const Style = frame_mod.Style;
 const Color = frame_mod.Color;
 
-pub const Kind = enum { model, session, settings, fork, login, logout, queue };
+pub const Kind = enum { model, session, settings, fork, login, logout, queue, lsp_download };
 
 pub const Overlay = struct {
     pub const SessionRow = struct {

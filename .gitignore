@@ -3,7 +3,9 @@ __pycache__
 zig-out/
 zig-pkg/
 pz/
-src/
+src/**
+!src/core/
+!src/core/lsp.zig
 pkg/
 *.patch
 .pz/

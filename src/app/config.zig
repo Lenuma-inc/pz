@@ -94,6 +94,7 @@ pub const Config = struct {
     audit_overflow: core.policy.AuditOverflow = .drop_oldest,
     syslog_fwd: ?SyslogFwd = null,
     mcp_servers_json: ?[]u8 = null,
+    lsp_json: ?[]u8 = null,
     context_windows: std.StringHashMapUnmanaged(u64) = .empty,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
@@ -238,6 +239,7 @@ const SettingsCfg = struct {
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
     mcpServers: ?std.json.Value = null,
+    lsp: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
@@ -335,6 +337,7 @@ pub fn discover(
         if (try loadFile(alloc, io, dir, parsed.cfg)) |file_cfg| {
             defer file_cfg.deinit();
             if (file_cfg.value.contextWindows) |value| try setContextWindows(alloc, &out, value);
+            if (file_cfg.value.lsp) |value| try setLsp(alloc, &out, value);
             if (file_cfg.value.mcpServers) |value| try setMcp(alloc, &out, value);
             try applyRawCfg(
                 alloc,
@@ -438,6 +441,7 @@ const FileCfg = struct {
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
     mcpServers: ?std.json.Value = null,
+    lsp: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
 };
 
@@ -506,6 +510,13 @@ fn hasGlobalSettings(alloc: std.mem.Allocator, io: std.Io, home: ?[]const u8) !b
     return true;
 }
 
+fn setLsp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
+    try @import("../core/lsp.zig").validate(value);
+    const raw = try std.json.Stringify.valueAlloc(alloc, value, .{});
+    if (cfg.lsp_json) |old| alloc.free(old);
+    cfg.lsp_json = raw;
+}
+
 fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
     try @import("../core/mcp.zig").validate(value);
     const raw = try std.json.Stringify.valueAlloc(alloc, value, .{});
@@ -515,6 +526,7 @@ fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
 
 fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) !void {
     if (pi.contextWindows) |value| try setContextWindows(alloc, cfg, value);
+    if (pi.lsp) |value| try setLsp(alloc, cfg, value);
     if (pi.mcpServers) |value| try setMcp(alloc, cfg, value);
     try applyRawCfg(
         alloc,

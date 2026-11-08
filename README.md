@@ -33,7 +33,7 @@ even with debug info retained.
 - **Image rendering** — Kitty graphics protocol support in terminal
 - **Slash commands** — `/model`, `/fork`, `/export`, `/compact`, `/share`, `/tree`, and more
 - **Autocomplete dropdown** — fuzzy-filtered command and file path completion
-- **16 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`, `swarm`, `ffmpeg`
+- **18 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`, `swarm`, `ffmpeg`, `lsp`, `mcp`
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
@@ -260,7 +260,6 @@ operations. Its workflow is plan/consult, implement one task at a time, test,
 then independently review; SME and reviewer workers have read-only built-in
 tools and no MCP servers. Workers share the project checkout, so parallel code
 changes are not isolated.
-LSP is outside this tool set.
 
 ## Models and keyboard help
 

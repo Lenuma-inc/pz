@@ -262,7 +262,8 @@ pub const Runtime = struct {
     entries: [16]tools.Entry = undefined,
     selected: [16]tools.Entry = undefined,
     mcp: ?*@import("../mcp.zig").Manager = null,
-    combined: [17 + @import("../mcp.zig").max_tools]tools.Entry = undefined,
+    lsp: ?@import("../lsp.zig").Manager = null,
+    combined: [18 + @import("../mcp.zig").max_tools]tools.Entry = undefined,
 
     const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
@@ -298,6 +299,15 @@ pub const Runtime = struct {
             };
             len += 1;
         }
+        if (self.lsp != null and (self.tool_mask & mask_read) != 0) {
+            self.combined[len] = .{
+                .name = "lsp",
+                .kind = .lsp,
+                .dispatch = &self.dispatch,
+                .spec = .{ .kind = .lsp, .desc = "Query installed language servers: diagnostics, definitions, references, hover, symbols, implementations and call hierarchy. File paths are workspace paths; line and character are 1-based, character uses UTF-16 code units. Never installs servers.", .params = &.{}, .schema_json = "{\"type\":\"object\",\"properties\":{\"operation\":{\"type\":\"string\",\"enum\":[\"diagnostics\",\"goToDefinition\",\"findReferences\",\"hover\",\"documentSymbol\",\"workspaceSymbol\",\"goToImplementation\",\"prepareCallHierarchy\",\"incomingCalls\",\"outgoingCalls\"]},\"filePath\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\",\"minimum\":1},\"character\":{\"type\":\"integer\",\"minimum\":1},\"query\":{\"type\":\"string\"}},\"required\":[\"operation\",\"filePath\"],\"additionalProperties\":false}", .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 15000, .destructive = false },
+            };
+            len += 1;
+        }
         return tools.Registry.init(self.combined[0..len]);
     }
 
@@ -308,7 +318,32 @@ pub const Runtime = struct {
         self.mcp = try @import("../mcp.zig").Manager.create(self.alloc, raw);
     }
 
+    pub fn configureLsp(self: *Runtime, raw: []const u8) !void {
+        if (self.sandbox_locked) return error.PolicyDenied;
+        std.debug.assert(self.lsp == null);
+        self.lsp = try @import("../lsp.zig").Manager.create(self.alloc, raw);
+    }
+
+    pub fn lspCommand(self: *Runtime, arg: []const u8) ![]u8 {
+        var parts = std.mem.tokenizeAny(u8, arg, " \t");
+        const op = parts.next() orelse return self.lspReport();
+        if (std.mem.eql(u8, op, "download")) {
+            if (self.sandbox_locked) return error.PolicyDenied;
+            const name = parts.next() orelse "";
+            if (parts.next() != null) return self.alloc.dupe(u8, "usage: /lsp download [server]\n");
+            return @import("../lsp.zig").downloadAlloc(self.alloc, name);
+        }
+        if (std.mem.eql(u8, op, "list") and parts.next() == null) return self.lspReport();
+        return self.alloc.dupe(u8, "usage: /lsp [list | download [server]]\n");
+    }
+
+    pub fn lspReport(self: *Runtime) ![]u8 {
+        if (self.lsp) |*manager| return manager.reportAlloc();
+        return self.alloc.dupe(u8, if (self.sandbox_locked) "LSP disabled by enforced policy." else "LSP not initialized.");
+    }
+
     pub fn deinit(self: *Runtime) void {
+        if (self.lsp) |*manager| manager.deinit();
         if (self.mcp) |m| m.destroy();
         self.skill_cache.deinit(self.alloc);
         self.tasks.deinit(self.alloc);
@@ -606,7 +641,7 @@ pub const Runtime = struct {
     }
 
     fn dispatchRun(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
-        return switch (call.kind) {
+        const result = try switch (call.kind) {
             .read => self.runRead(call, sink),
             .write => self.runWrite(call, sink),
             .bash => self.runBash(call, sink),
@@ -624,7 +659,48 @@ pub const Runtime = struct {
             .swarm => self.runSwarm(call),
             .ffmpeg => ffmpeg.run(self.alloc, self.max_bytes, call),
             .mcp => self.runMcpList(call), // Remote entries have their own dispatch context.
+            .lsp => self.runLsp(call),
         };
+        return self.withDiagnostics(call, result);
+    }
+
+    fn runLsp(self: *Runtime, call: tools.Call) !tools.Result {
+        const manager = if (self.lsp) |*m| m else return error.LspUnavailable;
+        if (self.sandbox_locked) return error.PolicyDenied;
+        const raw = try manager.queryAlloc(call.args.lsp);
+        defer self.alloc.free(raw);
+        return shared.buildSlicedResult(self.alloc, call.id, call.at_ms, tools.truncate.apply(raw, @min(self.max_bytes, text_max_bytes)));
+    }
+
+    fn withDiagnostics(self: *Runtime, call: tools.Call, result: tools.Result) tools.Result {
+        if (self.sandbox_locked or result.final != .ok or result.out_streamed) return result;
+        const manager = if (self.lsp) |*m| m else return result;
+        if (call.cancel) |c| if (c.isCanceled()) return result;
+        const path = switch (call.args) {
+            .read => |a| a.path,
+            .write => |a| a.path,
+            .edit => |a| a.path,
+            .patch => |a| a.path,
+            else => return result,
+        };
+        manager.touchFile(path);
+        const diagnostics = (manager.diagnosticsAlloc(path) catch return result) orelse return result;
+        defer self.alloc.free(diagnostics);
+        const text = std.fmt.allocPrint(self.alloc, "\nLSP diagnostics (server output):\n{s}", .{diagnostics}) catch return result;
+        defer self.alloc.free(text);
+        const extra = tools.truncate.apply(text, @min(self.max_bytes, text_max_bytes));
+        const chunk = self.alloc.dupe(u8, extra.chunk) catch return result;
+        const outputs = self.alloc.alloc(tools.Output, result.out.len + 1) catch {
+            self.alloc.free(chunk);
+            return result;
+        };
+        @memcpy(outputs[0..result.out.len], result.out);
+        outputs[result.out.len] = .{ .call_id = call.id, .seq = @intCast(result.out.len), .at_ms = call.at_ms, .stream = .stdout, .chunk = chunk, .owned = true, .truncated = extra.meta != null };
+        if (result.out_owned) self.alloc.free(result.out);
+        var combined = result;
+        combined.out = outputs;
+        combined.out_owned = true;
+        return combined;
     }
 
     pub fn mcpReport(self: *const Runtime) ![]u8 {
@@ -1737,7 +1813,7 @@ test "MCP external executables cannot bypass a verified sandbox policy" {
     try std.testing.expectEqual(@as(usize, 16), rt.registry().entries.len);
 }
 
-test "MCP agent inventory tool lists failed and disabled servers and respects tools none" {
+test "MCP agent inventory tool lists failed servers and respects tools none" {
     const a = std.testing.allocator;
     var rt = Runtime.init(.{ .alloc = a });
     defer rt.deinit();
@@ -1752,7 +1828,7 @@ test "MCP agent inventory tool lists failed and disabled servers and respects to
     const call: tools.Call = .{ .id = "inventory", .kind = .mcp, .args = .{ .mcp = .{ .name = "mcp", .arguments = "{\"op\":\"list\"}" } }, .src = .model, .at_ms = 0 };
     const result = try entry.dispatch.run(call, &sink.sink);
     defer rt.deinitResult(result);
-    try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "linux") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "failed") != null);
     rt.tool_mask = 0;
     try std.testing.expectEqual(@as(usize, 0), rt.registry().entries.len);

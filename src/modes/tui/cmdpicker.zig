@@ -37,6 +37,7 @@ pub const cmds = [_]Cmd{
     .{ .name = "settings", .desc = "Current settings" },
     .{ .name = "share", .desc = "Share as gist" },
     .{ .name = "tools", .desc = "Set/show tools" },
+    .{ .name = "lsp", .desc = "Installed language servers and status" },
     .{ .name = "mcp", .desc = "MCP servers, status and tools" },
     .{ .name = "tree", .desc = "List sessions" },
     .{ .name = "upgrade", .desc = "Self-update" },
