@@ -3947,7 +3947,7 @@ fn runTui(
                     }
                 },
                 .none => {
-                    if (ui.panels.bg_running > 0) {
+                    if (ui.panels.bg_running > 0 or ui.copy_toast_until_ms != 0) {
                         ui.panels.tickBgSpinner();
                         try ui.draw(out);
                     }
@@ -7450,7 +7450,10 @@ fn copyMouseSelection(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const
     defer alloc.free(text);
     if (text.len == 0) return;
     for (clip_paths) |cmd| {
-        if (try pipeToCmd(alloc, cmd, text, pol)) return;
+        if (try pipeToCmd(alloc, cmd, text, pol)) {
+            ui.noteCopied();
+            return;
+        }
     }
     ui.clearSelection();
     try ui.tr.infoText("[selection copy failed: clipboard tool unavailable or blocked]");

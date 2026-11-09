@@ -35,6 +35,17 @@ pub const Ui = struct {
     selection_end: ?mouse.Event.Pos = null,
     selection_active: bool = false,
     selection_ready: bool = false,
+    copy_toast_until_ms: i64 = 0,
+
+    pub fn noteCopied(self: *Ui) void {
+        self.copy_toast_until_ms = core_time.milliTimestamp() + 2000;
+    }
+
+    fn copyToastActive(self: *Ui, now_ms: i64) bool {
+        if (now_ms < self.copy_toast_until_ms) return true;
+        self.copy_toast_until_ms = 0;
+        return false;
+    }
 
     const BorderStatus = struct {
         label: []const u8,
@@ -234,6 +245,7 @@ pub const Ui = struct {
 
     pub fn draw(self: *Ui, out: anytype) !void {
         self.frm.clear();
+        _ = self.copyToastActive(core_time.milliTimestamp());
 
         const w = self.frm.w;
         const h = self.frm.h;
@@ -297,6 +309,7 @@ pub const Ui = struct {
         }
 
         self.applySelection(tx_h);
+        if (self.ov == null) try self.drawCopyToast(tx_h);
 
         // Publish cells and the editor cursor together, with no cursor on dirty runs.
         try out.writeAll("\x1b[?2026h\x1b[?25l");
@@ -528,6 +541,33 @@ pub const Ui = struct {
             if (blk.kind == .text) return blk.text();
         }
         return null;
+    }
+
+    fn drawCopyToast(self: *Ui, transcript_height: usize) !void {
+        if (self.copy_toast_until_ms == 0 or self.frm.w < 8 or transcript_height < 3) return;
+        const label = "Copied to clipboard";
+        const box_w = @min(label.len + 4, self.frm.w - 2);
+        const x = self.frm.w - box_w - 1;
+        const y = transcript_height - 3 - @intFromBool(transcript_height > 3);
+        const t = theme.get();
+        const border = frame.Style{ .fg = t.success, .bg = t.tool_success_bg };
+        const text = frame.Style{ .fg = t.text, .bg = t.tool_success_bg, .bold = true };
+        for (0..3) |row| {
+            for (0..box_w) |col| {
+                try self.frm.set(x + col, y + row, ' ', border);
+            }
+        }
+        try self.frm.set(x, y, 0x256d, border); // ╭
+        try self.frm.set(x + box_w - 1, y, 0x256e, border); // ╮
+        try self.frm.set(x, y + 2, 0x2570, border); // ╰
+        try self.frm.set(x + box_w - 1, y + 2, 0x256f, border); // ╯
+        for (1..box_w - 1) |col| {
+            try self.frm.set(x + col, y, 0x2500, border);
+            try self.frm.set(x + col, y + 2, 0x2500, border);
+        }
+        try self.frm.set(x, y + 1, 0x2502, border);
+        try self.frm.set(x + box_w - 1, y + 1, 0x2502, border);
+        _ = try self.frm.write(x + 2, y + 1, label[0..@min(label.len, box_w - 4)], text);
     }
 
     fn drawBorder(self: *Ui, y: usize) !void {
@@ -871,6 +911,60 @@ test "harness resize reallocates frame and renderer" {
     out.clear();
     try ui.draw(&out);
     try std.testing.expect(out.view().len != 0);
+}
+
+test "harness copy toast renders briefly without adding transcript text" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+    ui.panels.run_state = .streaming;
+    const blocks_before = ui.tr.blocks.items.len;
+    ui.noteCopied();
+
+    var raw: [4096]u8 = undefined;
+    var out = TestBuf.init(raw[0..]);
+    try ui.draw(&out);
+    const pos = findAsciiSeqInFrame(&ui.frm, "Copied to clipboard").?;
+    try std.testing.expectEqual(ui.frm.w - "Copied to clipboard".len - 3, pos.x);
+    try std.testing.expect(pos.y < ui.transcript_h);
+    try std.testing.expectEqual(@as(u21, 0x256d), (try ui.frm.cell(pos.x - 2, pos.y - 1)).cp);
+    try std.testing.expect(frame.Color.eql((try ui.frm.cell(pos.x, pos.y)).style.bg, theme.get().tool_success_bg));
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "streaming") != null);
+    try std.testing.expectEqual(blocks_before, ui.tr.blocks.items.len);
+
+    const expires = ui.copy_toast_until_ms;
+    try std.testing.expect(ui.copyToastActive(expires - 1));
+    try std.testing.expect(!ui.copyToastActive(expires));
+    out.clear();
+    try ui.draw(&out);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "Copied to clipboard") == null);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "streaming") != null);
+}
+
+test "harness copy toast fits narrow terminals and stays behind dialogs" {
+    for ([_]usize{ 1, 7, 8, 12, 24, 40 }) |width| {
+        var ui = try Ui.init(std.testing.allocator, width, 10, "m", "p");
+        defer ui.deinit();
+        ui.noteCopied();
+        var raw: [8192]u8 = undefined;
+        var out = TestBuf.init(raw[0..]);
+        try ui.draw(&out);
+        if (width == 40) {
+            ui.ov = overlay_mod.Overlay.init(&.{"Model"}, 0);
+            out.clear();
+            try ui.draw(&out);
+            try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "Copied to clipboard") == null);
+        }
+    }
+}
+
+test "harness copy toast expires in tiny terminals" {
+    var ui = try Ui.init(std.testing.allocator, 1, 1, "m", "p");
+    defer ui.deinit();
+    ui.copy_toast_until_ms = 1;
+    var raw: [4096]u8 = undefined;
+    var out = TestBuf.init(raw[0..]);
+    try ui.draw(&out);
+    try std.testing.expectEqual(@as(i64, 0), ui.copy_toast_until_ms);
 }
 
 test "harness border shows compaction indicator" {
