@@ -398,16 +398,6 @@ pub const Reader = struct {
         if (data.len < 3) return null; // need at least ESC [ X
 
         return sw: switch (data[2]) {
-            '<' => {
-                // SGR mouse: ESC [ < ...
-                if (mouse.parse(data)) |r| {
-                    self.pos += r.len;
-                    break :sw .{ .mouse = r.ev };
-                }
-                if (data.len < 9) break :sw null; // incomplete
-                self.pos += 2;
-                break :sw @as(?Event, .none); // malformed
-            },
             'A' => {
                 self.pos += 3;
                 break :sw .{ .key = .up };
@@ -437,7 +427,7 @@ pub const Reader = struct {
                 break :sw .{ .key = .end };
             },
             // Param bytes (digits, semicolons, intermediate) — scan for final byte
-            '0'...'9', ';', '?', ' '...'/' => {
+            '0'...'9', ';', '?', '<', ' '...'/' => {
                 // Bracketed paste: ESC [ 200 ~
                 if (data[2] == '2' and data.len >= 6 and std.mem.eql(u8, data[3..6], "00~")) {
                     self.pos += 6;
@@ -449,10 +439,15 @@ pub const Reader = struct {
                 while (i < data.len) : (i += 1) {
                     if (data[i] >= 0x40 and data[i] <= 0x7e) {
                         i += 1;
-                        const seq = data[2..i];
-                        const ev = mapCsiParam(seq);
                         self.pos += i;
-                        break :sw ev;
+                        if (data[2] == '<') {
+                            // Wait for the whole SGR report, including M/m. A
+                            // partial report is not malformed just because it
+                            // has reached a particular byte count.
+                            const report = mouse.parse(data[0..i]) orelse break :sw @as(?Event, .none);
+                            break :sw .{ .mouse = report.ev };
+                        }
+                        break :sw mapCsiParam(data[2..i]);
                     }
                 }
                 break :sw null; // incomplete
@@ -773,6 +768,66 @@ test "parse mouse scroll" {
     switch (ev) {
         .mouse => {},
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "fragmented SGR mouse reports never become editor text" {
+    for ([_][]const u8{
+        "\x1b[<32;3;11M",
+        "\x1b[<0;123;456M",
+        "\x1b[<0;123;456m",
+        "\x1b[<64;123;456M",
+        "\x1b[<65;123;456M",
+    }) |seq| {
+        for (1..seq.len) |split| {
+            var r = Reader.init(-1);
+            r.inject(seq[0..split]);
+            try std.testing.expect(r.parseOne() == null);
+            try std.testing.expectEqual(@as(usize, 0), r.pos);
+            r.inject(seq[split..]);
+            r.inject("z");
+            try std.testing.expectEqualDeep(mouse.parse(seq).?.ev, r.parseOne().?.mouse);
+            try expectKey(r.parseOne().?, .{ .char = 'z' });
+            try std.testing.expect(r.parseOne() == null);
+        }
+        var r = Reader.init(-1);
+        for (seq, 0..) |byte, i| {
+            r.inject(&.{byte});
+            if (i + 1 < seq.len) try std.testing.expect(r.parseOne() == null);
+        }
+        try std.testing.expectEqualDeep(mouse.parse(seq).?.ev, r.parseOne().?.mouse);
+    }
+}
+
+test "reader preserves partial SGR mouse reports across idle reads" {
+    const input = try makePipe();
+    defer closeFd(input[0]);
+    defer closeFd(input[1]);
+    const notify = try makePipe();
+    defer closeFd(notify[0]);
+    defer closeFd(notify[1]);
+    var r = Reader.initWithNotify(input[0], notify[0]);
+    r.inject("a\x1b[<32;3;11");
+    try expectKey(r.next(), .{ .char = 'a' });
+    try std.testing.expect(r.next() == .none);
+    try std.testing.expect(r.next() == .none);
+    r.inject("M\x1b[<64;3;11Mz");
+    try std.testing.expectEqualDeep(mouse.parse("\x1b[<32;3;11M").?.ev, r.next().mouse);
+    try std.testing.expect(r.next().mouse == .scroll_up);
+    try expectKey(r.next(), .{ .char = 'z' });
+}
+
+test "malformed SGR mouse reports are consumed without leaking text" {
+    for ([_][]const u8{
+        "\x1b[<32;;11M",
+        "\x1b[<32;3;11X",
+        "\x1b[<999999999999999999999999999999;3;11M",
+    }) |seq| {
+        var r = Reader.init(-1);
+        r.inject(seq);
+        r.inject("z");
+        try std.testing.expect(r.parseOne().? == .none);
+        try expectKey(r.parseOne().?, .{ .char = 'z' });
     }
 }
 

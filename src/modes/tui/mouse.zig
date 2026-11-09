@@ -68,7 +68,8 @@ fn parseNum(buf: []const u8, pos: *usize) ?usize {
     if (i >= buf.len or buf[i] < '0' or buf[i] > '9') return null;
     var val: usize = 0;
     while (i < buf.len and buf[i] >= '0' and buf[i] <= '9') {
-        val = val * 10 + @as(usize, buf[i] - '0');
+        val = std.math.mul(usize, val, 10) catch return null;
+        val = std.math.add(usize, val, @as(usize, buf[i] - '0')) catch return null;
         i += 1;
     }
     pos.* = i;
