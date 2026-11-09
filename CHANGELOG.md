@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-09
+
+### Added
+- Attach images to video clips and join clips with FFmpeg.
+- Call OpenAPI operations through the web tool.
+
+### Changed
+- Use Zig 0.16.0 for release builds.
+
+### Fixed
+- Handle TUI shortcuts with non-Latin keyboard layouts and Shift+Backspace.
+- Show a toast when selected text is copied.
+- Prevent fragmented mouse reports from leaking into TUI input.
+
 ## [0.7.0] - 2026-11-08
 
 ### Added

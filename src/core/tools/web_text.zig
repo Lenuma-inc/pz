@@ -42,8 +42,8 @@ test "web redaction preserves surrounding article lines and hides credentials" {
 
 pub fn extractAlloc(alloc: std.mem.Allocator, body: []const u8, req: web.Request) ![]u8 {
     if (req.format == .raw) {
-        if (req.json_path != null or req.pattern != null) return error.InvalidArgs;
-        return alloc.dupe(u8, body);
+        if (req.json_path != null) return error.InvalidArgs;
+        if (req.pattern == null) return alloc.dupe(u8, body);
     }
     var child = std.process.spawn(sys.io, .{ .argv = &.{ "python3", "-I", "-c", @embedFile("web_text.py"), @tagName(req.format), req.json_path orelse "", req.url, req.pattern orelse "" }, .expand_arg0 = .expand, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore }) catch |err| switch (err) {
         error.FileNotFound => return error.WebTextRequiresPython3,
@@ -153,7 +153,9 @@ test "web text finds versions in YAML and HTML without shell pipelines" {
     defer a.free(absent);
     try std.testing.expectEqualStrings("[No matches for pattern]", absent);
     try std.testing.expectError(error.WebTextExtractionFailed, extractAlloc(a, "text", .{ .url = "https://example.org", .pattern = "[" }));
-    try std.testing.expectError(error.InvalidArgs, extractAlloc(a, "text", .{ .url = "https://example.org", .format = .raw, .pattern = "version" }));
+    const raw_match = try extractAlloc(a, "version: 1.2.3\nignored", .{ .url = "https://example.org", .format = .raw, .pattern = "version:.*" });
+    defer a.free(raw_match);
+    try std.testing.expectEqualStrings("version: 1.2.3", raw_match);
 }
 
 /// Apply the byte budget while selecting lines, reserving space for continuation.
