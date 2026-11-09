@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - Use Zig 0.16.0 for release builds.
 
 ### Fixed
+- Allow regex filtering of raw web responses.
 - Handle TUI shortcuts with non-Latin keyboard layouts and Shift+Backspace.
 - Show a toast when selected text is copied.
 - Prevent fragmented mouse reports from leaking into TUI input.
