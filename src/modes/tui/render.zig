@@ -58,7 +58,7 @@ pub const Renderer = struct {
     pub fn setup(out: anytype) !void {
         try out.writeAll(decSet(.alt_screen) ++ decRst(.cursor) ++
             decSet(.bracketed_paste) ++ "\x1b[?1002h\x1b[?1006h" ++
-            "\x1b[>1u"); // Kitty keyboard protocol: push with disambiguate flag
+            "\x1b[>5u"); // Kitty: disambiguate (1) + alternate/base-layout keys (4)
     }
 
     pub fn cleanup(out: anytype) !void {
@@ -259,7 +259,7 @@ test "renderer setup enables wheel scrolling and drag reporting" {
 
     const seq = out.view();
     try std.testing.expectEqualStrings(
-        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[?1002h\x1b[?1006h" ++ "\x1b[>1u",
+        decSet(.alt_screen) ++ decRst(.cursor) ++ decSet(.bracketed_paste) ++ "\x1b[?1002h\x1b[?1006h" ++ "\x1b[>5u",
         seq,
     );
     try std.testing.expect(std.mem.indexOf(u8, seq, "?1002h") != null);

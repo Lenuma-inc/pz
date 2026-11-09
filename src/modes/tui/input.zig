@@ -544,15 +544,26 @@ fn mapCsiParam(seq: []const u8) Event {
 }
 
 fn parseKittyKey(params: []const u8) ?editor.Key {
-    // Format: "codepoint;modifiers" — modifiers use mod-1 encoding:
-    // 2=shift, 3=alt, 5=ctrl, 6=shift+ctrl, 7=alt+ctrl
+    // Format: "codepoint[:shifted[:base-layout]];modifiers".
+    // Modifiers use mod-1 encoding: 2=shift, 3=alt, 5=ctrl.
     const sep = std.mem.indexOfScalar(u8, params, ';') orelse return null;
-    const cp = std.fmt.parseInt(u21, params[0..sep], 10) catch return null;
+    var codes = std.mem.splitScalar(u8, params[0..sep], ':');
+    const primary = std.fmt.parseInt(u21, codes.next().?, 10) catch return null;
+    if (codes.next()) |shifted| {
+        if (shifted.len != 0) _ = std.fmt.parseInt(u21, shifted, 10) catch return null;
+    }
+    var base: ?u21 = null;
+    if (codes.next()) |value| {
+        if (value.len != 0) base = std.fmt.parseInt(u21, value, 10) catch return null;
+    }
+    if (codes.next() != null) return null;
     const mods = std.fmt.parseInt(u8, params[sep + 1 ..], 10) catch return null;
     const actual = mods -| 1;
     const shift = actual & 1 != 0;
     const alt = actual & 2 != 0;
     const ctrl = actual & 4 != 0;
+    // Match shortcuts by the base layout, never by a translated character.
+    const cp = if (ctrl or alt) (base orelse primary) else primary;
 
     // Shift+Ctrl combos
     if (shift and ctrl and !alt) {
@@ -845,6 +856,31 @@ test "parse ctrl-v" {
     r.buf[0] = 0x16;
     r.len = 1;
     try expectKey(r.parseOne().?, .ctrl_v);
+}
+
+test "parse Russian layout ctrl-v requests clipboard paste" {
+    // м / М on the physical V key; Kitty reports the base-layout key as 118.
+    for ([_][]const u8{ "\x1b[1084::118;5u", "\x1b[1084:1052:118;5u", "\x1b[118:86;5u", "\x1b[118;5u" }) |seq| {
+        var r = Reader.init(-1);
+        @memcpy(r.buf[0..seq.len], seq);
+        r.len = seq.len;
+        const ev = r.parseOne().?;
+        try expectKey(ev, .ctrl_v);
+        var ed = editor.Editor.init(std.testing.allocator);
+        defer ed.deinit();
+        try std.testing.expectEqual(editor.Action.paste_image, try ed.apply(ev.key));
+    }
+}
+
+test "Kitty alternate keys preserve other layout-independent shortcuts" {
+    try std.testing.expectEqual(editor.Key.ctrl_c, parseKittyKey("1089::99;5").?);
+    try std.testing.expectEqual(editor.Key.shift_ctrl_p, parseKittyKey("1079:1047:112;6").?);
+    try std.testing.expectEqual(editor.Key.alt_b, parseKittyKey("1080::98;3").?);
+    try std.testing.expect(parseKittyKey("1084::118;3") == null);
+    try std.testing.expect(parseKittyKey("1084::118;1") == null);
+    for ([_][]const u8{ "1084:bad:118;5", "1084::bad;5", "1084::118:99;5" }) |params| {
+        try std.testing.expect(parseKittyKey(params) == null);
+    }
 }
 
 test "parse ctrl-z" {
