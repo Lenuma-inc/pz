@@ -7543,14 +7543,16 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, home: 
 
     try showMcpStartup(alloc, ui, if (tools_rt) |rt| rt.mcp else null);
 
-    try ui.tr.styledText("", .{});
-    try ui.tr.styledText("[LSP]", .{ .fg = t.md_heading });
-    const summary = if (tools_rt) |rt|
+    const lsp_summary = if (tools_rt) |rt|
         if (rt.lsp) |*manager| try manager.summaryAlloc() else try rt.lspReport()
     else
         try alloc.dupe(u8, "LSP disabled.");
-    defer alloc.free(summary);
-    try infoTextSafe(alloc, ui, summary);
+    if (lsp_summary) |summary| {
+        defer alloc.free(summary);
+        try ui.tr.styledText("", .{});
+        try ui.tr.styledText("[LSP]", .{ .fg = t.md_heading });
+        try infoTextSafe(alloc, ui, summary);
+    }
 }
 
 fn discoverSkills(alloc: std.mem.Allocator, home: ?[]const u8) ![]core_skill.SkillInfo {

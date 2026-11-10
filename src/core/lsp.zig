@@ -547,7 +547,7 @@ pub const Manager = struct {
         return try self.alloc.dupe(u8, out.written());
     }
 
-    pub fn summaryAlloc(self: *Manager) ![]u8 {
+    pub fn summaryAlloc(self: *Manager) !?[]u8 {
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         for (self.definitions.items) |def| {
@@ -556,7 +556,8 @@ pub const Manager = struct {
             if (out.written().len > 0) try out.writer.writeAll(", ");
             try out.writer.print("{s} ({s})", .{ def.name, if (client) |c| if (c.closed) "failed" else "running" else if (self.unavailable[self.indexOf(def)]) "failed to start" else "installed" });
         }
-        return try self.alloc.dupe(u8, if (out.written().len == 0) "No installed language servers found." else out.written());
+        if (out.written().len == 0) return null;
+        return try self.alloc.dupe(u8, out.written());
     }
 
     pub fn diagnosticsAlloc(self: *Manager, path: []const u8) !?[]u8 {
