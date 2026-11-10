@@ -399,7 +399,7 @@ fn scanStr(line: []const u8, pos: usize) usize {
     var i = pos + 1;
     while (i < line.len) : (i += 1) {
         if (line[i] == '\\') {
-            i += 1; // skip escaped char
+            if (i + 1 < line.len) i += 1; // skip escaped char only when present
             continue;
         }
         if (line[i] == quote) return i + 1;
@@ -891,5 +891,23 @@ test "syntax tokens preserve UTF-8 boundaries in every language" {
             end = token.end;
         }
         try std.testing.expectEqual(line.len, end);
+    }
+}
+
+test "unterminated strings with trailing escape stay within line bounds" {
+    const lines = [_][]const u8{ "printf '{\\", "\"\\", "'\\", "`\\", "\"hello\\", "\"hello\\\"", "\"hello\\\\\"" };
+    inline for (std.meta.tags(Lang)) |lang| {
+        for (lines) |line| {
+            var buf: [128]Token = undefined;
+            const tokens = tokenize(line, lang, &buf);
+            var end: usize = 0;
+            for (tokens) |token| {
+                try std.testing.expectEqual(end, token.start);
+                try std.testing.expect(token.end <= line.len);
+                try std.testing.expect(token.end > token.start);
+                end = token.end;
+            }
+            try std.testing.expectEqual(line.len, end);
+        }
     }
 }
