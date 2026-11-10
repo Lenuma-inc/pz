@@ -118,7 +118,17 @@ pub const Panels = struct {
 
     pub fn setModel(self: *Panels, model: []const u8) EventError!void {
         try ensureUtf8(model);
-        if (!std.mem.eql(u8, self.model.items, model)) self.limits = null;
+        if (!std.mem.eql(u8, self.model.items, model)) {
+            // OpenRouter's key quotas are shared by all of its models.
+            const same_router = std.mem.eql(u8, self.provider.items, "openrouter") and
+                std.mem.indexOfScalar(u8, self.model.items, '/') != null and
+                std.mem.indexOfScalar(u8, model, '/') != null;
+            if (!same_router) self.limits = null;
+            self.ctx_limit = if (self.context_windows) |windows| windows.get(model) orelse 0 else 0;
+            if (self.ctx_limit == 0) {
+                if (@import("../../core/providers/openai_models.zig").find(model)) |entry| self.ctx_limit = entry.context_window orelse 0;
+            }
+        }
         try self.model.resize(self.alloc, 0);
         try self.model.appendSlice(self.alloc, model);
     }
@@ -272,8 +282,8 @@ pub const Panels = struct {
         {
             var x = rect.x;
             var quota_buf: [128]u8 = undefined;
-            const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai");
-            const hint = if (show_limits) quota.format(self.limits, &quota_buf) catch return error.NoSpaceLeft else "drag: select";
+            const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai") or std.mem.eql(u8, self.provider.items, "openrouter");
+            const hint = if (show_limits) quota.formatForModel(self.limits, self.model.items, &quota_buf) catch return error.NoSpaceLeft else "drag: select";
             if (show_limits) {
                 const cols = @min(hint.len, rect.w);
                 const path_end = x_end - cols - @intFromBool(cols < rect.w);
@@ -854,6 +864,36 @@ test "panels track tool lifecycle and state transitions" {
         "after_text state=streaming\nafter_call state=tool id=call-1 name=read tool=running\nafter_result state=streaming tool=ok\nafter_stop state=done",
         snap.items,
     );
+}
+
+test "switching OpenRouter models retains account key quotas" {
+    const alloc = std.testing.allocator;
+    var ps = try Panels.init(alloc, "openrouter/free", "openrouter");
+    defer ps.deinit();
+    ps.limits = .{
+        .free_requests = .{ .used = 4, .limit = 50, .remaining = 46 },
+        .key_credit_limit = .{ .limit = 10, .remaining = 3.25 },
+    };
+    try ps.setModel("vendor/paid-model");
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("key: $3.25/$10.00 left", try quota.formatForModel(ps.limits, ps.model.items, &buf));
+    try ps.setProvider("openai");
+    try std.testing.expect(ps.limits == null);
+}
+
+test "model switch uses catalog context window and clears unknown capacity" {
+    const alloc = std.testing.allocator;
+    var windows = std.StringHashMapUnmanaged(u64).empty;
+    defer windows.deinit(alloc);
+    try windows.put(alloc, "vendor/free-model", 262144);
+    var ps = try Panels.init(alloc, "gpt-6.1-sol", "openai");
+    defer ps.deinit();
+    ps.context_windows = &windows;
+    ps.ctx_limit = 272000;
+    try ps.setModel("vendor/free-model");
+    try std.testing.expectEqual(@as(u64, 262144), ps.ctx_limit);
+    try ps.setModel("vendor/unknown-model");
+    try std.testing.expectEqual(@as(u64, 0), ps.ctx_limit);
 }
 
 test "quota footer renders reported windows and clears them on provider change" {

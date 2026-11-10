@@ -6,65 +6,82 @@ const hc = @import("http_client.zig");
 
 const default_max_output_tokens: u32 = 16384;
 
-pub const Cfg = struct {
-    pub const provider_tag = auth_mod.Provider.openai;
-    pub const api_host = "api.openai.com";
-    pub const api_path = "/v1/responses";
+pub const Cfg = Config(.openai);
 
-    pub fn apiUri(is_sub: bool) std.Uri {
-        return .{
-            .scheme = "https",
-            .host = .{ .raw = if (is_sub) "chatgpt.com" else api_host },
-            .path = .{ .raw = if (is_sub) "/backend-api/codex/responses" else api_path },
-        };
-    }
+/// Responses API configuration shared by OpenAI and OpenRouter.
+pub fn Config(comptime tag: auth_mod.Provider) type {
+    return struct {
+        pub const provider_tag = tag;
+        pub const api_host = if (tag == .openrouter) "openrouter.ai" else "api.openai.com";
+        pub const api_path = if (tag == .openrouter) "/api/v1/responses" else "/v1/responses";
 
-    pub const ExtFields = struct {
-        saw_tool_call: bool,
-        tool_call_id: std.ArrayListUnmanaged(u8),
-    };
-
-    pub fn ext_init() ExtFields {
-        return .{ .saw_tool_call = false, .tool_call_id = .empty };
-    }
-
-    pub fn ext_deinit(self: *Stream, alloc: std.mem.Allocator) void {
-        self.ext.tool_call_id.deinit(alloc);
-    }
-
-    pub fn ext_reset(self: *Stream) void {
-        self.ext.saw_tool_call = false;
-        self.ext.tool_call_id.clearRetainingCapacity();
-    }
-
-    pub fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
-        var hdrs = std.ArrayListUnmanaged(std.http.Header).empty;
-        try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
-        switch (auth.auth) {
-            .oauth => |oauth| {
-                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
-                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-                try hdrs.append(ar, .{ .name = "chatgpt-account-id", .value = try accountId(ar, oauth.access) });
-                try hdrs.append(ar, .{ .name = "OpenAI-Beta", .value = "responses=experimental" });
-                try hdrs.append(ar, .{ .name = "originator", .value = "pz" });
-                try hdrs.append(ar, .{ .name = "accept", .value = "text/event-stream" });
-            },
-            .api_key => |key| {
-                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{key});
-                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-            },
+        pub fn apiUri(is_sub: bool) std.Uri {
+            const codex = tag == .openai and is_sub;
+            return .{
+                .scheme = "https",
+                .host = .{ .raw = if (codex) "chatgpt.com" else api_host },
+                .path = .{ .raw = if (codex) "/backend-api/codex/responses" else api_path },
+            };
         }
-        return hdrs;
-    }
 
-    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_sub: bool) ![]u8 {
-        return buildBodyForAuth(alloc, req, is_sub);
-    }
+        pub const ExtFields = struct {
+            saw_tool_call: bool,
+            tool_call_id: std.ArrayListUnmanaged(u8),
+        };
 
-    pub fn parseSseData(self: *Stream, data: []const u8) anyerror!?providers.Event {
-        return parseSseDataImpl(self, data);
-    }
-};
+        pub fn ext_init() ExtFields {
+            return .{ .saw_tool_call = false, .tool_call_id = .empty };
+        }
+
+        pub fn ext_deinit(self: anytype, alloc: std.mem.Allocator) void {
+            self.ext.tool_call_id.deinit(alloc);
+        }
+
+        pub fn ext_reset(self: anytype) void {
+            self.ext.saw_tool_call = false;
+            self.ext.tool_call_id.clearRetainingCapacity();
+        }
+
+        pub fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
+            var hdrs = std.ArrayListUnmanaged(std.http.Header).empty;
+            try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
+            switch (auth.auth) {
+                .oauth => |oauth| {
+                    const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
+                    try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+                    if (tag == .openrouter) return hdrs;
+                    try hdrs.append(ar, .{ .name = "chatgpt-account-id", .value = try accountId(ar, oauth.access) });
+                    try hdrs.append(ar, .{ .name = "OpenAI-Beta", .value = "responses=experimental" });
+                    try hdrs.append(ar, .{ .name = "originator", .value = "pz" });
+                    try hdrs.append(ar, .{ .name = "accept", .value = "text/event-stream" });
+                },
+                .api_key => |key| {
+                    const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{key});
+                    try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+                },
+            }
+            return hdrs;
+        }
+
+        pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_sub: bool) ![]u8 {
+            return buildBodyForAuth(alloc, req, tag == .openai and is_sub);
+        }
+
+        pub fn parseSseData(self: anytype, data: []const u8) anyerror!?providers.Event {
+            var event = try parseSseDataImpl(self, data);
+            if (comptime tag == .openrouter) {
+                if (event) |*value| {
+                    if (value.* == .usage) {
+                        if (self.quota_key) |key| {
+                            value.usage.limits = @import("openrouter.zig").fetchLimits(self.arena.allocator(), key, self.quota_ca_file) catch |err| .{ .unavailable = @errorName(err) };
+                        }
+                    }
+                }
+            }
+            return event;
+        }
+    };
+}
 
 pub const Client = hc.SseClient(Cfg);
 const Stream = hc.SseStream(Cfg);
@@ -132,7 +149,7 @@ const ErrorEv = struct {
 
 // ── SSE parsing ────────────────────────────────────────────────────────
 
-fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
+fn parseSseDataImpl(self: anytype, data: []const u8) !?providers.Event {
     const ar = self.arena.allocator();
 
     const env = std.json.parseFromSlice(Envelope, ar, data, json_opts) catch |err| switch (err) {
@@ -194,7 +211,7 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
     };
 }
 
-fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onOutputItemAdded(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
@@ -215,7 +232,7 @@ fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?p
     return null;
 }
 
-fn onToolArgsDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onToolArgsDelta(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
     const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -226,7 +243,7 @@ fn onToolArgsDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?pro
     return null;
 }
 
-fn onToolArgsDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onToolArgsDone(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
     const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -238,7 +255,7 @@ fn onToolArgsDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?prov
     return null;
 }
 
-fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onOutputItemDone(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
@@ -301,7 +318,7 @@ fn onReasoningDelta(ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     return .{ .thinking = delta };
 }
 
-fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onCompleted(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     const ev = (std.json.parseFromSlice(CompletedEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
@@ -362,13 +379,13 @@ fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?provide
     return usage_ev;
 }
 
-fn onFailed(self: *Stream) !?providers.Event {
+fn onFailed(self: anytype) !?providers.Event {
     self.done = true;
     self.pending = .{ .stop = .{ .reason = .err } };
     return .{ .err = "response failed" };
 }
 
-fn onError(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+fn onError(self: anytype, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     const ev = (std.json.parseFromSlice(ErrorEv, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,

@@ -48,8 +48,8 @@ pub const AuthEntry = struct {
     key: ?[]const u8 = null,
 };
 
-pub const Provider = enum { openai };
-pub const provider_names = [_][]const u8{"openai"};
+pub const Provider = enum { openai, openrouter };
+pub const provider_names = [_][]const u8{ "openai", "openrouter" };
 
 pub fn providerName(p: Provider) []const u8 {
     return provider_names[@intFromEnum(p)];
@@ -138,6 +138,7 @@ pub const OAuthCodeInput = struct {
 };
 
 pub const AuthFile = struct {
+    openrouter: ?AuthEntry = null,
     openai: ?AuthEntry = null,
 };
 

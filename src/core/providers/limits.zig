@@ -6,7 +6,21 @@ pub const Window = struct {
     minutes: ?u32 = null,
 };
 
+pub const FreeRequests = struct {
+    used: u64,
+    limit: u64,
+    remaining: u64,
+};
+
+pub const KeyCreditLimit = struct {
+    limit: f64,
+    remaining: f64,
+};
+
 pub const Limits = struct {
+    unavailable: ?[]const u8 = null,
+    key_credit_limit: ?KeyCreditLimit = null,
+    free_requests: ?FreeRequests = null,
     windows: [2]?Window = .{ null, null },
 };
 
@@ -45,8 +59,10 @@ fn percent(raw: []const u8, scale: f64) !f64 {
 }
 
 pub fn parse(comptime provider: anytype, bytes: []const u8) !?Limits {
+    if (comptime provider == .openrouter) return null;
     var out: Limits = .{};
     const fields = switch (provider) {
+        .openrouter => unreachable,
         .openai => .{
             .{ "x-codex-primary-used-percent", "x-codex-primary-window-minutes" },
             .{ "x-codex-secondary-used-percent", "x-codex-secondary-window-minutes" },
@@ -68,9 +84,31 @@ pub fn parse(comptime provider: anytype, bytes: []const u8) !?Limits {
     return if (out.windows[0] == null and out.windows[1] == null) null else out;
 }
 
+/// Select the OpenRouter quota relevant to the active model, without inferring spending.
+pub fn formatForModel(limits: ?Limits, model: []const u8, buf: []u8) ![]const u8 {
+    const value = limits orelse return format(null, buf);
+    if (value.unavailable != null or std.mem.indexOfScalar(u8, model, '/') == null) return format(limits, buf);
+    if (std.mem.eql(u8, model, "openrouter/free") or std.mem.endsWith(u8, model, ":free")) {
+        if (value.free_requests == null) return "limits: free quota not reported";
+        return format(.{ .free_requests = value.free_requests }, buf);
+    }
+    const credit = value.key_credit_limit orelse return "key: no spending limit";
+    var w = std.Io.Writer.fixed(buf);
+    try w.print("key: ${d:.2}/${d:.2} left", .{ credit.remaining, credit.limit });
+    return w.buffered();
+}
+
 pub fn format(limits: ?Limits, buf: []u8) ![]const u8 {
     const value = limits orelse return "limits: n/a";
     var w = std.Io.Writer.fixed(buf);
+    if (value.unavailable) |reason| {
+        try w.print("limits: {s}", .{reason});
+        return w.buffered();
+    }
+    if (value.free_requests) |daily| {
+        try w.print("free: {d}/{d} requests left (UTC day)", .{ daily.remaining, daily.limit });
+        return w.buffered();
+    }
     try w.writeAll("used");
     for (value.windows) |entry| {
         const window = entry orelse continue;

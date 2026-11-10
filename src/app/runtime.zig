@@ -95,25 +95,26 @@ const ProviderRuntime = struct {
     }
 };
 
-const NativeProviderKind = enum { openai };
+const NativeProviderKind = core.providers.auth.Provider;
 const native_provider_kind_map = std.StaticStringMap(NativeProviderKind).initComptime(.{
     .{ "openai", .openai },
+    .{ "openrouter", .openrouter },
 });
 
 fn parseNativeProviderKind(provider: []const u8) ?NativeProviderKind {
     return native_provider_kind_map.get(provider);
 }
 
-fn nativeProviderName(_: NativeProviderKind) []const u8 {
-    return "openai";
+fn nativeProviderName(kind: NativeProviderKind) []const u8 {
+    return core.providers.auth.providerName(kind);
 }
 
 fn firstConfiguredNativeProvider(
     alloc: std.mem.Allocator,
     hooks: core.providers.auth.Hooks,
 ) !?NativeProviderKind {
-    for ([_]NativeProviderKind{.openai}) |kind| {
-        const provider: core.providers.auth.Provider = .openai;
+    for ([_]NativeProviderKind{ .openai, .openrouter }) |kind| {
+        const provider = kind;
         var result = core.providers.auth.loadForProviderWithHooks(alloc, provider, hooks) catch |err| {
             if (err == error.AuthNotFound) continue;
             return err;
@@ -125,6 +126,7 @@ fn firstConfiguredNativeProvider(
 }
 
 fn modelProvider(model: []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, model, '/') != null) return "openrouter";
     if (std.mem.startsWith(u8, model, "gpt-") or
         std.mem.startsWith(u8, model, "o1") or
         std.mem.startsWith(u8, model, "o3") or
@@ -133,6 +135,7 @@ fn modelProvider(model: []const u8) ?[]const u8 {
 }
 
 fn defaultModelForProvider(provider: []const u8) []const u8 {
+    if (std.mem.eql(u8, provider, "openrouter")) return "";
     if (std.mem.eql(u8, provider, "openai")) return openai_models[0];
     return "";
 }
@@ -152,50 +155,73 @@ fn parseSyslogTransport(s: []const u8) ?core.syslog.Transport {
     return null;
 }
 
-const NativeProviderRuntime = struct {
-    client: core.providers.openai.Client,
+const NativeProviderRuntime = union(NativeProviderKind) {
+    openai: core.providers.openai.Client,
+    openrouter: core.providers.openrouter.Client,
 
-    fn providerKind(_: *const NativeProviderRuntime) NativeProviderKind {
-        return .openai;
+    fn providerKind(self: *const NativeProviderRuntime) NativeProviderKind {
+        return std.meta.activeTag(self.*);
     }
 
-    fn init(alloc: std.mem.Allocator, _: NativeProviderKind, hooks: core.providers.auth.Hooks) !NativeProviderRuntime {
-        return .{ .client = try core.providers.openai.Client.init(alloc, hooks) };
+    fn init(alloc: std.mem.Allocator, kind: NativeProviderKind, hooks: core.providers.auth.Hooks) !NativeProviderRuntime {
+        return switch (kind) {
+            inline else => |tag| @unionInit(NativeProviderRuntime, @tagName(tag), try @FieldType(NativeProviderRuntime, @tagName(tag)).init(alloc, hooks)),
+        };
     }
 
     fn setEventLoop(self: *NativeProviderRuntime, el: *event_loop.EventLoop) void {
-        self.client.el = el;
+        switch (self.*) {
+            inline else => |*client| client.el = el,
+        }
     }
 
     fn setCancel(self: *NativeProviderRuntime, cancel: *core.providers.CancelPoll) void {
-        self.client.cancel = cancel;
+        switch (self.*) {
+            inline else => |*client| client.cancel = cancel,
+        }
     }
 
     fn clearCancel(self: *NativeProviderRuntime) void {
-        self.client.cancel = null;
+        switch (self.*) {
+            inline else => |*client| client.cancel = null,
+        }
     }
 
     fn expiredOAuthProvider(self: *NativeProviderRuntime) ?core.providers.auth.Provider {
-        if (self.client.auth.auth == .oauth and core.time.milliTimestamp() >= self.client.auth.auth.oauth.expires) return .openai;
+        switch (self.*) {
+            inline else => |*client, tag| {
+                if (client.auth.auth == .oauth and core.time.milliTimestamp() >= client.auth.auth.oauth.expires) return tag;
+            },
+        }
         return null;
     }
 
     fn reloadAuth(self: *NativeProviderRuntime, alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks) !void {
-        const new_auth = try core.providers.auth.loadForProviderWithHooks(alloc, .openai, hooks);
-        self.client.auth.deinit();
-        self.client.auth = new_auth;
+        const new_auth = try core.providers.auth.loadForProviderWithHooks(alloc, self.providerKind(), hooks);
+        switch (self.*) {
+            inline else => |*client| {
+                client.auth.deinit();
+                client.auth = new_auth;
+            },
+        }
     }
 
     fn providerPtr(self: *NativeProviderRuntime) *core.providers.Provider {
-        return &self.client.provider;
+        return switch (self.*) {
+            inline else => |*client| &client.provider,
+        };
     }
 
     fn isSub(self: *const NativeProviderRuntime) bool {
-        return self.client.isSub();
+        return switch (self.*) {
+            inline else => |*client| client.isSub(),
+        };
     }
 
     fn deinit(self: *NativeProviderRuntime) void {
-        self.client.deinit();
+        switch (self.*) {
+            inline else => |*client| client.deinit(),
+        }
         self.* = undefined;
     }
 };
@@ -231,7 +257,7 @@ const NativeRouter = struct {
 const missing_provider_msg = "OpenAI credentials are unavailable; set OPENAI_API_KEY or run /login openai";
 const no_model_selected_msg = "No model selected. Set an OpenAI model or run /login openai.";
 const missing_openai_provider_msg = "openai credentials missing; set OPENAI_API_KEY or run /login openai";
-const unsupported_native_provider_msg = "unsupported provider; only openai is available";
+const unsupported_native_provider_msg = "unsupported provider; use openai or openrouter";
 const policy_denied_msg = "blocked by policy";
 
 fn missingProviderMsgForInitErr(_: NativeProviderKind, err: anyerror) []const u8 {
@@ -2728,6 +2754,12 @@ fn runTui(
     // Model cycle list: from config or default
     const cfg_models = run_cmd.cfg.enabled_models;
     var available = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+    defer available.deinit(alloc);
+    var metadata_arena = std.heap.ArenaAllocator.init(alloc);
+    defer metadata_arena.deinit();
+    const metadata_alloc = metadata_arena.allocator();
+    var context_windows = std.StringHashMapUnmanaged(u64).empty;
+    try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
     var models_list: []const []const u8 = if (cfg_models) |m| blk: {
         const ptr: [*]const []const u8 = @ptrCast(m.ptr);
         break :blk ptr[0..m.len];
@@ -2753,9 +2785,19 @@ fn runTui(
     var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, safe_model.text, safe_provider.text, safe_cwd.text, safe_branch.text, run_cmd.cfg.theme);
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
-    ui.panels.context_windows = &run_cmd.cfg.context_windows;
+    ui.panels.context_windows = &context_windows;
     ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
     ui.panels.is_sub = is_sub;
+    if (tui_hooks.native) |router| {
+        if (router.ready.* and router.slot.providerKind() == .openrouter) {
+            const client = &router.slot.openrouter;
+            const key = switch (client.auth.auth) {
+                .api_key => |key| key,
+                .oauth => |oauth| oauth.access,
+            };
+            ui.panels.limits = core.providers.openrouter.fetchLimits(alloc, key, client.ca_file) catch |err| .{ .unavailable = @errorName(err) };
+        }
+    }
 
     _ = tui_term.installSigwinch();
     try tui_render.Renderer.setup(out);
@@ -2847,7 +2889,7 @@ fn runTui(
         .approver = &prompt_approver_impl.approver,
         .skip_prompt_guard = is_sub,
         .session_dir_path = if (no_session) null else session_dir_path,
-        .context_windows = &run_cmd.cfg.context_windows,
+        .context_windows = &context_windows,
     };
     tools_rt.ask_hook = if (is_tty) &prompt_ask_ctx.ask_hook else null;
     defer tools_rt.ask_hook = null;
@@ -2939,7 +2981,10 @@ fn runTui(
                 try infoTextSafe(alloc, &ui, login_out);
             }
             if (logged_in) {
-                available = try availableModels(alloc, audit_hooks.auth(), false);
+                const refreshed = try availableModels(alloc, audit_hooks.auth(), false);
+                available.deinit(alloc);
+                available = refreshed;
+                try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                 if (cfg_models == null) models_list = available.items();
                 if (tui_hooks.native) |router| {
                     if (model.len > 0) {
@@ -3110,7 +3155,7 @@ fn runTui(
             .approval_loc = live_approval_loc,
             .skip_prompt_guard = is_sub,
             .session_dir_path = if (no_session) null else session_dir_path,
-            .context_windows = &run_cmd.cfg.context_windows,
+            .context_windows = &context_windows,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
         var live_ask_ctx = LiveAskCtx{
@@ -3511,7 +3556,10 @@ fn runTui(
                             }
                             if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
                                 if (cmd == .logged_in) {
-                                    available = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+                                    const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+                                    available.deinit(alloc);
+                                    available = refreshed;
+                                    try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                                     if (cfg_models == null) models_list = available.items();
                                     if (model.len == 0) {
                                         const req = try parseAuthReq(std.mem.trim(u8, prompt["/login".len..], " \t"), null);
@@ -6862,16 +6910,44 @@ fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, hom
 }
 
 const ModelList = struct {
-    buf: [openai_models.len][]const u8 = undefined,
-    len: usize = 0,
+    ids: std.ArrayList([]const u8) = .empty,
+    router_catalog: ?core.providers.openrouter.Catalog = null,
 
     fn items(self: *const ModelList) []const []const u8 {
-        return self.buf[0..self.len];
+        return self.ids.items;
+    }
+
+    fn deinit(self: *ModelList, alloc: std.mem.Allocator) void {
+        if (self.router_catalog) |*catalog| catalog.deinit(alloc);
+        self.ids.deinit(alloc);
     }
 };
 
+fn mergeContextWindows(
+    alloc: std.mem.Allocator,
+    windows: *std.StringHashMapUnmanaged(u64),
+    models: *const ModelList,
+    overrides: *const std.StringHashMapUnmanaged(u64),
+) !void {
+    if (models.router_catalog) |catalog| {
+        var it = catalog.context_windows.iterator();
+        while (it.next()) |entry| {
+            const result = try windows.getOrPut(alloc, entry.key_ptr.*);
+            if (!result.found_existing) result.key_ptr.* = try alloc.dupe(u8, entry.key_ptr.*);
+            result.value_ptr.* = entry.value_ptr.*;
+        }
+    }
+    var it = overrides.iterator();
+    while (it.next()) |entry| {
+        const result = try windows.getOrPut(alloc, entry.key_ptr.*);
+        if (!result.found_existing) result.key_ptr.* = try alloc.dupe(u8, entry.key_ptr.*);
+        result.value_ptr.* = entry.value_ptr.*;
+    }
+}
+
 fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool) !ModelList {
     var result = ModelList{};
+    errdefer result.deinit(alloc);
     var enabled = external;
     if (!external) {
         if (core.providers.auth.loadForProviderWithHooks(alloc, .openai, hooks)) |loaded| {
@@ -6884,8 +6960,18 @@ fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, e
     }
     if (enabled) {
         for (openai_models) |id| {
-            result.buf[result.len] = id;
-            result.len += 1;
+            try result.ids.append(alloc, id);
+        }
+    }
+    if (!external) {
+        if (core.providers.auth.loadForProviderWithHooks(alloc, .openrouter, hooks)) |loaded| {
+            var auth = loaded;
+            auth.deinit();
+            const catalog = try core.providers.openrouter.fetchModels(alloc, hooks.ca_file);
+            result.router_catalog = catalog;
+            try result.ids.appendSlice(alloc, catalog.ids);
+        } else |err| {
+            if (err != error.AuthNotFound) return err;
         }
     }
     return result;
@@ -6900,6 +6986,7 @@ test "OpenAI credentials unlock picker and native backend together" {
     const hooks = core.providers.auth.Hooks{ .home_override = home };
     try core.providers.auth.saveApiKeyWithHooks(alloc, .openai, "sk-test-no-network", hooks);
     var models = try availableModels(alloc, hooks, false);
+    defer models.deinit(alloc);
     var ui = try tui_harness.Ui.init(alloc, 80, 24, "", "");
     defer ui.deinit();
     var first: ?usize = null;
@@ -6925,7 +7012,7 @@ test "OpenAI credentials unlock picker and native backend together" {
     try @import("../test/helpers.zig").expectSnapText(@src(), "model=gpt-6-astra\nprovider=openai\nready=true", state);
 }
 
-const provider_args = [_][]const u8{"openai"};
+const provider_args = core.providers.auth.provider_names;
 const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill", "web", "patch", "todo", "github" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
@@ -6969,9 +7056,11 @@ const arg_src_kind_map = std.StaticStringMap(enum {
 
 const provider_env_map = std.StaticStringMap([]const u8).initComptime(.{
     .{ "openai", "OPENAI_API_KEY" },
+    .{ "openrouter", "OPENROUTER_API_KEY" },
 });
 const auth_provider_map = std.StaticStringMap(core.providers.auth.Provider).initComptime(.{
     .{ "openai", .openai },
+    .{ "openrouter", .openrouter },
 });
 
 fn parseAuthProvider(name: []const u8) ?core.providers.auth.Provider {

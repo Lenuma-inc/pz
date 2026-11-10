@@ -474,12 +474,21 @@ pub fn SseClient(comptime Cfg: type) type {
             stream.* = Stream.initFields(self.alloc);
             stream.io = self.http.io;
             errdefer {
+                if (stream.quota_key) |key| self.alloc.free(key);
+                if (stream.quota_ca_file) |path| self.alloc.free(path);
                 stream.arena.deinit();
                 self.alloc.destroy(stream);
             }
 
             const ar = stream.arena.allocator();
 
+            if (comptime Cfg.provider_tag == .openrouter) {
+                const key = switch (self.auth.auth) {
+                    .api_key => |key| key,
+                    .oauth => |oauth| oauth.access,
+                };
+                try stream.initQuotaAuth(key, self.ca_file);
+            }
             const is_oauth = self.auth.auth == .oauth;
             const body = try Cfg.buildBody(ar, req, is_oauth);
             const uri = Cfg.apiUri(is_oauth);
@@ -554,6 +563,8 @@ pub fn SseStream(comptime Cfg: type) type {
         pending: ?providers.Event,
 
         // Provider-specific fields
+        quota_key: ?[]const u8 = null,
+        quota_ca_file: ?[]const u8 = null,
         ext: Cfg.ExtFields,
 
         const stream_vt = providers.Stream.Vt{
@@ -585,6 +596,8 @@ pub fn SseStream(comptime Cfg: type) type {
             const self: *Self = @fieldParentPtr("stream", s);
             const alloc = self.alloc;
             Cfg.ext_deinit(self, alloc);
+            if (self.quota_key) |key| alloc.free(key);
+            if (self.quota_ca_file) |path| alloc.free(path);
             self.tool_name.deinit(alloc);
             self.tool_args.deinit(alloc);
             self.req.deinit();
@@ -625,9 +638,18 @@ pub fn SseStream(comptime Cfg: type) type {
             return error.ReadFailed;
         }
 
+        /// Copy credentials outside the per-event arena, which resets on every next().
+        pub fn initQuotaAuth(self: *Self, key: []const u8, ca_file: ?[]const u8) !void {
+            const owned_key = try self.alloc.dupe(u8, key);
+            errdefer self.alloc.free(owned_key);
+            const owned_ca = if (ca_file) |path| try self.alloc.dupe(u8, path) else null;
+            self.quota_key = owned_key;
+            self.quota_ca_file = owned_ca;
+        }
+
         pub fn next(self: *Self) anyerror!?providers.Event {
             var ev = (try sseNext(self)) orelse return null;
-            if (ev == .usage) ev.usage.limits = self.limits;
+            if (ev == .usage and ev.usage.limits == null) ev.usage.limits = self.limits;
             return ev;
         }
 

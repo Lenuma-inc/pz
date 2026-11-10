@@ -64,8 +64,7 @@ fn openAuthDir(dir_path: []const u8, options: Dir.OpenOptions) !Dir {
 }
 
 fn providerEnvAuth(ar: std.mem.Allocator, provider: Provider) error{ OutOfMemory, Unexpected }!EnvAuth {
-    if (provider != .openai) return .{};
-    return .{ .oauth = null, .api_key = try readEnv(ar, openai_api_key_env) };
+    return .{ .oauth = null, .api_key = try readEnv(ar, if (provider == .openrouter) "OPENROUTER_API_KEY" else openai_api_key_env) };
 }
 
 fn authFromEnv(env: EnvAuth) ?Auth {
@@ -206,8 +205,10 @@ pub fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provi
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
-    if (provider != .openai) return error.AuthNotFound;
-    const entry = parsed.value.openai orelse return error.AuthNotFound;
+    const entry = (switch (provider) {
+        .openai => parsed.value.openai,
+        .openrouter => parsed.value.openrouter,
+    }) orelse return error.AuthNotFound;
 
     const AuthType = enum { oauth, api_key };
     const auth_map = std.StaticStringMap(AuthType).initComptime(.{
@@ -264,8 +265,10 @@ pub fn saveAuthEntry(alloc: std.mem.Allocator, home: []const u8, provider: Provi
         else => return err,
     }
 
-    if (provider != .openai) return error.UnsupportedProvider;
-    auth_file.openai = entry;
+    switch (provider) {
+        .openai => auth_file.openai = entry,
+        .openrouter => auth_file.openrouter = entry,
+    }
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
     try atomicAuthWrite(dir_path, "auth.json", out);
@@ -342,10 +345,12 @@ fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
         .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
     merged.openai = parsed.value.openai;
+    merged.openrouter = parsed.value.openrouter;
 
     var result = std.ArrayList(Provider).empty;
     errdefer result.deinit(alloc);
     if (merged.openai != null) try result.append(alloc, .openai);
+    if (merged.openrouter != null) try result.append(alloc, .openrouter);
     return try result.toOwnedSlice(alloc);
 }
 
@@ -385,8 +390,10 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
         return error.AuthCorrupt;
     };
 
-    if (provider != .openai) return error.UnsupportedProvider;
-    parsed.value.openai = null;
+    switch (provider) {
+        .openai => parsed.value.openai = null,
+        .openrouter => parsed.value.openrouter = null,
+    }
 
     const out = try std.json.Stringify.valueAlloc(ar, parsed.value, .{ .whitespace = .indent_2 });
     atomicAuthWrite(dir_path, "auth.json", out) catch |err| {
@@ -674,4 +681,19 @@ test "P0-3 regression: listLoggedInHome deallocs cleanly on corrupt auth" {
     defer alloc.free(home);
 
     try std.testing.expectError(error.AuthCorrupt, listLoggedInHome(alloc, home));
+}
+
+test "OpenRouter API key persistence preserves OpenAI" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
+    try saveApiKeyHome(std.testing.allocator, home, .openrouter, "sk-or-test");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const router = try loadFileAuthForProvider(arena.allocator(), home, .openrouter);
+    try std.testing.expectEqualStrings("sk-or-test", router.api_key);
+    const openai = try loadFileAuthForProvider(arena.allocator(), home, .openai);
+    try std.testing.expectEqualStrings("sk-openai", openai.api_key);
 }

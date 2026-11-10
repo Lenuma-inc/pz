@@ -53,7 +53,7 @@ const desc_col: usize = 32;
 const max_match: u8 = 32;
 
 pub const Picker = struct {
-    matches: [max_match]u8,
+    matches: [max_match]usize,
     n: u8,
     sel: u8 = 0,
     scroll: u8 = 0,
@@ -65,7 +65,7 @@ pub const Picker = struct {
         for (cmds, 0..) |cmd, i| {
             if (cp.n >= max_match) break;
             if (prefix.len <= cmd.name.len and std.mem.startsWith(u8, cmd.name, prefix)) {
-                cp.matches[cp.n] = @intCast(i);
+                cp.matches[cp.n] = i;
                 cp.n += 1;
             }
         }
@@ -76,7 +76,7 @@ pub const Picker = struct {
             if (cp.n >= max_match) break;
             if (fuzzy_mod.score(prefix, cmd.name)) |s| {
                 scores[cp.n] = s;
-                cp.matches[cp.n] = @intCast(i);
+                cp.matches[cp.n] = i;
                 cp.n += 1;
             }
         }
@@ -103,7 +103,7 @@ pub const Picker = struct {
         for (src, 0..) |item, i| {
             if (cp.n >= max_match) break;
             if (prefix.len == 0 or (prefix.len <= item.len and std.mem.startsWith(u8, item, prefix))) {
-                cp.matches[cp.n] = @intCast(i);
+                cp.matches[cp.n] = i;
                 cp.n += 1;
             }
         }
@@ -112,7 +112,7 @@ pub const Picker = struct {
         for (src, 0..) |item, i| {
             if (cp.n >= max_match) break;
             if (fuzzy_mod.score(prefix, item) != null) {
-                cp.matches[cp.n] = @intCast(i);
+                cp.matches[cp.n] = i;
                 cp.n += 1;
             }
         }
@@ -181,15 +181,18 @@ pub const Picker = struct {
     pub fn renderDown(self: *const Picker, frm: *Frame, y_start: usize, w: usize, h: usize) !void {
         const avail = if (h > y_start) h - y_start else return;
         const t = theme_mod.get();
-        const item_vis: usize = @min(@min(@as(usize, self.n) - self.scroll, max_vis), avail);
-        const has_scroll = self.scroll > 0 or self.scroll + max_vis < self.n;
+        const item_vis: usize = @min(@min(@as(usize, self.n), max_vis), avail);
+        var first: usize = self.scroll;
+        if (self.sel < first) first = self.sel;
+        if (self.sel >= first + item_vis) first = @as(usize, self.sel) + 1 - item_vis;
+        const has_scroll = first > 0 or first + item_vis < self.n;
         const scroll_row = has_scroll and item_vis + 1 <= avail;
         if (item_vis == 0 or w < 6) return;
 
         const is_arg = self.arg_src != null;
         var i: usize = 0;
         while (i < item_vis) : (i += 1) {
-            const idx = self.scroll + @as(u8, @intCast(i));
+            const idx = first + i;
             const is_sel = idx == self.sel;
             const y = y_start + i;
 
@@ -642,9 +645,36 @@ test "updateArgs empty prefix returns all" {
     });
 }
 
+test "updateArgs supports model indices beyond u8 for prefix and fuzzy matches" {
+    var items: [300][]const u8 = @splat("other/model");
+    items[299] = "vendor/unique-model";
+    const prefix = Picker.updateArgs(&items, "vendor/").?;
+    try std.testing.expectEqual(@as(usize, 299), prefix.matches[0]);
+    try std.testing.expectEqualStrings("vendor/unique-model", prefix.selectedArg().?);
+    const fuzzy = Picker.updateArgs(&items, "uniquemodel").?;
+    try std.testing.expectEqual(@as(usize, 299), fuzzy.matches[0]);
+    try std.testing.expectEqualStrings("vendor/unique-model", fuzzy.selectedArg().?);
+}
+
 test "updateArgs no match returns null" {
     const items = [_][]const u8{"openai"};
     try std.testing.expect(Picker.updateArgs(&items, "zzz") == null);
+}
+
+test "arg picker keeps the last model visible with only three rows" {
+    const items = [_][]const u8{ "openrouter/auto", "openrouter/fusion", "openrouter/pareto", "openrouter/free" };
+    var cp = Picker.updateArgs(&items, "openrouter/").?;
+    cp.down();
+    cp.down();
+    cp.down();
+    var frm = try Frame.init(std.testing.allocator, 40, 6);
+    defer frm.deinit(std.testing.allocator);
+    try cp.renderDown(&frm, 3, 40, 6);
+    try std.testing.expectEqualStrings("openrouter/free", cp.selectedArg().?);
+    try std.testing.expectEqual(@as(u21, 0x2192), (try frm.cell(0, 5)).cp);
+    for ("openrouter/free", 0..) |ch, i| {
+        try std.testing.expectEqual(@as(u21, ch), (try frm.cell(2 + i, 5)).cp);
+    }
 }
 
 test "updateArgs renders without slash" {

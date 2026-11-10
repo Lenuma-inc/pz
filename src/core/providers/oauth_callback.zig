@@ -36,15 +36,23 @@ pub const Listener = struct {
         var server = try addr.listen(sys.io, .{ .reuse_address = true });
         errdefer server.deinit(sys.io);
 
+        var random_path_buf: [128]u8 = undefined;
+        var callback_path = opts.path;
+        if (std.mem.eql(u8, opts.path, "/openrouter/callback")) {
+            var random: [32]u8 = undefined;
+            try sys.io.randomSecure(&random);
+            const hex = std.fmt.bytesToHex(random, .lower);
+            callback_path = try std.fmt.bufPrint(&random_path_buf, "/openrouter/callback/{s}", .{hex});
+        }
         const listen_port = server.socket.address.getPort();
         const redirect_uri = try std.fmt.allocPrint(alloc, "http://{s}:{d}{s}", .{
             opts.redirect_host,
             listen_port,
-            opts.path,
+            callback_path,
         });
         errdefer alloc.free(redirect_uri);
 
-        const path = try alloc.dupe(u8, opts.path);
+        const path = try alloc.dupe(u8, callback_path);
         errdefer alloc.free(path);
         const success_redirect_url = if (opts.success_redirect_url) |url|
             try alloc.dupe(u8, url)
@@ -154,7 +162,12 @@ pub const Listener = struct {
             try writeHtml(conn.socket.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         };
-        var out = parseCodeStateQuery(alloc, query) catch {
+        const bound_query = if (std.mem.startsWith(u8, self.path, "/openrouter/callback/") and self.path.len == "/openrouter/callback/".len + 64)
+            try std.fmt.allocPrint(alloc, "{s}&state={s}", .{ query, self.path["/openrouter/callback/".len..] })
+        else
+            try alloc.dupe(u8, query);
+        defer alloc.free(bound_query);
+        var out = parseCodeStateQuery(alloc, bound_query) catch {
             try writeHtml(conn.socket.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         };
@@ -175,6 +188,10 @@ pub const Listener = struct {
 };
 
 pub fn parseCodeStateQuery(alloc: std.mem.Allocator, query: []const u8) !CodeState {
+    return parseCodeQuery(alloc, query, true);
+}
+
+pub fn parseCodeQuery(alloc: std.mem.Allocator, query: []const u8, require_state: bool) !CodeState {
     var code: ?[]u8 = null;
     errdefer if (code) |v| alloc.free(v);
     var state: ?[]u8 = null;
@@ -199,7 +216,7 @@ pub fn parseCodeStateQuery(alloc: std.mem.Allocator, query: []const u8) !CodeSta
 
     return .{
         .code = code orelse return error.InvalidOAuthInput,
-        .state = state orelse return error.InvalidOAuthInput,
+        .state = state orelse if (require_state) return error.InvalidOAuthInput else try alloc.dupe(u8, ""),
     };
 }
 
@@ -480,4 +497,19 @@ test "listener stalled client retried then times out" {
 
     const err = listener.waitForCodeState(std.testing.allocator, 300);
     try std.testing.expectError(error.OAuthCallbackTimeout, err);
+}
+
+test "OpenRouter listener accepts code without state on random path" {
+    const alloc = std.testing.allocator;
+    var listener = try Listener.init(alloc, .{ .path = "/openrouter/callback" });
+    defer listener.deinit();
+    try std.testing.expectEqual(@as(usize, "/openrouter/callback/".len + 64), listener.path.len);
+    const req = try std.fmt.allocPrint(alloc, "GET {s}?code=abc HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", .{listener.path});
+    defer alloc.free(req);
+    const t = try std.Thread.spawn(.{}, sendTestCallback, .{ listener.port(), req });
+    defer t.join();
+    var got = try listener.waitForCodeState(alloc, 3000);
+    defer got.deinit(alloc);
+    try std.testing.expectEqualStrings("abc", got.code);
+    try std.testing.expectEqualStrings(listener.path["/openrouter/callback/".len..], got.state);
 }

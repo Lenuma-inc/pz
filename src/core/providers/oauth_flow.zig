@@ -38,7 +38,6 @@ const openai_oauth_extra_authorize = [_]OAuthParam{
     .{ .key = "originator", .value = "pz" },
 };
 
-
 pub const openai_spec = OAuthSpec{
     .provider = .openai,
     .client_id = "app_EMoamEEZ73f0CkXaXp7hrann",
@@ -56,8 +55,27 @@ pub const openai_spec = OAuthSpec{
     .extra_authorize = openai_oauth_extra_authorize[0..],
 };
 
+pub const openrouter_spec = OAuthSpec{
+    .provider = .openrouter,
+    .client_id = "",
+    .authorize_url = "https://openrouter.ai/auth",
+    .token_host = "openrouter.ai",
+    .token_path = "/api/v1/auth/keys",
+    .default_redirect_uri = "http://127.0.0.1/openrouter/callback",
+    .scopes = "",
+    .local_callback_path = "/openrouter/callback",
+    .local_redirect_host = "127.0.0.1",
+    .start_action = "start openrouter login",
+    .complete_action = "complete openrouter login",
+    .api_key_prefix = "sk-or-",
+    .token_body = .json_with_state,
+};
+
 pub fn oauthSpec(provider: Provider) ?*const OAuthSpec {
-    return if (provider == .openai) &openai_spec else null;
+    return switch (provider) {
+        .openai => &openai_spec,
+        .openrouter => &openrouter_spec,
+    };
 }
 
 // ── Public helpers ─────────────────────────────────────────────────────
@@ -78,8 +96,8 @@ pub fn oauthCapable(provider: Provider) bool {
 }
 
 pub fn looksLikeApiKey(provider: Provider, key: []const u8) bool {
-    if (provider != .openai) return false;
-    return if (openai_spec.api_key_prefix) |prefix| std.mem.startsWith(u8, key, prefix) else false;
+    const spec = oauthSpec(provider) orelse return false;
+    return if (spec.api_key_prefix) |prefix| std.mem.startsWith(u8, key, prefix) else false;
 }
 
 // ── Begin OAuth ────────────────────────────────────────────────────────
@@ -106,7 +124,7 @@ fn beginOAuthWithSpec(
     const verifier = try pkceVerifier(alloc);
     errdefer alloc.free(verifier);
 
-    const state = try csrfToken(alloc);
+    const state = if (spec.provider == .openrouter) try alloc.dupe(u8, try openrouterCallbackToken(oauth_redirect_uri)) else try csrfToken(alloc);
     errdefer alloc.free(state);
 
     const challenge = try pkceChallenge(alloc, verifier);
@@ -118,13 +136,17 @@ fn beginOAuthWithSpec(
     for (spec.extra_authorize) |extra| {
         try appendQueryParam(alloc, &query, extra.key, extra.value);
     }
-    try appendQueryParam(alloc, &query, "client_id", spec.client_id);
-    try appendQueryParam(alloc, &query, "response_type", "code");
-    try appendQueryParam(alloc, &query, "redirect_uri", oauth_redirect_uri);
-    try appendQueryParam(alloc, &query, "scope", spec.scopes);
+    if (spec.provider == .openrouter) {
+        try appendQueryParam(alloc, &query, "callback_url", oauth_redirect_uri);
+    } else {
+        try appendQueryParam(alloc, &query, "client_id", spec.client_id);
+        try appendQueryParam(alloc, &query, "response_type", "code");
+        try appendQueryParam(alloc, &query, "redirect_uri", oauth_redirect_uri);
+        try appendQueryParam(alloc, &query, "scope", spec.scopes);
+    }
     try appendQueryParam(alloc, &query, "code_challenge", challenge);
     try appendQueryParam(alloc, &query, "code_challenge_method", "S256");
-    try appendQueryParam(alloc, &query, "state", state);
+    if (spec.provider != .openrouter) try appendQueryParam(alloc, &query, "state", state);
 
     const url = try std.fmt.allocPrint(alloc, "{s}?{s}", .{ spec.authorize_url, query.items });
     errdefer alloc.free(url);
@@ -147,11 +169,11 @@ pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, inpu
     if (verifier.len == 0) return error.MissingOAuthVerifier;
     try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
-    var parsed = try parseOAuthInput(alloc, input);
+    var parsed = try parseOAuthInputWithState(alloc, input, provider != .openrouter);
     defer parsed.deinit(alloc);
 
-    const state = parsed.state orelse return error.MissingOAuthState;
-    if (state.len == 0) return error.MissingOAuthState;
+    const state = parsed.state orelse if (provider == .openrouter) "" else return error.MissingOAuthState;
+    if (state.len == 0 and provider != .openrouter) return error.MissingOAuthState;
     const oauth_redirect_uri = parsed.redirect_uri orelse spec.default_redirect_uri;
 
     // Verifier must be the separately-stored PKCE verifier, never derived from state.
@@ -163,7 +185,7 @@ pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, inpu
         alloc.free(oauth.access);
         alloc.free(oauth.refresh);
     }
-    saveOAuthForProviderWithHooks(alloc, provider, oauth, hooks) catch |err| {
+    persistLogin(alloc, provider, oauth, hooks) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
     };
@@ -191,6 +213,8 @@ pub fn completeOAuthFromLocalCallbackWithHooks(
     hooks: Hooks,
 ) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
+    if (verifier.len == 0) return error.MissingOAuthVerifier;
+    if (provider == .openrouter and !std.mem.eql(u8, try openrouterCallbackToken(oauth_redirect_uri), expected_state)) return error.OAuthStateMismatch;
     if (!std.mem.eql(u8, callback.state, expected_state)) return error.OAuthStateMismatch;
     try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
@@ -210,14 +234,34 @@ pub fn completeOAuthFromLocalCallbackWithHooks(
         alloc.free(oauth.access);
         alloc.free(oauth.refresh);
     }
-    saveOAuthForProviderWithHooks(alloc, provider, oauth, hooks) catch |err| {
+    persistLogin(alloc, provider, oauth, hooks) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
     };
     try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .ok, .notice, .{ .text = "oauth login complete", .vis = .@"pub" });
 }
 
+fn openrouterCallbackToken(uri: []const u8) ![]const u8 {
+    const parsed = try std.Uri.parse(uri);
+    if (!std.mem.eql(u8, parsed.scheme, "http") or parsed.host == null or
+        !std.mem.eql(u8, parsed.host.?.percent_encoded, "127.0.0.1")) return error.InvalidOAuthRedirect;
+    const path = parsed.path.percent_encoded;
+    const prefix = "/openrouter/callback/";
+    if (!std.mem.startsWith(u8, path, prefix) or path.len != prefix.len + 64) return error.InvalidOAuthRedirect;
+    for (path[prefix.len..]) |c| if (!std.ascii.isHex(c)) return error.InvalidOAuthRedirect;
+    return path[prefix.len..];
+}
+
+fn persistLogin(alloc: std.mem.Allocator, provider: Provider, oauth: OAuth, hooks: Hooks) !void {
+    if (provider == .openrouter) return auth_load.saveApiKeyWithHooks(alloc, provider, oauth.access, hooks);
+    return saveOAuthForProviderWithHooks(alloc, provider, oauth, hooks);
+}
+
 pub fn parseOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeInput {
+    return parseOAuthInputWithState(alloc, input, true);
+}
+
+fn parseOAuthInputWithState(alloc: std.mem.Allocator, input: []const u8, require_state: bool) !OAuthCodeInput {
     const trimmed = std.mem.trim(u8, input, " \t\r\n");
     if (trimmed.len == 0) return error.InvalidOAuthInput;
 
@@ -228,7 +272,7 @@ pub fn parseOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeIn
             break :blk trimmed[i + 1 .. hash_start];
         } else trimmed;
 
-        var parsed = try oauth_callback.parseCodeStateQuery(alloc, query);
+        var parsed = try oauth_callback.parseCodeQuery(alloc, query, require_state);
         errdefer parsed.deinit(alloc);
 
         const redirect_out = if (q_start) |i| blk: {
@@ -470,6 +514,10 @@ fn buildTokenReqBody(
     oauth_redirect_uri: []const u8,
     verifier: []const u8,
 ) !TokenReq {
+    if (spec.provider == .openrouter) return .{
+        .content_type = "application/json",
+        .body = try std.json.Stringify.valueAlloc(ar, .{ .code = code, .code_verifier = verifier, .code_challenge_method = "S256" }, .{}),
+    };
     return switch (spec.token_body) {
         .json_with_state => blk: {
             const Body = struct {
@@ -666,6 +714,13 @@ pub fn exchangeAuthorizationCode(
         return error.TokenExchangeFailed;
     }
 
+    if (spec.provider == .openrouter) {
+        const parsed = std.json.parseFromSlice(struct { key: []const u8 }, ar, resp_body, .{ .ignore_unknown_fields = true }) catch return error.TokenExchangeFailed;
+        if (parsed.value.key.len == 0) return error.TokenExchangeFailed;
+        const access = try alloc.dupe(u8, parsed.value.key);
+        errdefer alloc.free(access);
+        return .{ .access = access, .refresh = try alloc.dupe(u8, ""), .expires = std.math.maxInt(i64) };
+    }
     return parseOAuthTokenResponse(alloc, ar, resp_body, error.TokenExchangeFailed);
 }
 
@@ -686,7 +741,7 @@ pub fn initHttpClient(alloc: std.mem.Allocator, ca_file: ?[]const u8) !std.http.
 
 /// Apply SO_SNDTIMEO and SO_RCVTIMEO to the underlying socket so auth
 /// HTTP requests cannot hang indefinitely.
-fn setSocketDeadlines(conn: *std.http.Client.Connection) !void {
+pub fn setSocketDeadlines(conn: *std.http.Client.Connection) !void {
     const fd = conn.stream_writer.stream.socket.handle;
     const tv = std.posix.timeval{ .sec = auth_http_deadline_s, .usec = 0 };
     const tv_bytes: []const u8 = std.mem.asBytes(&tv);
@@ -1027,3 +1082,19 @@ test "refreshOAuthForProviderWithHooks propagates network error" {
     try std.testing.expectError(error.ConnectionRefused, got);
 }
 
+test "OpenRouter authorization binds random callback and uses PKCE" {
+    const alloc = std.testing.allocator;
+    const redirect = "http://127.0.0.1:1234/openrouter/callback/" ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var start = try beginOAuthWithRedirect(alloc, .openrouter, redirect);
+    defer start.deinit(alloc);
+    try std.testing.expect(std.mem.startsWith(u8, start.url, "https://openrouter.ai/auth?callback_url="));
+    try std.testing.expect(std.mem.indexOf(u8, start.url, "code_challenge_method=S256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, start.url, "&state=") == null);
+    try std.testing.expectEqualStrings(try openrouterCallbackToken(redirect), start.state);
+    try std.testing.expectError(error.InvalidOAuthRedirect, beginOAuth(alloc, .openrouter));
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const req = try buildTokenReqBody(arena.allocator(), &openrouter_spec, "code", "", redirect, "verifier");
+    try std.testing.expectEqualStrings("application/json", req.content_type);
+    try std.testing.expectEqualStrings("{\"code\":\"code\",\"code_verifier\":\"verifier\",\"code_challenge_method\":\"S256\"}", req.body);
+}
