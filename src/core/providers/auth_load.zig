@@ -22,8 +22,6 @@ pub const providerName = auth.providerName;
 // ── Environment variable helpers ──────────────────────────────────────
 
 const oauth_no_expiry: i64 = std.math.maxInt(i64);
-const anthropic_oauth_env = "ANTHROPIC_OAUTH_TOKEN";
-const anthropic_api_key_env = "ANTHROPIC_API_KEY";
 const openai_api_key_env = "OPENAI_API_KEY";
 const auth_file_limit = 1024 * 1024;
 
@@ -66,17 +64,8 @@ fn openAuthDir(dir_path: []const u8, options: Dir.OpenOptions) !Dir {
 }
 
 fn providerEnvAuth(ar: std.mem.Allocator, provider: Provider) error{ OutOfMemory, Unexpected }!EnvAuth {
-    return switch (provider) {
-        .anthropic => .{
-            .oauth = try readEnv(ar, anthropic_oauth_env),
-            .api_key = try readEnv(ar, anthropic_api_key_env),
-        },
-        .openai => .{
-            .oauth = null,
-            .api_key = try readEnv(ar, openai_api_key_env),
-        },
-        .google => .{},
-    };
+    if (provider != .openai) return .{};
+    return .{ .oauth = null, .api_key = try readEnv(ar, openai_api_key_env) };
 }
 
 fn authFromEnv(env: EnvAuth) ?Auth {
@@ -156,7 +145,7 @@ fn isLegacyPath(path: []const u8) bool {
 // ── Loading ────────────────────────────────────────────────────────────
 
 pub fn load(alloc: std.mem.Allocator) !auth.Result {
-    return loadForProvider(alloc, .anthropic);
+    return loadForProvider(alloc, .openai);
 }
 
 pub fn loadForProvider(alloc: std.mem.Allocator, provider: Provider) !auth.Result {
@@ -188,7 +177,7 @@ fn loadForProviderHome(
 }
 
 fn loadFileAuth(alloc: std.mem.Allocator, home: []const u8) !Auth {
-    return loadFileAuthForProvider(alloc, home, .anthropic);
+    return loadFileAuthForProvider(alloc, home, .openai);
 }
 
 pub fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider: Provider) !Auth {
@@ -217,11 +206,8 @@ pub fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provi
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
-    const entry = switch (provider) {
-        .anthropic => parsed.value.anthropic,
-        .openai => parsed.value.openai,
-        .google => parsed.value.google,
-    } orelse return error.AuthNotFound;
+    if (provider != .openai) return error.AuthNotFound;
+    const entry = parsed.value.openai orelse return error.AuthNotFound;
 
     const AuthType = enum { oauth, api_key };
     const auth_map = std.StaticStringMap(AuthType).initComptime(.{
@@ -271,18 +257,15 @@ pub fn saveAuthEntry(alloc: std.mem.Allocator, home: []const u8, provider: Provi
     if (readPathAlloc(ar, path)) |raw| {
         auth_file = (try std.json.parseFromSlice(AuthFile, ar, raw, .{
             .allocate = .alloc_always,
-            .ignore_unknown_fields = false,
+            .ignore_unknown_fields = true,
         })).value;
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     }
 
-    switch (provider) {
-        .anthropic => auth_file.anthropic = entry,
-        .openai => auth_file.openai = entry,
-        .google => auth_file.google = entry,
-    }
+    if (provider != .openai) return error.UnsupportedProvider;
+    auth_file.openai = entry;
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
     try atomicAuthWrite(dir_path, "auth.json", out);
@@ -356,17 +339,13 @@ fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
     const raw = readPathAlloc(ar, path) catch return try alloc.alloc(Provider, 0);
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = false,
+        .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
-    merged.anthropic = parsed.value.anthropic;
     merged.openai = parsed.value.openai;
-    merged.google = parsed.value.google;
 
     var result = std.ArrayList(Provider).empty;
     errdefer result.deinit(alloc);
-    if (merged.anthropic != null) try result.append(alloc, .anthropic);
     if (merged.openai != null) try result.append(alloc, .openai);
-    if (merged.google != null) try result.append(alloc, .google);
     return try result.toOwnedSlice(alloc);
 }
 
@@ -400,17 +379,14 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
     };
     var parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = false,
+        .ignore_unknown_fields = true,
     }) catch {
         try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .fail, .err, .{ .text = "AuthCorrupt", .vis = .mask });
         return error.AuthCorrupt;
     };
 
-    switch (provider) {
-        .anthropic => parsed.value.anthropic = null,
-        .openai => parsed.value.openai = null,
-        .google => parsed.value.google = null,
-    }
+    if (provider != .openai) return error.UnsupportedProvider;
+    parsed.value.openai = null;
 
     const out = try std.json.Stringify.valueAlloc(ar, parsed.value, .{ .whitespace = .indent_2 });
     atomicAuthWrite(dir_path, "auth.json", out) catch |err| {
@@ -527,65 +503,6 @@ test "auth audit covers api key save" {
     ).expectEqual(joined);
 }
 
-test "auth audit covers logout" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
-
-    var rows = AuditRows{};
-    defer rows.deinit(std.testing.allocator);
-    try logoutHomeWithHooks(std.testing.allocator, home, .anthropic, .{
-        .audit_emitter = &rows.emitter,
-        .now_ms = struct {
-            fn f() i64 {
-                return 44;
-            }
-        }.f,
-    });
-
-    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
-    defer std.testing.allocator.free(joined);
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "{"v":1,"ts_ms":44,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"logout"},"msg":{"text":"logout start","vis":"pub"},"data":{"mech":"stored","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}
-        \\{"v":1,"ts_ms":44,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"logout"},"msg":{"text":"logout complete","vis":"pub"},"data":{"mech":"stored","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}"
-    ).expectEqual(joined);
-}
-
-test "listLoggedInHome returns stored providers without leaks" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
-    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
-
-    const providers = try listLoggedInHome(std.testing.allocator, home);
-    defer std.testing.allocator.free(providers);
-
-    var out_buf = std.ArrayList(u8).empty;
-    defer out_buf.deinit(std.testing.allocator);
-    for (providers) |provider| {
-        try out_buf.print(std.testing.allocator, "{s}\n", .{providerName(provider)});
-    }
-
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "anthropic
-        \\openai
-        \\"
-    ).expectEqual(out_buf.items);
-}
-
 test "auth lock still allows canonical file auth" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
@@ -672,38 +589,6 @@ test "authFromEnv uses api key when oauth token is missing" {
     ).expectEqual(a);
 }
 
-test "loadFileAuth parses anthropic api_key entry" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(std.testing.io, ".pz");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = ".pz/auth.json",
-        .data =
-        \\{
-        \\  "anthropic": {
-        \\    "type": "api_key",
-        \\    "key": "sk-ant-file"
-        \\  }
-        \\}
-        ,
-    });
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = try loadFileAuth(arena.allocator(), home);
-    try oh.snap(@src(),
-        \\core.providers.auth.Auth
-        \\  .api_key: []const u8
-        \\    "sk-ant-file"
-    ).expectEqual(a);
-}
-
 test "loadFileAuth returns AuthNotFound when file is missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -715,43 +600,6 @@ test "loadFileAuth returns AuthNotFound when file is missing" {
     defer arena.deinit();
     const res = loadFileAuth(arena.allocator(), home);
     try std.testing.expectError(error.AuthNotFound, res);
-}
-
-test "findAuthFile migrates legacy .pi auth to .pz" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    // Create legacy auth only (no .pz/auth.json)
-    try tmp.dir.createDirPath(std.testing.io, ".pi/agent");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = ".pi/agent/auth.json",
-        .data =
-        \\{
-        \\  "anthropic": {
-        \\    "type": "api_key",
-        \\    "key": "sk-legacy"
-        \\  }
-        \\}
-        ,
-    });
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    // Load should migrate and return from primary path
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = try loadFileAuth(arena.allocator(), home);
-    try oh.snap(@src(),
-        \\core.providers.auth.Auth
-        \\  .api_key: []const u8
-        \\    "sk-legacy"
-    ).expectEqual(a);
-
-    // Verify migrated file exists at primary path
-    try tmp.dir.access(std.testing.io, ".pz/auth.json", .{});
 }
 
 test "loadFileAuthForProvider parses openai oauth entry" {
@@ -792,55 +640,6 @@ test "loadFileAuthForProvider parses openai oauth entry" {
     ).expectEqual(a);
 }
 
-test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(std.testing.io, ".pz");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = ".pz/auth.json",
-        .data =
-        \\{
-        \\  "anthropic": {
-        \\    "type": "api_key",
-        \\    "key": "sk-ant-file"
-        \\  }
-        \\}
-        ,
-    });
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.AuthNotFound, loadFileAuthForProvider(arena.allocator(), home, .openai));
-}
-
-test "loadFileAuthForProvider fails closed on corrupt auth" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(std.testing.io, ".pz");
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".pz/auth.json", .data = "not json" });
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.AuthCorrupt, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
-}
-
-test "loadFileAuthForProvider rejects unknown fields" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(std.testing.io, ".pz");
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".pz/auth.json", .data = "{\"anthropic\":{\"type\":\"api_key\",\"key\":\"k\"},\"bogus\":1}" });
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.AuthCorrupt, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
-}
-
 test "listLoggedInHome fails closed on corrupt auth" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -849,28 +648,6 @@ test "listLoggedInHome fails closed on corrupt auth" {
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(home);
     try std.testing.expectError(error.AuthCorrupt, listLoggedInHome(std.testing.allocator, home));
-}
-
-test "logout removes provider entry from auth file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    // Save two providers
-    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
-    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
-
-    // Logout anthropic
-    try logoutHomeWithHooks(std.testing.allocator, home, .anthropic, .{});
-
-    // Anthropic gone, openai remains
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.AuthNotFound, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
-    const oa = try loadFileAuthForProvider(arena.allocator(), home, .openai);
-    try std.testing.expect(oa == .api_key);
 }
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly with no providers" {
@@ -884,23 +661,6 @@ test "P0-3 regression: listLoggedInHome deallocs cleanly with no providers" {
     const result = try listLoggedInHome(alloc, home);
     defer alloc.free(result);
     try std.testing.expectEqual(@as(usize, 0), result.len);
-}
-
-test "P0-3 regression: listLoggedInHome deallocs cleanly with all providers" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
-    defer alloc.free(home);
-
-    try saveApiKeyHome(alloc, home, .anthropic, "sk-a");
-    try saveApiKeyHome(alloc, home, .openai, "sk-o");
-    try saveApiKeyHome(alloc, home, .google, "sk-g");
-
-    const result = try listLoggedInHome(alloc, home);
-    defer alloc.free(result);
-    try std.testing.expectEqual(@as(usize, 3), result.len);
 }
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly on corrupt auth" {

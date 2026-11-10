@@ -36,9 +36,9 @@ even with debug info retained.
 - **18 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`, `skill`, `agent`, `patch`, `todo`, `github`, `swarm`, `ffmpeg`, `lsp`, `mcp`
 - **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
-- **OAuth + API key auth** — automatic token refresh, multi-provider support
-- **Subscription quotas** — the footer shows used percentages from the selected Codex/Claude provider's response headers or Codex stream events after a completed request. Window labels follow the reported duration (5h, week, month); missing quota data shows `limits: n/a` and changing model/provider clears it. API-key responses may not include subscription quotas.
-- **Thinking levels** — prefer off when supported; OpenAI model metadata determines the available levels through max. Shift+Tab skips unsupported levels. Any adjustment is shown explicitly; Anthropic uses token budgets for enabled levels.
+- **OpenAI OAuth + API key auth** — automatic token refresh for Codex/OpenAI authentication
+- **Subscription quotas** — the footer shows used percentages from Codex stream events after a completed request. Window labels follow the reported duration (5h, week, month); missing quota data shows `limits: n/a`. API-key responses may not include subscription quotas.
+- **Thinking levels** — OpenAI model metadata determines available levels through max. Shift+Tab skips unsupported levels; adjustments are shown explicitly.
 - **Prompt caching** — automatic cache_control on system messages
 - **Headless modes** — `--print`, `--json`, and `rpc` for scripting and integration
 - **Agent tool** — spawn subagents with dedicated RPC fd, progress streaming, process group isolation
@@ -113,7 +113,7 @@ Builds read the commit hash from Git and require a Git checkout. Release builds 
 pz
 
 # Explicit provider and model
-pz --provider anthropic --model claude-sonnet-4-20250514
+pz --provider openai --model gpt-6.1-sol
 
 # Resume a session
 pz resume          # picker (also: pz -r)

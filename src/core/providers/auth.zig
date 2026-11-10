@@ -48,8 +48,8 @@ pub const AuthEntry = struct {
     key: ?[]const u8 = null,
 };
 
-pub const Provider = enum { anthropic, openai, google };
-pub const provider_names = [_][]const u8{ "anthropic", "openai", "google" };
+pub const Provider = enum { openai };
+pub const provider_names = [_][]const u8{"openai"};
 
 pub fn providerName(p: Provider) []const u8 {
     return provider_names[@intFromEnum(p)];
@@ -138,9 +138,7 @@ pub const OAuthCodeInput = struct {
 };
 
 pub const AuthFile = struct {
-    anthropic: ?AuthEntry = null,
     openai: ?AuthEntry = null,
-    google: ?AuthEntry = null,
 };
 
 pub const OAuthLoginInfo = struct {

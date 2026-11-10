@@ -392,9 +392,7 @@ fn processSseLine(self: anytype, raw: []const u8) anyerror!?providers.Event {
 
 // ── Shared JSON error extraction ───────────────────────────────────────
 
-/// Extract "message" from JSON error bodies. Works for both Anthropic
-/// `{"type":"error","error":{"message":"..."}}` and OpenAI
-/// `{"error":{"message":"..."}}` formats.
+/// Extract "message" from OpenAI JSON error bodies (`{"error":{"message":"..."}}`).
 ///
 /// Handles escaped quotes in the message value by scanning for the
 /// closing unescaped `"`.
@@ -420,7 +418,7 @@ pub fn extractJsonErrMsg(body: []const u8) ?[]const u8 {
 
 /// Comptime generic that provides a shared Client + SseStream for any
 /// provider. Config must supply:
-///   - `provider_tag: auth_mod.Provider` — .anthropic or .openai
+///   - `provider_tag: auth_mod.Provider` — .openai
 ///   - `api_host: []const u8`, `api_path: []const u8`
 ///   - `ExtFields: type` — provider-specific SseStream fields
 ///   - `ext_init: fn() ExtFields` — initializer for ext fields

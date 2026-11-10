@@ -612,21 +612,21 @@ test "visRows accounts for scroll indicator" {
 test "updateArgs filters by prefix" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
-    const items = [_][]const u8{ "anthropic", "openai", "google" };
-    const cp = Picker.updateArgs(&items, "an").?;
+    const items = [_][]const u8{"openai"};
+    const cp = Picker.updateArgs(&items, "op").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
         \\[]u8
         \\  "n=1 sel=0 scroll=0
-        \\[0] anthropic"
+        \\[0] openai"
     ).expectEqual(snap);
 }
 
 test "updateArgs empty prefix returns all" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap.default;
-    const items = [_][]const u8{ "anthropic", "openai", "google" };
+    const items = [_][]const u8{"openai"};
     const cp = Picker.updateArgs(&items, "").?;
     const Snap = struct {
         n: u8,
@@ -634,7 +634,7 @@ test "updateArgs empty prefix returns all" {
     };
     try oh.snap(@src(),
         \\modes.tui.cmdpicker.test.updateArgs empty prefix returns all.Snap
-        \\  .n: u8 = 3
+        \\  .n: u8 = 1
         \\  .sel: u8 = 0
     ).expectEqual(Snap{
         .n = cp.n,
@@ -643,7 +643,7 @@ test "updateArgs empty prefix returns all" {
 }
 
 test "updateArgs no match returns null" {
-    const items = [_][]const u8{ "anthropic", "openai", "google" };
+    const items = [_][]const u8{"openai"};
     try std.testing.expect(Picker.updateArgs(&items, "zzz") == null);
 }
 

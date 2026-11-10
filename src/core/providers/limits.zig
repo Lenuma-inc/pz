@@ -51,23 +51,16 @@ pub fn parse(comptime provider: anytype, bytes: []const u8) !?Limits {
             .{ "x-codex-primary-used-percent", "x-codex-primary-window-minutes" },
             .{ "x-codex-secondary-used-percent", "x-codex-secondary-window-minutes" },
         },
-        .anthropic => .{
-            .{ "anthropic-ratelimit-unified-5h-utilization", "" },
-            .{ "anthropic-ratelimit-unified-7d-utilization", "" },
-        },
-        else => return null,
     };
     inline for (fields, 0..) |pair, i| {
         if (header(bytes, pair[0])) |raw| {
-            const minutes: ?u32 = if (provider == .anthropic)
-                (if (i == 0) 300 else 10080)
-            else if (header(bytes, pair[1])) |v|
+            const minutes: ?u32 = if (header(bytes, pair[1])) |v|
                 std.fmt.parseUnsigned(u32, v, 10) catch return error.InvalidQuota
             else
                 null;
             if (minutes == 0) return error.InvalidQuota;
             out.windows[i] = .{
-                .used = try percent(raw, if (provider == .anthropic) 100 else 1),
+                .used = try percent(raw, 1),
                 .minutes = minutes,
             };
         }
@@ -100,24 +93,6 @@ test "quota headers preserve actual windows and zero usage" {
         "x-codex-secondary-used-percent: 91.5\r\nx-codex-secondary-window-minutes: 300\r\n\r\n");
     var buf: [128]u8 = undefined;
     try @import("../../test/helpers.zig").expectSnapText(@src(), "used week:0% 5h:92%", try format(l, &buf));
-}
-
-test "quota headers scale Claude utilization and handle absent windows" {
-    const auth = @import("auth.zig");
-    const l = try parse(auth.Provider.anthropic, "HTTP/1.1 200 OK\r\nanthropic-ratelimit-unified-7d-utilization: 0.25\r\n\r\n");
-    var buf: [128]u8 = undefined;
-    try @import("../../test/helpers.zig").expectSnapText(@src(), "used week:25%", try format(l, &buf));
-    try std.testing.expect((try parse(auth.Provider.openai, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")) == null);
-    try @import("../../test/helpers.zig").expectSnapText(@src(), "limits: n/a", try format(null, &buf));
-}
-
-test "quota headers reject malformed percentages and windows" {
-    const auth = @import("auth.zig");
-    inline for (.{ "nan", "inf", "-1", "101", "oops" }) |raw| {
-        try std.testing.expectError(error.InvalidQuota, parse(auth.Provider.openai, "HTTP/1.1 200 OK\r\nx-codex-primary-used-percent: " ++ raw ++ "\r\n\r\n"));
-    }
-    try std.testing.expectError(error.InvalidQuota, parse(auth.Provider.anthropic, "HTTP/1.1 200 OK\r\nanthropic-ratelimit-unified-5h-utilization: 1.1\r\n\r\n"));
-    try std.testing.expectError(error.InvalidQuota, parse(auth.Provider.openai, "HTTP/1.1 200 OK\r\nx-codex-primary-used-percent: 5\r\nx-codex-primary-window-minutes: 0\r\n\r\n"));
 }
 
 test "quota percent property accepts exactly the finite valid range" {

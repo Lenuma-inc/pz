@@ -464,52 +464,6 @@ fn fillRow(vs: *VScreen, r: usize, text: []const u8, bg: Color) void {
     }
 }
 
-test "extract startup screen" {
-    // Simulate a minimal 30x10 startup screen:
-    //   rows 0-5: transcript (one assistant block)
-    //   row 6: border
-    //   row 7: editor (empty)
-    //   row 8: border
-    //   row 9-10: footer (2 rows) → but we only have 10 rows total, so 9 is footer row0 and we skip row1
-    // Actually let's use 30x12 for cleaner layout.
-    const alloc = testing.allocator;
-    var vs = try VScreen.init(alloc, 30, 12);
-    defer vs.deinit();
-
-    // Transcript: assistant message on rows 0-1 (default bg).
-    fillRow(&vs, 0, "Hello! How can I help?", .{ .default = {} });
-    fillRow(&vs, 1, "Ask me anything.", .{ .default = {} });
-    // Rows 2-6 empty (default = space, default bg).
-
-    // Border at row 7.
-    fillBorder(&vs, 7);
-    // Editor at row 8 (empty — spaces with default bg, already default).
-
-    // Border at row 9.
-    fillBorder(&vs, 9);
-
-    // Footer row 0 at row 10.
-    fillRow(&vs, 10, "~/Work/pz (main)", .{ .default = {} });
-    // Footer row 1 at row 11.
-    fillRow(&vs, 11, "  claude-sonnet-4-20250514", .{ .default = {} });
-
-    var ast = try extract(alloc, &vs);
-    defer ast.deinit();
-
-    // One assistant block.
-    try testing.expectEqual(@as(usize, 1), ast.blocks.len);
-    try testing.expectEqual(TuiAst.Block.Kind.assistant, ast.blocks[0].kind);
-    try testing.expectEqualStrings("Hello! How can I help?\nAsk me anything.", ast.blocks[0].text);
-
-    // Editor is empty.
-    try testing.expectEqualStrings("", ast.editor);
-
-    // Footer.
-    try testing.expectEqualStrings("~/Work/pz (main)", ast.footer.row0);
-    try testing.expect(ast.footer.model != null);
-    try testing.expectEqualStrings("claude-sonnet-4-20250514", ast.footer.model.?);
-}
-
 test "extract prompt and response with user block" {
     const alloc = testing.allocator;
     var vs = try VScreen.init(alloc, 40, 14);

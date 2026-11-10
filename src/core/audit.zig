@@ -1634,11 +1634,11 @@ test "snapshot: runtime control entries encode canonically" {
             .tool = .{
                 .name = .{ .text = "runtime", .vis = .@"pub" },
                 .call_id = "model",
-                .argv = .{ .text = "claude-opus-4-6", .vis = .@"pub" },
+                .argv = .{ .text = "gpt-6.1-sol", .vis = .@"pub" },
             },
         },
         .attrs = &.{
-            .{ .key = "provider", .val = .{ .str = "anthropic" } },
+            .{ .key = "provider", .val = .{ .str = "openai" } },
         },
     });
     defer talloc.free(cfg_raw);
@@ -1672,7 +1672,7 @@ test "snapshot: runtime control entries encode canonically" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "cfg={"v":1,"ts_ms":88,"sid":"runtime","seq":1,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"anthropic"}]} | sess={"v":1,"ts_ms":89,"sid":"runtime","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:a3d269af3f28886b]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:6e5d4487dda40bf0]","vis":"mask"}},"attrs":[]}"
+        \\  "cfg={"v":1,"ts_ms":88,"sid":"runtime","seq":1,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"gpt-6.1-sol","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"openai"}]} | sess={"v":1,"ts_ms":89,"sid":"runtime","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:a3d269af3f28886b]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:6e5d4487dda40bf0]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(snap);
 }
 
@@ -2012,7 +2012,7 @@ test "snapshot: ctrl event encoding for privileged actions" {
         .data = .{
             .ctrl = .{
                 .op = .model,
-                .target = .{ .text = "claude-opus-4-6", .vis = .@"pub" },
+                .target = .{ .text = "gpt-6.1-sol", .vis = .@"pub" },
             },
         },
     });
@@ -2064,7 +2064,7 @@ test "snapshot: ctrl event encoding for privileged actions" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "model={"v":1,"ts_ms":100,"sid":"sess-ctrl","seq":1,"kind":"ctrl","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"model switch","vis":"pub"},"data":{"op":"model","target":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[]} | export={"v":1,"ts_ms":101,"sid":"sess-ctrl","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:e905cd364db2dbf1]","vis":"mask"},"op":"write"},"data":{"op":"clipboard","detail":{"text":"[mask:e905cd364db2dbf1]","vis":"mask"}},"attrs":[]} | subagent={"v":1,"ts_ms":102,"sid":"sess-ctrl","seq":3,"kind":"ctrl","sev":"warn","out":"deny","actor":{"kind":"agent","id":{"text":"sub-1","vis":"pub"}},"data":{"op":"subagent","target":{"text":"sub-1","vis":"pub"},"detail":{"text":"policy denied","vis":"pub"}},"attrs":[]}"
+        \\  "model={"v":1,"ts_ms":100,"sid":"sess-ctrl","seq":1,"kind":"ctrl","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"model switch","vis":"pub"},"data":{"op":"model","target":{"text":"gpt-6.1-sol","vis":"pub"}},"attrs":[]} | export={"v":1,"ts_ms":101,"sid":"sess-ctrl","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:e905cd364db2dbf1]","vis":"mask"},"op":"write"},"data":{"op":"clipboard","detail":{"text":"[mask:e905cd364db2dbf1]","vis":"mask"}},"attrs":[]} | subagent={"v":1,"ts_ms":102,"sid":"sess-ctrl","seq":3,"kind":"ctrl","sev":"warn","out":"deny","actor":{"kind":"agent","id":{"text":"sub-1","vis":"pub"}},"data":{"op":"subagent","target":{"text":"sub-1","vis":"pub"},"detail":{"text":"policy denied","vis":"pub"}},"attrs":[]}"
     ).expectEqual(snap);
 }
 

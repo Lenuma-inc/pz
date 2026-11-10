@@ -119,7 +119,7 @@ The model may request `sandbox_permissions: "require_escalated"` with a nonempty
 
 Rules use the pattern `runtime/web/<host>` with tool scoping:
 ```json
-{"pattern": "runtime/web/api.anthropic.com", "effect": "allow", "tool": "web"}
+{"pattern": "runtime/web/api.openai.com", "effect": "allow", "tool": "web"}
 ```
 
 ### Proxy

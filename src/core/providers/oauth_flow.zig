@@ -38,27 +38,6 @@ const openai_oauth_extra_authorize = [_]OAuthParam{
     .{ .key = "originator", .value = "pz" },
 };
 
-const axios_json_accept = "application/json, text/plain, */*";
-
-pub const anthropic_spec = OAuthSpec{
-    .provider = .anthropic,
-    .client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-    .authorize_url = "https://claude.ai/oauth/authorize",
-    .token_host = "console.anthropic.com",
-    .token_path = "/v1/oauth/token",
-    .default_redirect_uri = "https://console.anthropic.com/oauth/code/callback",
-    .success_redirect_url = "https://console.anthropic.com/oauth/code/success?app=claude-code",
-    .scopes = "org:create_api_key user:profile user:inference user:sessions:claude_code",
-    .refresh_scope = "user:profile user:inference user:sessions:claude_code",
-    .local_callback_path = "/callback",
-    .local_redirect_host = "localhost",
-    .start_action = "start anthropic oauth",
-    .complete_action = "complete anthropic oauth",
-    .api_key_prefix = "sk-ant-",
-    .token_body = .json_with_state,
-    .token_accept = axios_json_accept,
-    .extra_authorize = &.{.{ .key = "code", .value = "true" }},
-};
 
 pub const openai_spec = OAuthSpec{
     .provider = .openai,
@@ -78,11 +57,7 @@ pub const openai_spec = OAuthSpec{
 };
 
 pub fn oauthSpec(provider: Provider) ?*const OAuthSpec {
-    return switch (provider) {
-        .anthropic => &anthropic_spec,
-        .openai => &openai_spec,
-        .google => null,
-    };
+    return if (provider == .openai) &openai_spec else null;
 }
 
 // ── Public helpers ─────────────────────────────────────────────────────
@@ -103,13 +78,8 @@ pub fn oauthCapable(provider: Provider) bool {
 }
 
 pub fn looksLikeApiKey(provider: Provider, key: []const u8) bool {
-    const prefix = switch (provider) {
-        .anthropic => anthropic_spec.api_key_prefix,
-        .openai => openai_spec.api_key_prefix,
-        .google => null,
-    };
-    if (prefix) |p| return std.mem.startsWith(u8, key, p);
-    return key.len > 0;
+    if (provider != .openai) return false;
+    return if (openai_spec.api_key_prefix) |prefix| std.mem.startsWith(u8, key, prefix) else false;
 }
 
 // ── Begin OAuth ────────────────────────────────────────────────────────
@@ -341,7 +311,7 @@ pub fn openBrowser(alloc: std.mem.Allocator, url: []const u8) !void {
 
 /// Refresh an expired OAuth token. Returns new OAuth credentials and saves to disk.
 pub fn refreshOAuth(alloc: std.mem.Allocator, old: OAuth) !OAuth {
-    return refreshOAuthForProvider(alloc, .anthropic, old);
+    return refreshOAuthForProvider(alloc, .openai, old);
 }
 
 /// Refresh an expired OAuth token for a specific provider.
@@ -784,74 +754,6 @@ const AuditRows = struct {
     }
 };
 
-test "oauth helpers expose provider capabilities and metadata" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    try std.testing.expect(oauthCapable(.anthropic));
-    try std.testing.expect(oauthCapable(.openai));
-    try std.testing.expect(!oauthCapable(.google));
-
-    try std.testing.expect(looksLikeApiKey(.anthropic, "sk-ant-api03-abc"));
-    try std.testing.expect(!looksLikeApiKey(.anthropic, "http://localhost/callback?code=x&state=y"));
-    try std.testing.expect(looksLikeApiKey(.openai, "sk-proj-123"));
-    try std.testing.expect(!looksLikeApiKey(.openai, "http://localhost/callback?code=x&state=y"));
-    try std.testing.expect(looksLikeApiKey(.google, "anything"));
-
-    const anth = oauthLoginInfo(.anthropic) orelse return error.TestUnexpectedResult;
-    try oh.snap(@src(),
-        \\core.providers.auth.OAuthLoginInfo
-        \\  .callback_path: []const u8
-        \\    "/callback"
-        \\  .redirect_host: []const u8
-        \\    "localhost"
-        \\  .success_redirect_url: ?[]const u8
-        \\    "https://console.anthropic.com/oauth/code/success?app=claude-code"
-        \\  .start_action: []const u8
-        \\    "start anthropic oauth"
-        \\  .complete_action: []const u8
-        \\    "complete anthropic oauth"
-    ).expectEqual(anth);
-
-    const oa = oauthLoginInfo(.openai) orelse return error.TestUnexpectedResult;
-    try oh.snap(@src(),
-        \\core.providers.auth.OAuthLoginInfo
-        \\  .callback_path: []const u8
-        \\    "/auth/callback"
-        \\  .redirect_host: []const u8
-        \\    "127.0.0.1"
-        \\  .success_redirect_url: ?[]const u8
-        \\    null
-        \\  .start_action: []const u8
-        \\    "start openai oauth"
-        \\  .complete_action: []const u8
-        \\    "complete openai oauth"
-    ).expectEqual(oa);
-
-    try std.testing.expect(oauthLoginInfo(.google) == null);
-}
-
-test "beginOAuth builds anthropic authorization URL with separate state and verifier" {
-    var flow = try beginOAuth(std.testing.allocator, .anthropic);
-    defer flow.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://claude.ai/oauth/authorize?"));
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "code=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e") != null);
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code") != null);
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
-    try std.testing.expect(flow.state.len > 0);
-    try std.testing.expect(flow.verifier.len > 16);
-    try std.testing.expect(!std.mem.eql(u8, flow.verifier, flow.state));
-}
-
-test "beginOAuthWithRedirect encodes localhost callback URI" {
-    var flow = try beginOAuthWithRedirect(std.testing.allocator, .anthropic, "http://localhost:54321/callback");
-    defer flow.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fcallback") != null);
-}
-
 test "beginOAuthWithRedirect encodes callback URI and codex params" {
     var flow = try beginOAuthWithRedirect(std.testing.allocator, .openai, "http://127.0.0.1:54321/auth/callback");
     defer flow.deinit(std.testing.allocator);
@@ -861,13 +763,6 @@ test "beginOAuthWithRedirect encodes callback URI and codex params" {
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "codex_cli_simplified_flow=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "originator=pz") != null);
-}
-
-test "beginOAuthWithRedirect rejects unsupported provider" {
-    try std.testing.expectError(
-        error.UnsupportedOAuthProvider,
-        beginOAuthWithRedirect(std.testing.allocator, .google, "http://127.0.0.1:1234/callback"),
-    );
 }
 
 test "parseOAuthInput supports code#state" {
@@ -961,28 +856,6 @@ test "parseOAuthInput rejects empty input" {
     try std.testing.expectError(error.InvalidOAuthInput, parseOAuthInput(std.testing.allocator, " \t\r\n"));
 }
 
-test "completeOAuthFromLocalCallback rejects mismatched state (anthropic)" {
-    const code = try std.testing.allocator.dupe(u8, "c");
-    defer std.testing.allocator.free(code);
-    const state = try std.testing.allocator.dupe(u8, "state-a");
-    defer std.testing.allocator.free(state);
-    const cb = oauth_callback.CodeState{
-        .code = code,
-        .state = state,
-    };
-    try std.testing.expectError(
-        error.OAuthStateMismatch,
-        completeOAuthFromLocalCallback(
-            std.testing.allocator,
-            .anthropic,
-            cb,
-            "http://127.0.0.1:1234/callback",
-            "state-b",
-            "verifier-x",
-        ),
-    );
-}
-
 test "completeOAuthFromLocalCallback rejects mismatched state (openai)" {
     const code = try std.testing.allocator.dupe(u8, "c");
     defer std.testing.allocator.free(code);
@@ -1005,109 +878,15 @@ test "completeOAuthFromLocalCallback rejects mismatched state (openai)" {
     );
 }
 
-test "completeOAuthFromLocalCallback rejects unsupported provider" {
-    const code = try std.testing.allocator.dupe(u8, "c");
-    defer std.testing.allocator.free(code);
-    const state = try std.testing.allocator.dupe(u8, "state-a");
-    defer std.testing.allocator.free(state);
-    const cb = oauth_callback.CodeState{
-        .code = code,
-        .state = state,
-    };
-    try std.testing.expectError(
-        error.UnsupportedOAuthProvider,
-        completeOAuthFromLocalCallback(
-            std.testing.allocator,
-            .google,
-            cb,
-            "http://127.0.0.1:1234/callback",
-            "state-a",
-            "verifier-x",
-        ),
-    );
-}
-
-test "completeOAuthWithHooks rejects empty verifier" {
-    try std.testing.expectError(
-        error.MissingOAuthVerifier,
-        completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "", .{}),
-    );
-}
-
-test "completeOAuthWithHooks uses provided verifier not state" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    var got_verifier: []const u8 = "";
-    const Capture = struct {
-        var captured: []const u8 = "";
-        fn exchange(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, verifier: []const u8, _: Hooks) !OAuth {
-            captured = verifier;
-            return .{
-                .access = try alloc.dupe(u8, "a"),
-                .refresh = try alloc.dupe(u8, "r"),
-                .expires = 1,
-            };
-        }
-    };
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "my-pkce-verifier", .{
-        .home_override = home,
-        .exchange_code = Capture.exchange,
-    });
-    got_verifier = Capture.captured;
-    // The exchange must receive the explicit verifier, not the state from input.
-    try std.testing.expectEqualStrings("my-pkce-verifier", got_verifier);
-}
-
-test "anthropic OAuth state and PKCE verifier stay separate" {
-    var flow = try beginOAuth(std.testing.allocator, .anthropic);
-    defer flow.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://claude.ai/oauth/authorize?"));
-    try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
-    try std.testing.expect(flow.state.len > 0);
-    try std.testing.expectEqual(flow.verifier.len, flow.state.len);
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
-}
-
 test "buildRefreshReqBody uses provider-specific body shape" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
 
-    const anth = try buildRefreshReqBody(ar, &anthropic_spec, "rt-1");
-    try std.testing.expectEqualStrings("application/json", anth.content_type);
-    try std.testing.expectEqualStrings(
-        "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"rt-1\",\"client_id\":\"9d1c250a-e61b-44d9-88ed-5944d1962f5e\",\"scope\":\"user:profile user:inference user:sessions:claude_code\"}",
-        anth.body,
-    );
-
     const oa = try buildRefreshReqBody(ar, &openai_spec, "rt 2");
     try std.testing.expectEqualStrings("application/x-www-form-urlencoded", oa.content_type);
     try std.testing.expect(std.mem.indexOf(u8, oa.body, "grant_type=refresh_token") != null);
     try std.testing.expect(std.mem.indexOf(u8, oa.body, "refresh_token=rt+2") != null);
-}
-
-test "buildTokenReqBody anthropic uses json contract" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const ar = arena.allocator();
-
-    const req = try buildTokenReqBody(
-        ar,
-        &anthropic_spec,
-        "abc123",
-        "state456",
-        "http://localhost:54321/callback",
-        "verifier789",
-    );
-    try std.testing.expectEqualStrings("application/json", req.content_type);
-    try std.testing.expectEqualStrings(
-        "{\"grant_type\":\"authorization_code\",\"code\":\"abc123\",\"redirect_uri\":\"http://localhost:54321/callback\",\"client_id\":\"9d1c250a-e61b-44d9-88ed-5944d1962f5e\",\"code_verifier\":\"verifier789\",\"state\":\"state456\"}",
-        req.body,
-    );
 }
 
 test "buildTokenReqBody form body escapes reserved characters" {
@@ -1134,70 +913,6 @@ test "buildTokenReqBody form body escapes reserved characters" {
             "redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback%3Fq%3Da%2Bb",
         ) != null,
     );
-}
-
-test "refreshOAuthForProvider rejects unsupported provider" {
-    const old = OAuth{
-        .access = "a",
-        .refresh = "r",
-        .expires = 0,
-    };
-    try std.testing.expectError(
-        error.UnsupportedOAuthProvider,
-        refreshOAuthForProvider(std.testing.allocator, .google, old),
-    );
-}
-
-test "auth audit covers oauth login and persistence" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    var rows = AuditRows{};
-    defer rows.deinit(std.testing.allocator);
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "test-pkce-verifier", .{
-        .home_override = home,
-        .exchange_code = struct {
-            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Hooks) !OAuth {
-                return .{
-                    .access = try alloc.dupe(u8, "oa-access"),
-                    .refresh = try alloc.dupe(u8, "oa-refresh"),
-                    .expires = 123,
-                };
-            }
-        }.f,
-        .audit_emitter = &rows.emitter,
-        .now_ms = struct {
-            fn f() i64 {
-                return 22;
-            }
-        }.f,
-    });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = try auth_load.loadFileAuthForProvider(arena.allocator(), home, .anthropic);
-    try oh.snap(@src(),
-        \\core.providers.auth.Auth
-        \\  .oauth: core.providers.auth.OAuth
-        \\    .access: []const u8
-        \\      "oa-access"
-        \\    .refresh: []const u8
-        \\      "oa-refresh"
-        \\    .expires: i64 = 123
-    ).expectEqual(a);
-
-    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
-    defer std.testing.allocator.free(joined);
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "{"v":1,"ts_ms":22,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"login"},"msg":{"text":"oauth login start","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}
-        \\{"v":1,"ts_ms":22,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"login"},"msg":{"text":"oauth login complete","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}"
-    ).expectEqual(joined);
 }
 
 test "auth audit covers oauth refresh and persistence" {
@@ -1245,29 +960,6 @@ test "auth audit covers oauth refresh and persistence" {
         \\  "{"v":1,"ts_ms":33,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"refresh"},"msg":{"text":"oauth refresh start","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"openai","vis":"pub"}},"attrs":[]}
         \\{"v":1,"ts_ms":33,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"refresh"},"msg":{"text":"oauth refresh complete","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"openai","vis":"pub"}},"attrs":[]}"
     ).expectEqual(joined);
-}
-
-test "completeOAuthWithHooks passes ca_file to exchange_code" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "test-pkce-verifier", .{
-        .home_override = home,
-        .ca_file = "/etc/pz/auth.pem",
-        .exchange_code = struct {
-            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, hooks: Hooks) !OAuth {
-                try std.testing.expectEqualStrings("/etc/pz/auth.pem", hooks.ca_file orelse return error.TestUnexpectedResult);
-                return .{
-                    .access = try alloc.dupe(u8, "ca-a"),
-                    .refresh = try alloc.dupe(u8, "ca-r"),
-                    .expires = 77,
-                };
-            }
-        }.f,
-    });
 }
 
 test "refreshOAuthForProviderWithHooks passes ca_file to refresh_fetch" {
@@ -1320,155 +1012,6 @@ test "initHttpClient fails closed on invalid ca bundle" {
 
 // ── 2a: OAuth login flow tests ──────────────────────────────────────────
 
-test "beginOAuth produces authorize URL with PKCE code_challenge" {
-    for ([_]Provider{ .anthropic, .openai }) |prov| {
-        var flow = try beginOAuth(std.testing.allocator, prov);
-        defer flow.deinit(std.testing.allocator);
-
-        // URL must contain code_challenge (S256)
-        try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge=") != null);
-        try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge_method=S256") != null);
-
-        // Verify the code_challenge is SHA256(verifier) in base64url
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(flow.verifier, &digest, .{});
-        const expected = std.base64.url_safe_no_pad.Encoder.calcSize(digest.len);
-        var challenge_buf: [44]u8 = undefined;
-        _ = std.base64.url_safe_no_pad.Encoder.encode(challenge_buf[0..expected], &digest);
-        const needle = try std.fmt.allocPrint(std.testing.allocator, "code_challenge={s}", .{challenge_buf[0..expected]});
-        defer std.testing.allocator.free(needle);
-        try std.testing.expect(std.mem.indexOf(u8, flow.url, needle) != null);
-    }
-}
-
-test "completeOAuthWithHooks with mock exchange returns valid tokens and persists" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=test_code&state=test_state", "pkce-v", .{
-        .home_override = home,
-        .exchange_code = struct {
-            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, code: []const u8, state: []const u8, _: []const u8, verifier: []const u8, _: Hooks) !OAuth {
-                // Verify all params reach the exchange function
-                try std.testing.expectEqualStrings("test_code", code);
-                try std.testing.expectEqualStrings("test_state", state);
-                try std.testing.expectEqualStrings("pkce-v", verifier);
-                return .{
-                    .access = try alloc.dupe(u8, "mock-access"),
-                    .refresh = try alloc.dupe(u8, "mock-refresh"),
-                    .expires = 5000,
-                };
-            }
-        }.f,
-    });
-
-    // Verify auth file written to disk
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = try auth_load.loadFileAuthForProvider(arena.allocator(), home, .anthropic);
-    try oh.snap(@src(),
-        \\core.providers.auth.Auth
-        \\  .oauth: core.providers.auth.OAuth
-        \\    .access: []const u8
-        \\      "mock-access"
-        \\    .refresh: []const u8
-        \\      "mock-refresh"
-        \\    .expires: i64 = 5000
-    ).expectEqual(a);
-}
-
-test "completeOAuthWithHooks rejects missing state in input" {
-    try std.testing.expectError(
-        error.MissingOAuthState,
-        completeOAuthWithHooks(std.testing.allocator, .anthropic, "justcode", "verifier", .{
-            .exchange_code = struct {
-                fn f(_: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Hooks) !OAuth {
-                    return error.TestUnexpectedResult;
-                }
-            }.f,
-        }),
-    );
-}
-
-// ── 2b: Token refresh cycle tests ──────────────────────────────────────
-
-test "refreshOAuthForProviderWithHooks with mock 200 returns new tokens" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap.default;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, .{
-        .access = "old-access",
-        .refresh = "old-refresh",
-        .expires = 100,
-    }, .{
-        .home_override = home,
-        .refresh_fetch = struct {
-            fn f(alloc: std.mem.Allocator, prov: Provider, old: OAuth, _: Hooks) !OAuth {
-                // Verify old tokens passed correctly
-                try std.testing.expectEqual(Provider.anthropic, prov);
-                try std.testing.expectEqualStrings("old-refresh", old.refresh);
-                return .{
-                    .access = try alloc.dupe(u8, "new-access"),
-                    .refresh = try alloc.dupe(u8, "new-refresh"),
-                    .expires = 9999,
-                };
-            }
-        }.f,
-    });
-    defer {
-        std.testing.allocator.free(got.access);
-        std.testing.allocator.free(got.refresh);
-    }
-
-    try oh.snap(@src(),
-        \\core.providers.auth.OAuth
-        \\  .access: []const u8
-        \\    "new-access"
-        \\  .refresh: []const u8
-        \\    "new-refresh"
-        \\  .expires: i64 = 9999
-    ).expectEqual(got);
-
-    // Verify updated tokens persisted to disk
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const disk_auth = try auth_load.loadFileAuthForProvider(arena.allocator(), home, .anthropic);
-    try oh.snap(@src(),
-        \\core.providers.auth.Auth
-        \\  .oauth: core.providers.auth.OAuth
-        \\    .access: []const u8
-        \\      "new-access"
-        \\    .refresh: []const u8
-        \\      "new-refresh"
-        \\    .expires: i64 = 9999
-    ).expectEqual(disk_auth);
-}
-
-test "refreshOAuthForProviderWithHooks with 400 returns typed error" {
-    const got = refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, .{
-        .access = "a",
-        .refresh = "r",
-        .expires = 0,
-    }, .{
-        .refresh_fetch = struct {
-            fn f(_: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
-                return error.RefreshFailed;
-            }
-        }.f,
-    });
-    try std.testing.expectError(error.RefreshFailed, got);
-}
-
 test "refreshOAuthForProviderWithHooks propagates network error" {
     const got = refreshOAuthForProviderWithHooks(std.testing.allocator, .openai, .{
         .access = "a",
@@ -1484,66 +1027,3 @@ test "refreshOAuthForProviderWithHooks propagates network error" {
     try std.testing.expectError(error.ConnectionRefused, got);
 }
 
-test "proactive refresh triggers when now > expires" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-
-    const Ctx = struct {
-        var called: bool = false;
-        fn refresh(alloc: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
-            called = true;
-            return .{
-                .access = try alloc.dupe(u8, "refreshed-a"),
-                .refresh = try alloc.dupe(u8, "refreshed-r"),
-                .expires = 99999,
-            };
-        }
-        fn now() i64 {
-            return 2000; // past expires=1000
-        }
-    };
-    Ctx.called = false;
-
-    // Simulate what tryProactiveRefresh does: check expires, call refresh
-    const old = OAuth{ .access = "a", .refresh = "r", .expires = 1000 };
-    const now = Ctx.now();
-    if (now >= old.expires) {
-        const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, old, .{
-            .home_override = home,
-            .refresh_fetch = Ctx.refresh,
-            .now_ms = Ctx.now,
-        });
-        std.testing.allocator.free(got.access);
-        std.testing.allocator.free(got.refresh);
-    }
-    try std.testing.expect(Ctx.called);
-}
-
-test "proactive refresh skips when token still valid" {
-    const Ctx = struct {
-        var called: bool = false;
-        fn refresh(_: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
-            called = true;
-            return error.TestUnexpectedResult;
-        }
-        fn now() i64 {
-            return 500; // before expires=1000
-        }
-    };
-    Ctx.called = false;
-
-    const old = OAuth{ .access = "a", .refresh = "r", .expires = 1000 };
-    const now = Ctx.now();
-    // Same logic as tryProactiveRefresh: skip if not expired
-    if (now >= old.expires) {
-        const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, old, .{
-            .refresh_fetch = Ctx.refresh,
-            .now_ms = Ctx.now,
-        });
-        std.testing.allocator.free(got.access);
-        std.testing.allocator.free(got.refresh);
-    }
-    try std.testing.expect(!Ctx.called);
-}

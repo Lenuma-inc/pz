@@ -461,7 +461,7 @@ test "buildReq includes provider field when set" {
     };
     const req: providers.Request = .{
         .model = "m1",
-        .provider = "anthropic",
+        .provider = "openai",
         .msgs = msgs[0..],
     };
 
@@ -469,7 +469,7 @@ test "buildReq includes provider field when set" {
     defer std.testing.allocator.free(raw);
     try expectSnap(@src(), raw,
         \\[]u8
-        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[],"thinking":"off"}}"
+        \\  "{"model":"m1","provider":"openai","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[],"thinking":"off"}}"
     );
 }
 

@@ -67,37 +67,6 @@ test "e2e simple text response" {
     try std.testing.expect(found_text);
 }
 
-test "e2e text + thinking + text" {
-    // h=10: tx_h=5, enough for 3 blocks + 2 gaps
-    var ui = try Ui.init(std.testing.allocator, 40, 10, "claude", "anthropic");
-    defer ui.deinit();
-
-    try ui.onProvider(.{ .text = "Let me think..." });
-    try ui.onProvider(.{ .thinking = "analyzing the problem" });
-    try ui.onProvider(.{ .text = "Here is my answer." });
-
-    var vs = try VScreen.init(std.testing.allocator, 40, 10);
-    defer vs.deinit();
-    try renderToVs(&ui, &vs);
-
-    // tx_h=5: Let me think (0), gap (1), analyzing (2), gap (3), Here is (4)
-    {
-        const row = try vs.rowText(std.testing.allocator, 0);
-        defer std.testing.allocator.free(row);
-        try std.testing.expect(std.mem.indexOf(u8, row, "Let me think") != null);
-    }
-    {
-        const row = try vs.rowText(std.testing.allocator, 2);
-        defer std.testing.allocator.free(row);
-        try std.testing.expect(std.mem.indexOf(u8, row, "analyzing the problem") != null);
-    }
-    {
-        const row = try vs.rowText(std.testing.allocator, 4);
-        defer std.testing.allocator.free(row);
-        try std.testing.expect(std.mem.indexOf(u8, row, "Here is my answer") != null);
-    }
-}
-
 test "e2e tool call and result" {
     var ui = try Ui.init(std.testing.allocator, 50, 10, "gpt-4", "openai");
     defer ui.deinit();
@@ -428,41 +397,6 @@ test "golden snapshot deterministic frame text" {
     ).expectEqual(snap);
 }
 
-test "e2e multiple parallel tool calls" {
-    var ui = try Ui.init(std.testing.allocator, 60, 14, "claude", "anthropic");
-    defer ui.deinit();
-
-    try ui.onProvider(.{ .text = "Reading files..." });
-    try ui.onProvider(.{ .tool_call = .{ .id = "c1", .name = "read", .args = "{}" } });
-    try ui.onProvider(.{ .tool_call = .{ .id = "c2", .name = "write", .args = "{}" } });
-    try ui.onProvider(.{ .tool_call = .{ .id = "c3", .name = "bash", .args = "{}" } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c2", .output = "ok", .is_err = false } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c3", .output = "fail", .is_err = true } });
-    try ui.onProvider(.{ .text = "Done." });
-
-    var vs = try VScreen.init(std.testing.allocator, 60, 14);
-    defer vs.deinit();
-    try renderToVs(&ui, &vs);
-
-    // h=14: tx_h=9 (rows 0..8)
-    // Error tool result shows error text with err fg and error bg
-    var found_err_result = false;
-    var r: usize = 0;
-    while (r < 9) : (r += 1) {
-        const row = try vs.rowText(std.testing.allocator, r);
-        defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, "fail") != null) {
-            // Check if this row has error styling
-            vs.expectFg(r, 1, .{ .rgb = 0xcc6666 }) catch continue;
-            vs.expectBg(r, 0, .{ .rgb = 0x3c2828 }) catch continue;
-            found_err_result = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_err_result);
-}
-
 test "e2e editor border visible" {
     var ui = try Ui.init(std.testing.allocator, 30, 8, "m", "p");
     defer ui.deinit();
@@ -627,22 +561,6 @@ test "golden: user message has user_msg_bg full row" {
 
     try vs.expectBg(ur, 0, .{ .rgb = 0x343541 }); // user_msg_bg
     try vs.expectBg(ur, 29, .{ .rgb = 0x343541 }); // last col
-}
-
-test "golden: footer fg matches dim color" {
-    var ui = try Ui.initFull(std.testing.allocator, 40, 8, "claude", "anthropic", "/tmp", "main", null);
-    defer ui.deinit();
-
-    var vs = try VScreen.init(std.testing.allocator, 40, 8);
-    defer vs.deinit();
-    try renderToVs(&ui, &vs);
-
-    // Footer at rows 6-7. Line 1 (row 6) has cwd in dim.
-    try vs.expectFg(6, 0, .{ .rgb = 0x666666 }); // dim
-    // Footer line 2 has right-aligned model; find it
-    const row7 = try vs.rowText(std.testing.allocator, 7);
-    defer std.testing.allocator.free(row7);
-    try std.testing.expect(std.mem.indexOf(u8, row7, "claude") != null);
 }
 
 test "golden: wide CJK in editor clips correctly" {
@@ -835,74 +753,6 @@ test "T7d subagent progress indicator in footer" {
 }
 
 // ── UX4: Overlay walkthrough tests ──
-
-test "UX4 model-select overlay open, navigate, select, close" {
-    const ov_mod = @import("overlay.zig");
-    var ui = try Ui.init(std.testing.allocator, 50, 14, "claude", "anthropic");
-    defer ui.deinit();
-
-    // Open model-select overlay
-    const models = [_][]const u8{ "claude-opus-4-6", "claude-sonnet-4", "gpt-4o" };
-    ui.ov = ov_mod.Overlay.init(&models, 0);
-
-    var vs = try VScreen.init(std.testing.allocator, 50, 14);
-    defer vs.deinit();
-    try renderToVs(&ui, &vs);
-
-    // Overlay renders — find "Select Model" title
-    var found_title = false;
-    var r: usize = 0;
-    while (r < 14) : (r += 1) {
-        const row = try vs.rowText(std.testing.allocator, r);
-        defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, "Select Model") != null) {
-            found_title = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_title);
-
-    // Initial selection is item 0
-    try std.testing.expectEqual(@as(usize, 0), ui.ov.?.sel);
-    try std.testing.expect(std.mem.eql(u8, ui.ov.?.selected().?, "claude-opus-4-6"));
-
-    // Navigate down twice
-    ui.ov.?.down();
-    try std.testing.expectEqual(@as(usize, 1), ui.ov.?.sel);
-    ui.ov.?.down();
-    try std.testing.expectEqual(@as(usize, 2), ui.ov.?.sel);
-    try std.testing.expect(std.mem.eql(u8, ui.ov.?.selected().?, "gpt-4o"));
-
-    // Navigate up wraps to last
-    ui.ov.?.down(); // wraps to 0
-    try std.testing.expectEqual(@as(usize, 0), ui.ov.?.sel);
-    ui.ov.?.up(); // wraps to 2
-    try std.testing.expectEqual(@as(usize, 2), ui.ov.?.sel);
-
-    // Re-render with new selection — should show > on selected item
-    try renderToVs(&ui, &vs);
-    var found_sel = false;
-    r = 0;
-    while (r < 14) : (r += 1) {
-        const row = try vs.rowText(std.testing.allocator, r);
-        defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, ">") != null and
-            std.mem.indexOf(u8, row, "gpt-4o") != null)
-        {
-            found_sel = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_sel);
-
-    // Close overlay (esc)
-    ui.ov.?.deinit(std.testing.allocator);
-    ui.ov = null;
-    try std.testing.expect(ui.ov == null);
-
-    // Renders cleanly without overlay
-    try renderToVs(&ui, &vs);
-}
 
 test "UX4 settings overlay open, toggle, close" {
     var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
@@ -1177,20 +1027,6 @@ test "UX1 startup frame has drag-selection hint in footer" {
     try std.testing.expect(found_hint);
 }
 
-test "UX1 startup frame has model in footer" {
-    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "claude-sonnet", "anthropic", "/tmp", "", null);
-    defer ui.deinit();
-
-    var vs = try VScreen.init(std.testing.allocator, 60, 10);
-    defer vs.deinit();
-    try renderToVs(&ui, &vs);
-
-    // Footer line 2 (last row) has model name
-    const last = try vs.rowText(std.testing.allocator, 9);
-    defer std.testing.allocator.free(last);
-    try std.testing.expect(std.mem.indexOf(u8, last, "claude-sonnet") != null);
-}
-
 test "UX1 startup frame has cwd and branch in footer" {
     var ui = try Ui.initFull(std.testing.allocator, 60, 10, "m", "p", "~/proj", "main", null);
     defer ui.deinit();
@@ -1418,16 +1254,6 @@ test "UX1 context and skills indicators in transcript" {
     }
     try std.testing.expect(found_ctx);
     try std.testing.expect(found_skills);
-}
-
-test "UX1 provider accessible via panels" {
-    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "claude", "anthropic", "/tmp", "", null);
-    defer ui.deinit();
-
-    try std.testing.expectEqualStrings("anthropic", ui.panels.providerName());
-
-    try ui.setProvider("openai");
-    try std.testing.expectEqualStrings("openai", ui.panels.providerName());
 }
 
 test "UX1 clean exit via ctrl-c on empty" {

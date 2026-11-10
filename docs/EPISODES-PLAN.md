@@ -357,7 +357,7 @@ Plan says "Write/edit tools require file ownership declared in Thread struct." N
 
 ### Critical: Providers not thread-safe (F5)
 
-`anthropic.Client` and `openai.Client` own a `std.http.Client` (not thread-safe) and mutable `auth` state. One provider instance per Runtime. Parallel threads sharing a provider = data race.
+`openai.Client` owns a `std.http.Client` (not thread-safe) and mutable `auth` state. One client instance per Runtime. Parallel threads sharing a client = data race.
 
 **Required**: Per-thread provider instance via factory function. Current `init` reads auth from disk (expensive) — needs caching strategy.
 

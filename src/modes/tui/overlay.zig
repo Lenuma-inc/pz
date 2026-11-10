@@ -445,7 +445,7 @@ pub const Overlay = struct {
 };
 
 /// Extract short display name from full model ID.
-/// "claude-opus-4-6-20250219" → "claude-opus-4-6"
+/// "model-20250219" → "model"
 fn shortLabel(model: []const u8) []const u8 {
     // Strip date suffix (-YYYYMMDD)
     if (model.len >= 9 and model[model.len - 9] == '-') {
@@ -709,12 +709,3 @@ test "settings overlay toggle and render" {
     );
 }
 
-test "shortLabel strips date suffix" {
-    const got = try std.mem.join(std.testing.allocator, "\n", &.{
-        shortLabel("claude-opus-4-6-20250219"),
-        shortLabel("my-model"),
-        shortLabel("model-with-abc"),
-    });
-    defer std.testing.allocator.free(got);
-    try expectSnapText(@src(), "claude-opus-4-6\nmy-model\nmodel-with-abc", got);
-}

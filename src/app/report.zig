@@ -313,7 +313,7 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
         "AuthNotFound",
         Rule{
             .summary = "no credentials found",
-            .next = "run /login or set ANTHROPIC_API_KEY",
+            .next = "run /login openai or set OPENAI_API_KEY",
         },
     },
     .{
@@ -397,7 +397,7 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
         "ProviderNotConfigured",
         Rule{
             .summary = "no provider configured",
-            .next = "run /login or set ANTHROPIC_API_KEY to configure a provider",
+            .next = "run /login openai or set OPENAI_API_KEY",
         },
     },
     .{
@@ -411,7 +411,7 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
         "TokenExchangeFailed",
         Rule{
             .summary = "OAuth authorization failed",
-            .next = "try /login again; if it persists, check console.anthropic.com for account issues",
+            .next = "run /login openai again to restart authorization",
         },
     },
 });

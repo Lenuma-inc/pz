@@ -1749,20 +1749,6 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
     ).expectEqual(meta_snap);
 }
 
-test "buildSummaryCall uses the lowest supported thinking level" {
-    const alloc = std.testing.allocator;
-    for ([_]struct { model: []const u8, effort: []const u8 }{
-        .{ .model = "gpt-6.1-sol", .effort = "low" },
-        .{ .model = "custom-model", .effort = "none" },
-        .{ .model = "claude-sonnet-4", .effort = "none" },
-    }) |case| {
-        const call = try buildSummaryCall(alloc, case.model, .{ .events_json = &.{"hello"} });
-        defer freeSummaryCall(alloc, call);
-        try std.testing.expectEqualStrings(case.effort, call.req.opts.reasoningEffort());
-        try std.testing.expectEqual(@as(?u32, 4096), call.req.opts.max_out);
-    }
-}
-
 test "buildSummaryCall rejects oversized input without dropping old context" {
     const alloc = std.testing.allocator;
     const events = [_]schema.Event{

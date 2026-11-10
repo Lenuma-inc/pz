@@ -360,7 +360,7 @@ test "listener captures callback code and state" {
 
 test "listener redirects browser to success url after valid callback" {
     var listener = try Listener.init(std.testing.allocator, .{
-        .success_redirect_url = "https://console.anthropic.com/oauth/code/success?app=claude-code",
+        .success_redirect_url = "https://openai.com/",
     });
     defer listener.deinit();
 
@@ -372,7 +372,7 @@ test "listener redirects browser to success url after valid callback" {
             const resp = sendTestCallbackReadAlloc(std.testing.allocator, p, req) catch return;
             defer std.testing.allocator.free(resp);
             std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 302 Found") != null) catch return;
-            std.testing.expect(std.mem.indexOf(u8, resp, "Location: https://console.anthropic.com/oauth/code/success?app=claude-code") != null) catch return;
+            std.testing.expect(std.mem.indexOf(u8, resp, "Location: https://openai.com/") != null) catch return;
         }
     }.run, .{listener.port()});
     defer t.join();

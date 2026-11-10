@@ -819,7 +819,7 @@ test "config auto imports global settings from home" {
         .data =
         \\{
         \\  "defaultModel":"home-model",
-        \\  "defaultProvider":"anthropic",
+        \\  "defaultProvider":"openai",
         \\  "sessionDir":"/tmp/home-sessions",
         \\  "defaultMode":"interactive",
         \\  "theme":"light",
@@ -840,7 +840,7 @@ test "config auto imports global settings from home" {
 
     try std.testing.expect(cfg.mode == .tui);
     try std.testing.expectEqualStrings("home-model", cfg.model);
-    try std.testing.expectEqualStrings("anthropic", cfg.provider);
+    try std.testing.expectEqualStrings("openai", cfg.provider);
     try std.testing.expectEqualStrings("/tmp/home-sessions", cfg.session_dir);
     try std.testing.expect(cfg.theme != null);
     try std.testing.expectEqualStrings("light", cfg.theme.?);
@@ -1036,21 +1036,6 @@ test "config rejects system prompt override under policy lock" {
 
     const parsed = try args.parse(&.{ "--system-prompt", "sys" });
     try std.testing.expectError(error.PolicyLockedSystemPrompt, discover(std.testing.allocator, std.testing.io, tmp.dir, parsed, .{}));
-}
-
-test "config loads enabled_models from --models flag" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const parsed = try args.parse(&.{ "--models", "claude-opus-4-6,claude-haiku-4-5" });
-    var cfg = try discover(std.testing.allocator, std.testing.io, tmp.dir, parsed, .{});
-    defer cfg.deinit(std.testing.allocator);
-
-    try std.testing.expect(cfg.enabled_models != null);
-    const models = cfg.enabled_models.?;
-    try std.testing.expectEqual(@as(usize, 2), models.len);
-    try std.testing.expectEqualStrings("claude-opus-4-6", models[0]);
-    try std.testing.expectEqualStrings("claude-haiku-4-5", models[1]);
 }
 
 test "config loads enabled_models from file" {

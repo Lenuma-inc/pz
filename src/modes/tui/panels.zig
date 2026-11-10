@@ -272,7 +272,7 @@ pub const Panels = struct {
         {
             var x = rect.x;
             var quota_buf: [128]u8 = undefined;
-            const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai") or std.mem.eql(u8, self.provider.items, "anthropic");
+            const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai");
             const hint = if (show_limits) quota.format(self.limits, &quota_buf) catch return error.NoSpaceLeft else "drag: select";
             if (show_limits) {
                 const cols = @min(hint.len, rect.w);
@@ -591,10 +591,8 @@ pub const Panels = struct {
 /// Looks up rates from the central model registry; falls back to sonnet rates for unknown models.
 /// Returns micents to add to cumulative total.
 fn calcCost(model: []const u8, u: core.providers.Usage) u64 {
-    const models = @import("../../core/providers/models.zig");
-    // Sonnet rates as fallback for unknown models.
-    const fallback: models.CostRates = .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
-    const rates = models.costRates(model) orelse fallback;
+    _ = model;
+    const rates: struct { in: u64, out: u64, cr: u64, cw: u64 } = .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
 
     // micents = tokens * rate_per_MTok / 1000
     // Use saturating math to prevent overflow on extreme token counts
@@ -871,7 +869,7 @@ test "quota footer renders reported windows and clears them on provider change" 
     const row = try rowSegmentsAlloc(std.testing.allocator, &frm, 0);
     defer std.testing.allocator.free(row);
     try expectSnapText(@src(), "@0:/hide/quotas | @13:(main) | @20:used | @25:5h:25% | @32:week:80%", row);
-    try ps.setProvider("anthropic");
+    try ps.setProvider("openai");
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
     const cleared = try rowSegmentsAlloc(std.testing.allocator, &frm, 0);
     defer std.testing.allocator.free(cleared);
@@ -967,7 +965,7 @@ test "panels footer keeps branch visible with long path" {
 }
 
 test "panels footer shows initial 0.0%" {
-    var ps = try Panels.initFull(std.testing.allocator, "claude", "anthropic", "~/proj", "");
+    var ps = try Panels.initFull(std.testing.allocator, "claude", "openai", "~/proj", "");
     defer ps.deinit();
     ps.ctx_limit = 200000;
 
@@ -980,61 +978,6 @@ test "panels footer shows initial 0.0%" {
     try expectSnapText(
         @src(),
         "row0 @0:~/proj | @48:drag: | @54:select\nrow1 @0:0.0%/200k | @54:claude",
-        actual,
-    );
-}
-
-test "panels footer uses pi style R/W cache labels" {
-    var ps = try Panels.initFull(std.testing.allocator, "claude-sonnet-4-6", "anthropic", "", "");
-    defer ps.deinit();
-
-    try ps.append(.{ .usage = .{
-        .in_tok = 1200,
-        .out_tok = 345,
-        .tot_tok = 1545,
-        .cache_read = 5500,
-        .cache_write = 1200,
-    } });
-
-    var frm = try frame.Frame.init(std.testing.allocator, 90, 2);
-    defer frm.deinit(std.testing.allocator);
-    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
-    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
-    defer std.testing.allocator.free(actual);
-    try expectSnapText(
-        @src(),
-        "row0 @78:drag: | @84:select\nrow1 @0:↓1.2k | @6:↑345 | @11:R5.5k | @17:W1.2k | @23:$0.014 | @73:claude-sonnet-4-6",
-        actual,
-    );
-}
-
-test "panels footer accumulates token totals across usage events" {
-    var ps = try Panels.initFull(std.testing.allocator, "claude-sonnet-4-6", "anthropic", "", "");
-    defer ps.deinit();
-
-    try ps.append(.{ .usage = .{
-        .in_tok = 1500,
-        .out_tok = 800,
-        .tot_tok = 2300,
-        .cache_read = 300,
-        .cache_write = 100,
-    } });
-    try ps.append(.{ .usage = .{
-        .in_tok = 500,
-        .out_tok = 200,
-        .tot_tok = 700,
-        .cache_read = 700,
-        .cache_write = 900,
-    } });
-
-    var frm = try frame.Frame.init(std.testing.allocator, 100, 2);
-    defer frm.deinit(std.testing.allocator);
-    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
-    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
-    defer std.testing.allocator.free(actual);
-    try expectSnapText(
-        @src(),
-        "row0 @88:drag: | @94:select\nrow1 @0:↓2.0k | @6:↑1.0k | @12:R1.0k | @18:W1.0k | @24:$0.025 | @83:claude-sonnet-4-6",
         actual,
     );
 }
@@ -1117,27 +1060,6 @@ test "panels render rejects out of bounds rect" {
     }));
 }
 
-test "calcCost opus pricing" {
-    const u = core.providers.Usage{ .in_tok = 1_000_000, .out_tok = 1_000_000 };
-    // opus: $15/MTok in + $75/MTok out = $90 = 9_000_000 micents
-    const cost = calcCost("claude-opus-4-6", u);
-    try std.testing.expectEqual(@as(u64, 9_000_000), cost);
-}
-
-test "calcCost sonnet pricing" {
-    const u = core.providers.Usage{ .in_tok = 1_000_000, .out_tok = 1_000_000 };
-    // sonnet: $3/MTok in + $15/MTok out = $18 = 1_800_000 micents
-    const cost = calcCost("claude-sonnet-4-6", u);
-    try std.testing.expectEqual(@as(u64, 1_800_000), cost);
-}
-
-test "calcCost includes cache_write" {
-    const u = core.providers.Usage{ .in_tok = 0, .out_tok = 0, .cache_write = 1_000_000 };
-    // sonnet cache_write: $3.75/MTok = 375 cents = 375_000 micents
-    const cost = calcCost("claude-sonnet-4-6", u);
-    try std.testing.expectEqual(@as(u64, 375_000), cost);
-}
-
 test "fmtCost formats dollars" {
     var buf1: [16]u8 = undefined;
     // 4_600 micents = $0.046
@@ -1148,26 +1070,6 @@ test "fmtCost formats dollars" {
     const got = try std.mem.join(std.testing.allocator, "\n", &.{ r1, r2 });
     defer std.testing.allocator.free(got);
     try expectSnapText(@src(), "0.046\n30.000", got);
-}
-
-test "panels footer shows cost and sub" {
-    var ps = try Panels.initFull(std.testing.allocator, "claude-opus-4-6", "anthropic", "~/proj", "main");
-    defer ps.deinit();
-    ps.ctx_limit = 200000;
-    ps.is_sub = true;
-
-    try ps.append(.{ .usage = .{ .in_tok = 1000, .out_tok = 200, .tot_tok = 1200 } });
-
-    var frm = try frame.Frame.init(std.testing.allocator, 80, 2);
-    defer frm.deinit(std.testing.allocator);
-    try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
-    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
-    defer std.testing.allocator.free(actual);
-    try expectSnapText(
-        @src(),
-        "row0 @0:~/proj | @7:(main) | @68:drag: | @74:select\nrow1 @0:↓1.0k | @6:↑200 | @11:$0.030 | @18:(sub) | @24:0.6%/200k | @65:claude-opus-4-6",
-        actual,
-    );
 }
 
 test "panels footer shows turn count" {

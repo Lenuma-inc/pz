@@ -66,10 +66,6 @@ pub fn isOverflowError(alloc: std.mem.Allocator, err_text: []const u8) bool {
         if (parsed.value == .object) {
             if (parsed.value.object.get("error")) |err_obj| {
                 if (err_obj == .object) {
-                    // Anthropic: error.type == "request_too_large"
-                    if (err_obj.object.get("type")) |t| {
-                        if (t == .string and std.mem.eql(u8, t.string, "request_too_large")) return true;
-                    }
                     // OpenAI: error.code == "context_length_exceeded"
                     if (err_obj.object.get("code")) |c| {
                         if (c == .string and std.mem.eql(u8, c.string, "context_length_exceeded")) return true;
@@ -142,13 +138,6 @@ test "adapter maps provider errors into canonical taxonomy" {
         \\  "TransportTransient|TransportTransient|TransportFatal|OutOfMemory|4
         \\"
     ).expectEqual(snap);
-}
-
-test "isOverflowError: anthropic JSON" {
-    const a = std.testing.allocator;
-    try std.testing.expect(isOverflowError(a,
-        \\{"error":{"type":"request_too_large","message":"too big"}}
-    ));
 }
 
 test "isOverflowError: openai JSON" {
