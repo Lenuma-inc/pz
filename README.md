@@ -131,6 +131,28 @@ pz print --yolo "Investigate this repository"
 pz --thinking low
 ```
 
+### Named OpenAI-compatible endpoints
+
+In the TUI, run `/login openai-compatibility`. The wizard asks for a unique
+provider name, an HTTPS API base URL, and an API key (masked). It checks the
+`/models` endpoint and saves credentials privately under `~/.pz/`; editing
+configuration files is not required. Repeat the command to add another provider
+or update an existing name.
+
+The endpoint must support the OpenAI Responses API. Examples of API bases are
+`https://inference.dahl.global/v1` and
+`https://discovery-api.intern-ai.org.cn/v1` (Atria's website is not its API).
+A host-only URL is normalized to `/v1`.
+
+Saved names appear in `/provider` completion. `/model` lists API-discovered models
+as `name::model-id`, keeping endpoints with identical model IDs separate. Context
+windows are used when the model catalog reports them. For example:
+
+```text
+/provider dahl
+/model dahl::MiniMaxAI/MiniMax-M2.7
+```
+
 ## Test
 
 ```

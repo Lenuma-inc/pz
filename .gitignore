@@ -8,6 +8,7 @@ src/**
 !src/core/lsp.zig
 !src/core/providers/
 !src/core/providers/openrouter.zig
+!src/core/providers/compatible.zig
 pkg/
 *.patch
 .pz/

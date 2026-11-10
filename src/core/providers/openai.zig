@@ -69,6 +69,15 @@ pub fn Config(comptime tag: auth_mod.Provider) type {
 
         pub fn parseSseData(self: anytype, data: []const u8) anyerror!?providers.Event {
             var event = try parseSseDataImpl(self, data);
+            if (event) |*value| {
+                if (value.* == .usage) {
+                    if (self.tokenator_model) |model| {
+                        value.usage.limits = @import("tokenator.zig").fetchLimits(self.arena.allocator(), self.quota_key.?, model, self.quota_ca_file) catch |err| .{ .token_billing = true, .unavailable = @errorName(err) };
+                    } else if (self.dahl_quota) {
+                        value.usage.limits = @import("dahl.zig").fetchLimits(self.arena.allocator(), self.quota_key.?, self.quota_ca_file) catch |err| .{ .token_billing = true, .unavailable = @errorName(err) };
+                    }
+                }
+            }
             if (comptime tag == .openrouter) {
                 if (event) |*value| {
                     if (value.* == .usage) {

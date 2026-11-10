@@ -244,7 +244,7 @@ pub const Panels = struct {
             },
             .tool_result => |tr| try self.applyResult(tr),
             .usage => |usage| {
-                self.cost_micents +|= calcCost(self.model.items, usage);
+                if (usage.limits == null or !usage.limits.?.token_billing) self.cost_micents +|= calcCost(self.model.items, usage);
                 self.cum_tok = usage.tot_tok;
                 self.tot_in +|= usage.in_tok;
                 self.tot_out +|= usage.out_tok;
@@ -281,7 +281,7 @@ pub const Panels = struct {
         // --- Line 1: dim(project path + branch) + right-aligned hint ---
         {
             var x = rect.x;
-            var quota_buf: [128]u8 = undefined;
+            var quota_buf: [256]u8 = undefined;
             const show_limits = self.limits != null or std.mem.eql(u8, self.provider.items, "openai") or std.mem.eql(u8, self.provider.items, "openrouter");
             const hint = if (show_limits) quota.formatForModel(self.limits, self.model.items, &quota_buf) catch return error.NoSpaceLeft else "drag: select";
             if (show_limits) {
@@ -394,6 +394,9 @@ pub const Panels = struct {
         dim_st: frame.Style,
     ) RenderError!void {
         if (!self.has_usage) return;
+        if (self.limits) |limits| {
+            if (limits.token_billing) return;
+        }
         if (self.cost_micents > 0) {
             var cb: [16]u8 = undefined;
             const ct = fmtCost(&cb, self.cost_micents) catch return error.NoSpaceLeft;
@@ -1199,4 +1202,29 @@ test "panels footer animates background spinner while running" {
         actual,
     );
     try std.testing.expect(first != second);
+}
+
+test "token billed providers do not accumulate fictional dollar costs" {
+    const alloc = std.testing.allocator;
+    var ps = try Panels.init(alloc, "Tokenator::free-test", "Tokenator");
+    defer ps.deinit();
+    ps.is_sub = true;
+    try ps.append(.{ .usage = .{
+        .in_tok = 1000,
+        .out_tok = 100,
+        .tot_tok = 1100,
+        .limits = .{ .token_billing = true, .available_tokens = 9000 },
+    } });
+    try std.testing.expectEqual(@as(u64, 0), ps.cost_micents);
+    try std.testing.expectEqual(@as(u64, 1000), ps.tot_in);
+    try std.testing.expectEqual(@as(u64, 9000), ps.limits.?.available_tokens.?);
+    try ps.append(.{ .usage = .{
+        .in_tok = 1000,
+        .out_tok = 100,
+        .tot_tok = 1100,
+        .limits = .{ .token_billing = true, .unavailable = "offline" },
+    } });
+    try std.testing.expectEqual(@as(u64, 0), ps.cost_micents);
+    try ps.setModel("Tokenator::other-free");
+    try std.testing.expect(ps.limits == null);
 }

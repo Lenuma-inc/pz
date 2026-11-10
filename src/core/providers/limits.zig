@@ -19,6 +19,10 @@ pub const KeyCreditLimit = struct {
 
 pub const Limits = struct {
     unavailable: ?[]const u8 = null,
+    token_billing: bool = false,
+    available_tokens: ?u64 = null,
+    token_balance: ?FreeRequests = null,
+    free_tokens: ?FreeRequests = null,
     key_credit_limit: ?KeyCreditLimit = null,
     free_requests: ?FreeRequests = null,
     windows: [2]?Window = .{ null, null },
@@ -87,7 +91,7 @@ pub fn parse(comptime provider: anytype, bytes: []const u8) !?Limits {
 /// Select the OpenRouter quota relevant to the active model, without inferring spending.
 pub fn formatForModel(limits: ?Limits, model: []const u8, buf: []u8) ![]const u8 {
     const value = limits orelse return format(null, buf);
-    if (value.unavailable != null or std.mem.indexOfScalar(u8, model, '/') == null) return format(limits, buf);
+    if (value.token_billing or value.unavailable != null or std.mem.indexOfScalar(u8, model, '/') == null) return format(limits, buf);
     if (std.mem.eql(u8, model, "openrouter/free") or std.mem.endsWith(u8, model, ":free")) {
         if (value.free_requests == null) return "limits: free quota not reported";
         return format(.{ .free_requests = value.free_requests }, buf);
@@ -105,10 +109,21 @@ pub fn format(limits: ?Limits, buf: []u8) ![]const u8 {
         try w.print("limits: {s}", .{reason});
         return w.buffered();
     }
+    if (value.available_tokens) |remaining| {
+        try w.print("key: {d} tokens left", .{remaining});
+        return w.buffered();
+    }
+    if (value.token_balance) |balance| {
+        try w.print("key: {d} used, {d} tokens left", .{ balance.used, balance.remaining });
+        if (value.free_tokens) |free| try w.print(" | free: {d} tokens left", .{free.remaining});
+        if (value.free_requests) |free| try w.print(" | {d}/{d} requests left (UTC day)", .{ free.remaining, free.limit });
+        return w.buffered();
+    }
     if (value.free_requests) |daily| {
         try w.print("free: {d}/{d} requests left (UTC day)", .{ daily.remaining, daily.limit });
         return w.buffered();
     }
+    if (value.token_billing) return "balance: not reported";
     try w.writeAll("used");
     for (value.windows) |entry| {
         const window = entry orelse continue;
@@ -143,4 +158,17 @@ test "quota percent property accepts exactly the finite valid range" {
             if (result) |n| return args.n >= 0 and args.n <= 100 and n == @as(f64, @floatFromInt(args.n)) else |err| return err == error.InvalidQuota and (args.n < 0 or args.n > 100);
         }
     }.prop, .{ .iterations = 500 });
+}
+
+test "token billing formats paid balance and selected free quotas without currency" {
+    var buf: [256]u8 = undefined;
+    const limits: Limits = .{
+        .token_billing = true,
+        .token_balance = .{ .used = 8771, .remaining = 2991229, .limit = 3000000 },
+        .free_tokens = .{ .used = 9940, .remaining = 3490060, .limit = 3500000 },
+        .free_requests = .{ .used = 3, .remaining = 57, .limit = 60 },
+    };
+    try std.testing.expectEqualStrings("key: 8771 used, 2991229 tokens left | free: 3490060 tokens left | 57/60 requests left (UTC day)", try formatForModel(limits, "Tokenator::vendor/free-model", &buf));
+    try std.testing.expectEqualStrings("key: 0 tokens left", try formatForModel(.{ .token_billing = true, .available_tokens = 0 }, "Dahl::vendor/model", &buf));
+    try std.testing.expectEqualStrings("limits: unavailable", try formatForModel(.{ .token_billing = true, .unavailable = "unavailable" }, "Dahl::vendor/model", &buf));
 }

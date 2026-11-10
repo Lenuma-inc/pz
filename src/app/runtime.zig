@@ -95,18 +95,18 @@ const ProviderRuntime = struct {
     }
 };
 
-const NativeProviderKind = core.providers.auth.Provider;
+const NativeProviderKind = enum { openai, openrouter, compatible };
 const native_provider_kind_map = std.StaticStringMap(NativeProviderKind).initComptime(.{
     .{ "openai", .openai },
     .{ "openrouter", .openrouter },
 });
 
 fn parseNativeProviderKind(provider: []const u8) ?NativeProviderKind {
-    return native_provider_kind_map.get(provider);
+    return native_provider_kind_map.get(provider) orelse if (core.providers.compatible.validName(provider)) .compatible else null;
 }
 
 fn nativeProviderName(kind: NativeProviderKind) []const u8 {
-    return core.providers.auth.providerName(kind);
+    return @tagName(kind);
 }
 
 fn firstConfiguredNativeProvider(
@@ -114,7 +114,7 @@ fn firstConfiguredNativeProvider(
     hooks: core.providers.auth.Hooks,
 ) !?NativeProviderKind {
     for ([_]NativeProviderKind{ .openai, .openrouter }) |kind| {
-        const provider = kind;
+        const provider: core.providers.auth.Provider = if (kind == .openai) .openai else .openrouter;
         var result = core.providers.auth.loadForProviderWithHooks(alloc, provider, hooks) catch |err| {
             if (err == error.AuthNotFound) continue;
             return err;
@@ -126,6 +126,7 @@ fn firstConfiguredNativeProvider(
 }
 
 fn modelProvider(model: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, model, "::")) |i| return model[0..i];
     if (std.mem.indexOfScalar(u8, model, '/') != null) return "openrouter";
     if (std.mem.startsWith(u8, model, "gpt-") or
         std.mem.startsWith(u8, model, "o1") or
@@ -158,13 +159,15 @@ fn parseSyslogTransport(s: []const u8) ?core.syslog.Transport {
 const NativeProviderRuntime = union(NativeProviderKind) {
     openai: core.providers.openai.Client,
     openrouter: core.providers.openrouter.Client,
+    compatible: core.providers.openai.Client,
 
     fn providerKind(self: *const NativeProviderRuntime) NativeProviderKind {
         return std.meta.activeTag(self.*);
     }
 
-    fn init(alloc: std.mem.Allocator, kind: NativeProviderKind, hooks: core.providers.auth.Hooks) !NativeProviderRuntime {
+    fn init(alloc: std.mem.Allocator, kind: NativeProviderKind, name: []const u8, hooks: core.providers.auth.Hooks) !NativeProviderRuntime {
         return switch (kind) {
+            .compatible => .{ .compatible = try core.providers.compatible.initClient(alloc, name, hooks) },
             inline else => |tag| @unionInit(NativeProviderRuntime, @tagName(tag), try @FieldType(NativeProviderRuntime, @tagName(tag)).init(alloc, hooks)),
         };
     }
@@ -190,14 +193,25 @@ const NativeProviderRuntime = union(NativeProviderKind) {
     fn expiredOAuthProvider(self: *NativeProviderRuntime) ?core.providers.auth.Provider {
         switch (self.*) {
             inline else => |*client, tag| {
-                if (client.auth.auth == .oauth and core.time.milliTimestamp() >= client.auth.auth.oauth.expires) return tag;
+                if (comptime tag != .compatible) {
+                    if (client.auth.auth == .oauth and core.time.milliTimestamp() >= client.auth.auth.oauth.expires) return if (tag == .openai) .openai else .openrouter;
+                }
             },
         }
         return null;
     }
 
     fn reloadAuth(self: *NativeProviderRuntime, alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks) !void {
-        const new_auth = try core.providers.auth.loadForProviderWithHooks(alloc, self.providerKind(), hooks);
+        if (self.* == .compatible) {
+            var next = try core.providers.compatible.initClient(alloc, self.compatible.compatible_name.?, hooks);
+            next.el = self.compatible.el;
+            next.cancel = self.compatible.cancel;
+            self.compatible.deinit();
+            self.compatible = next;
+            return;
+        }
+        const tag: core.providers.auth.Provider = if (self.* == .openai) .openai else .openrouter;
+        const new_auth = try core.providers.auth.loadForProviderWithHooks(alloc, tag, hooks);
         switch (self.*) {
             inline else => |*client| {
                 client.auth.deinit();
@@ -239,8 +253,17 @@ const NativeRouter = struct {
     fn prepare(self: *NativeRouter, model: []const u8) !void {
         const name = modelProvider(model) orelse return error.UnknownModelProvider;
         const kind = parseNativeProviderKind(name) orelse return error.UnknownProvider;
-        if (self.ready.* and self.slot.providerKind() == kind) return;
-        var next = try NativeProviderRuntime.init(self.alloc, kind, self.hooks);
+        if (self.ready.* and self.slot.providerKind() == kind) {
+            if (kind != .compatible) return;
+            if (std.mem.eql(u8, self.slot.compatible.compatible_name.?, name)) {
+                // A cached client must not keep using a provider removed by /logout.
+                var registry = try core.providers.compatible.load(self.alloc, self.hooks);
+                defer registry.deinit();
+                if (registry.find(name) == null) return error.UnknownCompatibleProvider;
+                return;
+            }
+        }
+        var next = try NativeProviderRuntime.init(self.alloc, kind, name, self.hooks);
         if (self.el) |el| next.setEventLoop(el);
         if (self.cancel) |cancel| next.setCancel(cancel);
         if (self.ready.*) self.slot.deinit();
@@ -260,7 +283,8 @@ const missing_openai_provider_msg = "openai credentials missing; set OPENAI_API_
 const unsupported_native_provider_msg = "unsupported provider; use openai or openrouter";
 const policy_denied_msg = "blocked by policy";
 
-fn missingProviderMsgForInitErr(_: NativeProviderKind, err: anyerror) []const u8 {
+fn missingProviderMsgForInitErr(kind: NativeProviderKind, err: anyerror) []const u8 {
+    if (kind == .compatible) return "compatible provider unavailable; run /login openai-compatibility";
     return switch (err) {
         error.AuthNotFound => missing_openai_provider_msg,
         else => missing_provider_msg,
@@ -2130,6 +2154,14 @@ fn execWithIoTuiHooks(
     } else if (std.mem.eql(u8, run_cmd.cfg.model, "default") and provider_name.len != 0) {
         model_name = defaultModelForProvider(provider_name);
     }
+    var compatible_model: ?[]u8 = null;
+    defer if (compatible_model) |value| alloc.free(value);
+    if (run_cmd.cfg.provider_cmd == null and parseNativeProviderKind(provider_name) == .compatible and
+        model_name.len > 0 and std.mem.indexOf(u8, model_name, "::") == null)
+    {
+        compatible_model = try std.fmt.allocPrint(alloc, "{s}::{s}", .{ provider_name, model_name });
+        model_name = compatible_model.?;
+    }
     run_cmd.runtime_provider = provider_name;
     run_cmd.runtime_model = model_name;
     run_cmd.thinking = run_cmd.thinking.forModel(model_name);
@@ -2279,7 +2311,7 @@ fn execWithIoTuiHooks(
         provider = &provider_rt.client.provider;
     } else {
         if (parseNativeProviderKind(provider_name)) |native_kind| {
-            if (NativeProviderRuntime.init(alloc, native_kind, hooks.auth())) |nr| {
+            if (NativeProviderRuntime.init(alloc, native_kind, provider_name, hooks.auth())) |nr| {
                 native_rt = nr;
                 has_native_rt = true;
                 if (el) |*e| native_rt.setEventLoop(e);
@@ -2939,6 +2971,7 @@ fn runTui(
     if (run_cmd.session == .auto) try saveSessionModel(store, sid.*, model, provider_label);
 
     if (run_cmd.thinking_note) |note| try ui.tr.infoText(note);
+    for (available.warnings.items) |warning| try ui.tr.infoText(warning);
 
     var startup_picker = run_cmd.session == .picker;
     if (startup_picker) {
@@ -2984,6 +3017,7 @@ fn runTui(
                 const refreshed = try availableModels(alloc, audit_hooks.auth(), false);
                 available.deinit(alloc);
                 available = refreshed;
+                for (available.warnings.items) |warning| try ui.tr.infoText(warning);
                 try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                 if (cfg_models == null) models_list = available.items();
                 if (tui_hooks.native) |router| {
@@ -3289,10 +3323,12 @@ fn runTui(
                                     },
                                     .login => {
                                         // Set env var hint in editor for API key entry
-                                        const env_var = provider_env_map.get(sel) orelse "GOOGLE_API_KEY";
-                                        const msg = try std.fmt.allocPrint(alloc, "Paste {s} API key (or set {s} env var):", .{ sel, env_var });
-                                        defer alloc.free(msg);
-                                        try ui.tr.infoText(msg);
+                                        if (!std.mem.eql(u8, sel, "openai-compatibility")) {
+                                            const env_var = provider_env_map.get(sel) orelse "API_KEY";
+                                            const msg = try std.fmt.allocPrint(alloc, "Paste {s} API key (or set {s} env var):", .{ sel, env_var });
+                                            defer alloc.free(msg);
+                                            try ui.tr.infoText(msg);
+                                        }
                                         // Set editor to /login <provider>; API key or OAuth can follow.
                                         const prompt_text = try std.fmt.allocPrint(alloc, "/login {s} ", .{sel});
                                         defer alloc.free(prompt_text);
@@ -3301,13 +3337,10 @@ fn runTui(
                                         ui.ov = null;
                                     },
                                     .logout => {
-                                        // Remove credentials for selected provider
-                                        if (parseAuthProvider(sel)) |prov| {
-                                            try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
-                                            const msg2 = try std.fmt.allocPrint(alloc, "logged out of {s}", .{core.providers.auth.providerName(prov)});
-                                            defer alloc.free(msg2);
-                                            try ui.tr.infoText(msg2);
-                                        }
+                                        try logoutProviderName(alloc, sel, audit_hooks.auth());
+                                        const msg2 = try std.fmt.allocPrint(alloc, "logged out of {s}", .{sel});
+                                        defer alloc.free(msg2);
+                                        try ui.tr.infoText(msg2);
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
@@ -3414,7 +3447,7 @@ fn runTui(
                                     ui.ed.cur = ui.ed.buf.items.len;
                                 }
                                 ui.picker = null;
-                                ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
+                                ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                                 try ui.updatePreview();
                                 try ui.draw(out);
                                 continue;
@@ -3537,9 +3570,36 @@ fn runTui(
                                 try ui.draw(out);
                                 continue;
                             }
+                            if (cmd == .select_compatible_login) {
+                                if (live_turn.isRunning()) {
+                                    try ui.tr.infoText("Wait for the current turn before adding a provider.");
+                                    try ui.draw(out);
+                                    continue;
+                                }
+                                const added = runCompatibleLogin(alloc, &ui, out, &reader, audit_hooks.auth()) catch |err| failed: {
+                                    try ui.tr.infoText(@errorName(err));
+                                    break :failed false;
+                                };
+                                if (added) {
+                                    const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+                                    available.deinit(alloc);
+                                    available = refreshed;
+                                    for (available.warnings.items) |warning| try ui.tr.infoText(warning);
+                                    try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
+                                    if (cfg_models == null) models_list = available.items();
+                                    ui.arg_src = null;
+                                    ui.picker = null;
+                                    if (tui_hooks.native) |router| {
+                                        if (router.ready.* and router.slot.providerKind() == .compatible) try router.slot.reloadAuth(alloc, audit_hooks.auth());
+                                    }
+                                    try ui.tr.infoText("Provider saved. Select it with /provider or choose a model with /model.");
+                                }
+                                try ui.draw(out);
+                                continue;
+                            }
                             if (cmd == .select_login) {
-                                var ov = tui_overlay.Overlay.init(&provider_args, 0);
-                                ov.title = "Login (set API key)";
+                                var ov = tui_overlay.Overlay.init(&login_args, 0);
+                                ov.title = "Login";
                                 ov.kind = .login;
                                 ui.ov = ov;
                                 try ui.draw(out);
@@ -3548,7 +3608,7 @@ fn runTui(
                             if (cmd == .select_logout) {
                                 const providers = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
                                 defer alloc.free(providers);
-                                if (!try showLogoutOverlay(alloc, &ui, providers)) {
+                                if (!try showLogoutOverlay(alloc, &ui, providers, audit_hooks.auth())) {
                                     try ui.tr.infoText("no providers logged in");
                                 }
                                 try ui.draw(out);
@@ -3559,6 +3619,7 @@ fn runTui(
                                     const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
                                     available.deinit(alloc);
                                     available = refreshed;
+                                    for (available.warnings.items) |warning| try ui.tr.infoText(warning);
                                     try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                                     if (cfg_models == null) models_list = available.items();
                                     if (model.len == 0) {
@@ -3754,7 +3815,7 @@ fn runTui(
                             } else if (tab_text.len > 0) {
                                 try completeFilePath(alloc, &ui);
                             }
-                            ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
+                            ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                             try ui.updatePreview();
                             try ui.draw(out);
                         },
@@ -3770,7 +3831,7 @@ fn runTui(
                         },
                         .none => {
                             if (pre) |p| alloc.free(p);
-                            ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
+                            ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                             try ui.updatePreview();
                             try ui.draw(out);
                         },
@@ -3911,7 +3972,7 @@ fn runTui(
                         ui.ed.insertSlice(text) catch {
                             try ui.tr.infoText("[paste: invalid UTF-8]");
                         };
-                        ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
+                        ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                         try ui.updatePreview();
                         try ui.draw(out);
                     }
@@ -4931,6 +4992,16 @@ fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth
     return std.fmt.allocPrint(alloc, "API key saved for {s}\n", .{auth_req.prov_name});
 }
 
+fn logoutProviderName(alloc: std.mem.Allocator, name: []const u8, hooks: core.providers.auth.Hooks) !void {
+    if (parseAuthProvider(name)) |provider| {
+        return core.providers.auth.logoutWithHooks(alloc, provider, hooks);
+    }
+    core.providers.compatible.remove(alloc, name, hooks) catch |err| switch (err) {
+        error.UnknownCompatibleProvider => return error.UnknownProvider,
+        else => return err,
+    };
+}
+
 fn runRpcLogout(
     alloc: std.mem.Allocator,
     req: RpcReq,
@@ -4944,11 +5015,16 @@ fn runRpcLogout(
         std.mem.trim(u8, req.arg orelse req.text orelse "", " \t");
 
     if (provider_name.len != 0) {
-        const prov = parseAuthProvider(provider_name) orelse return error.UnknownProvider;
-        try core.providers.auth.logoutWithHooks(alloc, prov, hooks);
-        return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
+        try logoutProviderName(alloc, provider_name, hooks);
+        return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{provider_name});
     }
 
+    var registry = try core.providers.compatible.load(alloc, hooks);
+    defer registry.deinit();
+    if (registry.find(active_name) != null) {
+        try logoutProviderName(alloc, active_name, hooks);
+        return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{active_name});
+    }
     const logged_in = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
     defer alloc.free(logged_in);
     if (logged_in.len == 0) return alloc.dupe(u8, "no providers logged in\n");
@@ -4973,6 +5049,7 @@ const CmdRes = enum {
     select_settings,
     select_fork,
     select_login,
+    select_compatible_login,
     select_logout,
     select_lsp_download,
 };
@@ -5162,8 +5239,15 @@ fn handleSlashCommand(
             if (arg.len == 0) return .select_model;
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
             try runtimeCtlAudit(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
-            try replaceOwnedText(alloc, model, model_owned, arg);
-            if (modelProvider(arg)) |name| try replaceOwnedText(alloc, provider, provider_owned, name);
+            var registry = try core.providers.compatible.load(alloc, audit_hooks.auth());
+            defer registry.deinit();
+            const qualified = if (registry.find(provider.*) != null and std.mem.indexOf(u8, arg, "::") == null)
+                try std.fmt.allocPrint(alloc, "{s}::{s}", .{ provider.*, arg })
+            else
+                try alloc.dupe(u8, arg);
+            defer alloc.free(qualified);
+            try replaceOwnedText(alloc, model, model_owned, qualified);
+            if (modelProvider(qualified)) |name| try replaceOwnedText(alloc, provider, provider_owned, name);
             const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "provider",
@@ -5182,7 +5266,9 @@ fn handleSlashCommand(
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
             try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
             try replaceOwnedText(alloc, provider, provider_owned, arg);
-            if (parseNativeProviderKind(arg) != null) {
+            var registry = try core.providers.compatible.load(alloc, audit_hooks.auth());
+            defer registry.deinit();
+            if (native_provider_kind_map.has(arg) or registry.find(arg) != null) {
                 const current = modelProvider(model.*);
                 if (current == null or !std.mem.eql(u8, current.?, arg)) {
                     try replaceOwnedText(alloc, model, model_owned, defaultModelForProvider(arg));
@@ -5533,6 +5619,7 @@ fn handleSlashCommand(
         },
         .login => {
             if (arg.len == 0) return .select_login;
+            if (std.mem.eql(u8, arg, "openai-compatibility") or std.mem.eql(u8, arg, "openai-compatibilty")) return .select_compatible_login;
             const req = parseAuthReq(arg, null) catch {
                 const prov_name = if (std.mem.indexOfAny(u8, arg, " \t")) |i| arg[0..i] else arg;
                 try writeTextLine(alloc, out, "unknown provider: {s}\n", .{prov_name});
@@ -5548,20 +5635,23 @@ fn handleSlashCommand(
         },
         .logout => {
             if (arg.len != 0) {
-                const prov = parseAuthProvider(arg) orelse {
-                    try writeTextLine(alloc, out, "unknown provider: {s}\n", .{arg});
-                    return .handled;
-                };
-                core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth()) catch |err| {
+                logoutProviderName(alloc, arg, audit_hooks.auth()) catch |err| {
+                    if (err == error.UnknownProvider) {
+                        try writeTextLine(alloc, out, "unknown provider: {s}\n", .{arg});
+                        return .handled;
+                    }
                     const em = try report.cli(alloc, "logout", err);
                     defer alloc.free(em);
                     try out.writeAll(em);
                     return .handled;
                 };
-                try writeTextLine(alloc, out, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
+                try writeTextLine(alloc, out, "logged out of {s}\n", .{arg});
                 return .handled;
             }
 
+            var compatible_registry = try core.providers.compatible.load(alloc, audit_hooks.auth());
+            defer compatible_registry.deinit();
+            if (compatible_registry.entries.len > 0) return .select_logout;
             const logged_in = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
             defer alloc.free(logged_in);
             if (logged_in.len == 0) {
@@ -6912,6 +7002,10 @@ fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, hom
 const ModelList = struct {
     ids: std.ArrayList([]const u8) = .empty,
     router_catalog: ?core.providers.openrouter.Catalog = null,
+    compatible_arena: ?std.heap.ArenaAllocator = null,
+    compatible_windows: std.StringHashMapUnmanaged(u64) = .empty,
+    provider_names: std.ArrayList([]const u8) = .empty,
+    warnings: std.ArrayList([]const u8) = .empty,
 
     fn items(self: *const ModelList) []const []const u8 {
         return self.ids.items;
@@ -6919,6 +7013,9 @@ const ModelList = struct {
 
     fn deinit(self: *ModelList, alloc: std.mem.Allocator) void {
         if (self.router_catalog) |*catalog| catalog.deinit(alloc);
+        self.provider_names.deinit(alloc);
+        self.warnings.deinit(alloc);
+        if (self.compatible_arena) |*arena| arena.deinit();
         self.ids.deinit(alloc);
     }
 };
@@ -6937,6 +7034,12 @@ fn mergeContextWindows(
             result.value_ptr.* = entry.value_ptr.*;
         }
     }
+    var compatible_it = models.compatible_windows.iterator();
+    while (compatible_it.next()) |entry| {
+        const result = try windows.getOrPut(alloc, entry.key_ptr.*);
+        if (!result.found_existing) result.key_ptr.* = try alloc.dupe(u8, entry.key_ptr.*);
+        result.value_ptr.* = entry.value_ptr.*;
+    }
     var it = overrides.iterator();
     while (it.next()) |entry| {
         const result = try windows.getOrPut(alloc, entry.key_ptr.*);
@@ -6948,6 +7051,7 @@ fn mergeContextWindows(
 fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool) !ModelList {
     var result = ModelList{};
     errdefer result.deinit(alloc);
+    try result.provider_names.appendSlice(alloc, &core.providers.auth.provider_names);
     var enabled = external;
     if (!external) {
         if (core.providers.auth.loadForProviderWithHooks(alloc, .openai, hooks)) |loaded| {
@@ -6972,6 +7076,27 @@ fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, e
             try result.ids.appendSlice(alloc, catalog.ids);
         } else |err| {
             if (err != error.AuthNotFound) return err;
+        }
+    }
+    if (!external) {
+        result.compatible_arena = std.heap.ArenaAllocator.init(alloc);
+        const ar = result.compatible_arena.?.allocator();
+        var registry = try core.providers.compatible.load(alloc, hooks);
+        defer registry.deinit();
+        for (registry.entries) |entry| {
+            try result.provider_names.append(alloc, try ar.dupe(u8, entry.name));
+            const models = core.providers.compatible.fetchModels(ar, entry, hooks.ca_file) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                try result.warnings.append(alloc, try std.fmt.allocPrint(ar, "Provider {s}: model catalog unavailable ({s})", .{ entry.name, @errorName(err) }));
+                continue;
+            };
+            for (models) |model| {
+                const id = try std.fmt.allocPrint(ar, "{s}::{s}", .{ entry.name, model.id });
+                try result.ids.append(alloc, id);
+                if (model.context_length orelse model.context_window orelse model.max_model_len) |length| {
+                    if (length > 0) try result.compatible_windows.put(ar, id, length);
+                }
+            }
         }
     }
     return result;
@@ -7013,6 +7138,7 @@ test "OpenAI credentials unlock picker and native backend together" {
 }
 
 const provider_args = core.providers.auth.provider_names;
+const login_args = [_][]const u8{ "openai", "openrouter", "openai-compatibility" };
 const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill", "web", "patch", "todo", "github" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
@@ -7108,12 +7234,83 @@ fn resolveArgSrc(text: []const u8, models: []const []const u8) ?[]const []const 
     const kind = arg_src_kind_map.get(cmd) orelse return null;
     return switch (kind) {
         .model => models,
-        .provider, .auth_provider => &provider_args,
+        .provider => &provider_args,
+        .auth_provider => if (std.mem.eql(u8, cmd, "login")) &login_args else &provider_args,
         .tools => &tool_args,
         .mcp => &.{"list"},
         .lsp => &.{ "list", "download" },
         .bg => &bg_args,
     };
+}
+
+fn resolveArgSrcWithProviders(text: []const u8, models: []const []const u8, providers: []const []const u8) ?[]const []const u8 {
+    if (std.mem.startsWith(u8, text, "/provider ") or std.mem.startsWith(u8, text, "/logout ")) return providers;
+    return resolveArgSrc(text, models);
+}
+
+/// Prompt credentials in a masked modal, never in the transcript or editor history.
+fn runCompatibleLogin(alloc: std.mem.Allocator, ui: *tui_harness.Ui, out: *std.Io.Writer, reader: *tui_input.Reader, hooks: core.providers.auth.Hooks) !bool {
+    if (hooks.lock.auth) return error.AuthStoreLocked;
+    var fields: [3]?[]u8 = .{ null, null, null };
+    defer for (fields) |field| {
+        if (field) |value| {
+            @memset(value, 0);
+            alloc.free(value);
+        }
+    };
+    defer {
+        if (ui.ov) |*ov| ov.deinit(alloc);
+        ui.ov = null;
+    }
+    const labels = [_][]const u8{ "Provider name", "API base URL (https://host/v1)", "API key" };
+    for (labels, 0..) |label, index| {
+        var editor = tui_editor.Editor.init(alloc);
+        defer editor.deinit();
+        defer if (index == 2) @memset(editor.buf.items, 0);
+        while (true) {
+            const masked = if (index == 2) try alloc.alloc(u8, editor.text().len) else null;
+            defer if (masked) |value| alloc.free(value);
+            if (masked) |value| @memset(value, '*');
+            var ov = tui_overlay.Overlay.init(&.{}, 0);
+            ov.title = "Add OpenAI-compatible provider";
+            ov.kind = .login;
+            ov.hint = "Enter continue, Esc cancel";
+            ov.input_label = label;
+            ov.input_text = if (masked) |value| value else editor.text();
+            ov.input_cursor = true;
+            ui.ov = ov;
+            try ui.draw(out);
+            switch (reader.next()) {
+                .key => |key| {
+                    if (key == .esc or key == .ctrl_c) return false;
+                    const action = try editor.apply(key);
+                    if (action == .submit) {
+                        const text = std.mem.trim(u8, editor.text(), " \t\r\n");
+                        if (text.len == 0) continue;
+                        if (index == 0 and !core.providers.compatible.validName(text)) continue;
+                        fields[index] = try alloc.dupe(u8, text);
+                        break;
+                    }
+                },
+                .paste => |text| try editor.insertSlice(text),
+                .resize => {
+                    if (tui_term.size(std.posix.STDOUT_FILENO)) |size| try ui.resize(size.w, size.h);
+                },
+                .err => return false,
+                else => {},
+            }
+        }
+    }
+    const base_url = try core.providers.compatible.normalizeBaseUrl(alloc, fields[1].?);
+    defer alloc.free(base_url);
+    const entry = core.providers.compatible.Entry{ .name = fields[0].?, .base_url = base_url, .api_key = fields[2].? };
+    try core.providers.compatible.validate(entry);
+    // Validate credentials/catalog before committing the account-owned settings.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    _ = try core.providers.compatible.fetchModels(arena.allocator(), entry, hooks.ca_file);
+    try core.providers.compatible.save(alloc, entry, hooks);
+    return true;
 }
 
 fn cycleModel(alloc: std.mem.Allocator, cur: []const u8, model_owned: *?[]u8, cycle: []const []const u8) ![]const u8 {
@@ -7791,9 +7988,11 @@ fn clearQueueSlice(alloc: std.mem.Allocator, queue: *std.ArrayListUnmanaged([]u8
     queue.items.len = 0;
 }
 
-fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: []const core.providers.auth.Provider) !bool {
-    if (providers.len == 0) return false;
-    const names = try alloc.alloc([]u8, providers.len);
+fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: []const core.providers.auth.Provider, hooks: core.providers.auth.Hooks) !bool {
+    var registry = try core.providers.compatible.load(alloc, hooks);
+    defer registry.deinit();
+    if (providers.len + registry.entries.len == 0) return false;
+    const names = try alloc.alloc([]u8, providers.len + registry.entries.len);
     for (names) |*n| n.len = 0;
     errdefer {
         for (names) |n| if (n.len > 0) alloc.free(n);
@@ -7801,6 +8000,9 @@ fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: [
     }
     for (providers, 0..) |p, i| {
         names[i] = try alloc.dupe(u8, core.providers.auth.providerName(p));
+    }
+    for (registry.entries, providers.len..) |entry, i| {
+        names[i] = try alloc.dupe(u8, entry.name);
     }
     ui.ov = tui_overlay.Overlay.initDyn(names, "Logout", .logout);
     return true;
@@ -16136,4 +16338,56 @@ test "model context windows use explicit overrides and registry without guessing
     try std.testing.expectEqual(@as(u64, 272000), modelCtxWindow("gpt-6.1-sol", null));
     try std.testing.expectEqual(@as(u64, 500000), modelCtxWindow("gpt-6.1-terra", null));
     try std.testing.expectEqual(@as(u64, 0), modelCtxWindow("unknown-model", null));
+}
+
+test "named compatible routing switches endpoints even when backend kinds match" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    const hooks = core.providers.auth.Hooks{ .home_override = home };
+    try core.providers.compatible.save(alloc, .{ .name = "first", .base_url = "https://first.example/v1", .api_key = "first-test-key" }, hooks);
+    try core.providers.compatible.save(alloc, .{ .name = "second", .base_url = "https://second.example/v1", .api_key = "second-test-key" }, hooks);
+    var slot: NativeProviderRuntime = undefined;
+    var ready = false;
+    defer if (ready) slot.deinit();
+    var router = NativeRouter{ .alloc = alloc, .hooks = hooks, .slot = &slot, .ready = &ready };
+    try router.prepare("first::vendor/shared-model");
+    try std.testing.expectEqualStrings("first", slot.compatible.compatible_name.?);
+    try std.testing.expectEqualStrings("first-test-key", slot.compatible.auth.auth.api_key);
+    try router.prepare("second::vendor/shared-model");
+    try std.testing.expectEqualStrings("second", slot.compatible.compatible_name.?);
+    try std.testing.expectEqualStrings("https://second.example/v1/responses", slot.compatible.endpoint.?);
+    try std.testing.expectEqualStrings("second-test-key", slot.compatible.auth.auth.api_key);
+    try std.testing.expectEqualStrings("second", modelProvider("second::vendor/shared-model").?);
+    const names = [_][]const u8{ "openai", "openrouter", "first", "second" };
+    const suggestions = resolveArgSrcWithProviders("/provider ", &.{}, &names).?;
+    try std.testing.expectEqualStrings("second", suggestions[3]);
+}
+
+test "logout picker lists each configured compatible provider alongside native accounts" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    const hooks = core.providers.auth.Hooks{ .home_override = home };
+    try core.providers.compatible.save(alloc, .{ .name = "Tokenator", .base_url = "https://api.tokenator.cloud/v1", .api_key = "test-tokenator" }, hooks);
+    try core.providers.compatible.save(alloc, .{ .name = "Dahl", .base_url = "https://inference.dahl.global/v1", .api_key = "test-dahl" }, hooks);
+    var ui = try tui_harness.Ui.init(alloc, 80, 24, "", "");
+    defer ui.deinit();
+    try std.testing.expect(try showLogoutOverlay(alloc, &ui, &.{.openai}, hooks));
+    try std.testing.expectEqual(@as(usize, 3), ui.ov.?.items.len);
+    try std.testing.expectEqualStrings("openai", ui.ov.?.items[0]);
+    try std.testing.expectEqualStrings("Tokenator", ui.ov.?.items[1]);
+    try std.testing.expectEqualStrings("Dahl", ui.ov.?.items[2]);
+    const completion = resolveArgSrcWithProviders("/logout ", &.{}, ui.ov.?.items).?;
+    try std.testing.expectEqualStrings("Dahl", completion[2]);
+    try logoutProviderName(alloc, "Tokenator", hooks);
+    var registry = try core.providers.compatible.load(alloc, hooks);
+    defer registry.deinit();
+    try std.testing.expect(registry.find("Tokenator") == null);
+    try std.testing.expect(registry.find("Dahl") != null);
+    try std.testing.expectError(error.UnknownProvider, logoutProviderName(alloc, "missing", hooks));
 }

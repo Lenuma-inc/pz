@@ -197,6 +197,7 @@ pub fn retryLoop(
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
     session_id: ?[]const u8,
     cancel: ?*providers.CancelPoll,
+    redirect_behavior: std.http.Client.Request.RedirectBehavior,
 ) !void {
     // Proactive refresh: check token expiry before first attempt
     try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
@@ -208,6 +209,7 @@ pub fn retryLoop(
         if (cancel) |c| if (c.isCanceled()) return error.Canceled;
 
         stream.req = try http.request(.POST, uri, .{
+            .redirect_behavior = redirect_behavior,
             .extra_headers = hdrs.items,
             .keep_alive = false,
             // SSE streams must not be compressed: we read lines incrementally
@@ -435,6 +437,8 @@ pub fn SseClient(comptime Cfg: type) type {
 
         alloc: std.mem.Allocator,
         auth: auth_mod.Result,
+        endpoint: ?[]const u8 = null,
+        compatible_name: ?[]const u8 = null,
         http: std.http.Client,
         ca_file: ?[]u8,
         el: ?*EventLoop = null,
@@ -451,6 +455,26 @@ pub fn SseClient(comptime Cfg: type) type {
                 .auth = auth_res,
                 .http = .{ .allocator = alloc, .io = sys.io },
                 .ca_file = ca_dup,
+            };
+        }
+
+        /// Initialize an account-configured Responses endpoint without OpenAI credentials.
+        pub fn initCompatible(alloc: std.mem.Allocator, hooks: auth_mod.Hooks, name: []const u8, base_url: []const u8, key: []const u8) !Self {
+            if (hooks.lock.auth) return error.AuthStoreLocked;
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            errdefer arena.deinit();
+            const ar = arena.allocator();
+            const access = try ar.dupe(u8, key);
+            const endpoint = try std.fmt.allocPrint(ar, "{s}/responses", .{std.mem.trimEnd(u8, base_url, "/")});
+            const owned_name = try ar.dupe(u8, name);
+            const ca_file = if (hooks.ca_file) |path| try alloc.dupe(u8, path) else null;
+            return .{
+                .alloc = alloc,
+                .auth = .{ .arena = arena, .auth = .{ .api_key = access } },
+                .endpoint = endpoint,
+                .compatible_name = owned_name,
+                .http = .{ .allocator = alloc, .io = sys.io },
+                .ca_file = ca_file,
             };
         }
 
@@ -476,6 +500,7 @@ pub fn SseClient(comptime Cfg: type) type {
             errdefer {
                 if (stream.quota_key) |key| self.alloc.free(key);
                 if (stream.quota_ca_file) |path| self.alloc.free(path);
+                if (stream.tokenator_model) |model| self.alloc.free(model);
                 stream.arena.deinit();
                 self.alloc.destroy(stream);
             }
@@ -490,8 +515,25 @@ pub fn SseClient(comptime Cfg: type) type {
                 try stream.initQuotaAuth(key, self.ca_file);
             }
             const is_oauth = self.auth.auth == .oauth;
-            const body = try Cfg.buildBody(ar, req, is_oauth);
-            const uri = Cfg.apiUri(is_oauth);
+            var wire_req = req;
+            if (self.compatible_name) |name| {
+                const prefix = try std.fmt.allocPrint(ar, "{s}::", .{name});
+                if (!std.mem.startsWith(u8, req.model, prefix)) return error.CompatibleModelProviderMismatch;
+                wire_req.model = req.model[prefix.len..];
+                if (wire_req.model.len == 0) return error.InvalidCompatibleModel;
+            }
+            if (self.endpoint) |endpoint| {
+                if (@import("tokenator.zig").isEndpoint(endpoint)) {
+                    const key = self.auth.auth.api_key;
+                    try stream.initQuotaAuth(key, self.ca_file);
+                    stream.tokenator_model = try self.alloc.dupe(u8, wire_req.model);
+                } else if (@import("dahl.zig").isEndpoint(endpoint)) {
+                    try stream.initQuotaAuth(self.auth.auth.api_key, self.ca_file);
+                    stream.dahl_quota = true;
+                }
+            }
+            const body = try Cfg.buildBody(ar, wire_req, is_oauth);
+            const uri = if (self.endpoint) |endpoint| try std.Uri.parse(endpoint) else Cfg.apiUri(is_oauth);
             var session_id: ?[]const u8 = null;
             if (comptime Cfg.provider_tag == auth_mod.Provider.openai) {
                 if (is_oauth) session_id = req.prompt_cache_key;
@@ -513,10 +555,10 @@ pub fn SseClient(comptime Cfg: type) type {
             var hdrs = try Cfg.buildAuthHeaders(&self.auth, ar);
 
             var slp = RealSleeper{ .el = self.el };
-            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, session_id, self.cancel);
+            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, session_id, self.cancel, if (self.endpoint != null) .unhandled else @enumFromInt(3));
             errdefer stream.req.deinit();
 
-            stream.limits = try @import("limits.zig").parse(Cfg.provider_tag, stream.response.?.head.bytes);
+            stream.limits = if (self.endpoint != null) null else try @import("limits.zig").parse(Cfg.provider_tag, stream.response.?.head.bytes);
 
             if (stream.response.?.head.status != .ok) {
                 try formatErrBody(stream, ar, extractJsonErrMsg);
@@ -565,6 +607,8 @@ pub fn SseStream(comptime Cfg: type) type {
         // Provider-specific fields
         quota_key: ?[]const u8 = null,
         quota_ca_file: ?[]const u8 = null,
+        tokenator_model: ?[]const u8 = null,
+        dahl_quota: bool = false,
         ext: Cfg.ExtFields,
 
         const stream_vt = providers.Stream.Vt{
@@ -598,6 +642,7 @@ pub fn SseStream(comptime Cfg: type) type {
             Cfg.ext_deinit(self, alloc);
             if (self.quota_key) |key| alloc.free(key);
             if (self.quota_ca_file) |path| alloc.free(path);
+            if (self.tokenator_model) |model| alloc.free(model);
             self.tool_name.deinit(alloc);
             self.tool_args.deinit(alloc);
             self.req.deinit();
