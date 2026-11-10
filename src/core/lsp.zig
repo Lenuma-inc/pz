@@ -385,6 +385,7 @@ pub const Manager = struct {
         const value = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
         defer value.deinit();
         try validate(value.value);
+        if (value.value == .bool and !value.value.bool) return manager;
         try manager.definitions.appendSlice(alloc, &servers);
         if (value.value == .object) {
             manager.config = try std.json.parseFromSlice(ConfigMap, alloc, raw, .{ .allocate = .alloc_always });

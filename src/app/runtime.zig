@@ -2280,10 +2280,14 @@ fn execWithIoTuiHooks(
         .egress = .{ .egress = .{ .rules = if (pol.enforced()) pol.resolved.doc.rules else &.{.{ .pattern = "runtime/web/*", .effect = .allow }} }, .allow_cross_host = true, .allow_cross_port = true },
     });
     defer tools_rt.deinit();
+    tools_rt.skills_enabled = run_cmd.cfg.skills;
+    tools_rt.exa_enabled = run_cmd.cfg.exa;
     if (!pol.enforced()) {
         try tools_rt.configureLsp(run_cmd.cfg.lsp_json orelse "{}");
-        try tools_rt.configureMcp(run_cmd.cfg.mcp_servers_json orelse "{}");
-    } else if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
+        if (run_cmd.cfg.mcp) try tools_rt.configureMcp(run_cmd.cfg.mcp_servers_json orelse "{}");
+    } else if (run_cmd.cfg.mcp) {
+        if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
+    }
 
     var sid: []u8 = &.{};
     var session_dir_path: ?[]u8 = null;
@@ -5171,7 +5175,7 @@ fn handleSlashCommand(
     });
 
     const resolved = cmd_map.get(cmd) orelse {
-        switch (try loadSlashSkill(alloc, cmd, home)) {
+        switch (if (tools_rt.skills_enabled) try loadSlashSkill(alloc, cmd, home) else SlashSkill.missing) {
             .allowed => {
                 if (pol.allowsCmd(cmd)) return .unhandled;
                 try writeTextLine(alloc, out, "blocked by policy: /{s}\n", .{cmd});
@@ -7477,6 +7481,36 @@ test "compact startup keeps context and twenty skills visible at 80x24" {
     try std.testing.expect(std.mem.indexOf(u8, text, "This long description") == null);
 }
 
+test "startup hides disabled LSP section" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(home);
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+    var rt = core.tools.builtin.Runtime.init(.{ .alloc = a });
+    defer rt.deinit();
+    try rt.configureLsp("false");
+    rt.skills_enabled = false;
+    for ([_]?*core.tools.builtin.Runtime{ null, &rt }) |runtime| {
+        var ui = try tui_harness.Ui.init(a, 80, 40, "m", "p");
+        defer ui.deinit();
+        try showStartup(a, std.testing.io, &ui, home, runtime);
+        var screen = try @import("../modes/tui/vscreen.zig").VScreen.init(a, 80, 40);
+        defer screen.deinit();
+        var bytes: [32768]u8 = undefined;
+        var output = @import("../modes/tui/test_buf.zig").TestBuf.init(&bytes);
+        try ui.draw(&output);
+        screen.feed(output.view());
+        for (0..40) |row| {
+            const line = try screen.rowText(a, row);
+            defer a.free(line);
+            try std.testing.expect(std.mem.indexOf(u8, line, "LSP") == null);
+        }
+    }
+}
+
 fn lspDownloadOverlay() tui_overlay.Overlay {
     var overlay = tui_overlay.Overlay.init(&@import("../core/lsp.zig").download_labels, 0);
     overlay.kind = .lsp_download;
@@ -7527,7 +7561,10 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, home: 
     }
 
     // Skills section
-    const skills = try discoverSkills(alloc, home);
+    const skills = if (tools_rt == null or tools_rt.?.skills_enabled)
+        try discoverSkills(alloc, home)
+    else
+        try alloc.alloc(core_skill.SkillInfo, 0);
     defer core_skill.freeSkills(alloc, skills);
     if (skills.len > 0) {
         try ui.tr.styledText("", .{}); // blank line
@@ -7544,9 +7581,9 @@ fn showStartup(alloc: std.mem.Allocator, io: std.Io, ui: *tui_harness.Ui, home: 
     try showMcpStartup(alloc, ui, if (tools_rt) |rt| rt.mcp else null);
 
     const lsp_summary = if (tools_rt) |rt|
-        if (rt.lsp) |*manager| try manager.summaryAlloc() else try rt.lspReport()
+        if (rt.lsp) |*manager| try manager.summaryAlloc() else null
     else
-        try alloc.dupe(u8, "LSP disabled.");
+        null;
     if (lsp_summary) |summary| {
         defer alloc.free(summary);
         try ui.tr.styledText("", .{});

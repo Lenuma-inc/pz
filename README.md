@@ -315,6 +315,20 @@ URL and extracts readable Markdown when given a `url`.
 Search works without an API key; set `EXA_API_KEY` to use your own Exa key.
 Search results are untrusted; use `web` with a result URL to read a page.
 
+Integrations are enabled by default. Set these fields in `~/.pz/settings.json`
+(or project `.pz/settings.json`) to disable them independently:
+
+```json
+{"exa": false, "mcp": false, "lsp": false, "skills": false}
+```
+
+`skills: false` disables skill discovery, the `skill` tool, and slash skill calls.
+`exa: false` disables Exa search while keeping URL fetching available. `mcp: false`
+prevents configured MCP servers from starting and hides their tools. `lsp: false`
+disables language servers and hides the LSP tool. Existing `mcpServers` settings
+can remain in the file; set `mcp` back to `true` to re-enable them. To re-enable
+LSP, set `lsp` to `true` for defaults or restore its server settings object.
+
 Fetching returns readable Markdown: article text, links, tables, numbered lists
 and code. Navigation, scripts and sidebar noise are removed. Article JSON becomes
 labelled title/body text; other JSON stays compact. RSS/Atom feeds become readable

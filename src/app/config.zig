@@ -93,6 +93,9 @@ pub const Config = struct {
     policy_lock: core.policy.Lock = .{},
     audit_overflow: core.policy.AuditOverflow = .drop_oldest,
     syslog_fwd: ?SyslogFwd = null,
+    skills: bool = true,
+    exa: bool = true,
+    mcp: bool = true,
     mcp_servers_json: ?[]u8 = null,
     lsp_json: ?[]u8 = null,
     context_windows: std.StringHashMapUnmanaged(u64) = .empty,
@@ -238,6 +241,9 @@ const SettingsCfg = struct {
     provider_cmd: ?[]const u8 = null,
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
+    skills: ?bool = null,
+    exa: ?bool = null,
+    mcp: ?bool = null,
     mcpServers: ?std.json.Value = null,
     lsp: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
@@ -336,6 +342,9 @@ pub fn discover(
     if (!out.policy_lock.cfg) {
         if (try loadFile(alloc, io, dir, parsed.cfg)) |file_cfg| {
             defer file_cfg.deinit();
+            if (file_cfg.value.skills) |enabled| out.skills = enabled;
+            if (file_cfg.value.exa) |enabled| out.exa = enabled;
+            if (file_cfg.value.mcp) |enabled| out.mcp = enabled;
             if (file_cfg.value.contextWindows) |value| try setContextWindows(alloc, &out, value);
             if (file_cfg.value.lsp) |value| try setLsp(alloc, &out, value);
             if (file_cfg.value.mcpServers) |value| try setMcp(alloc, &out, value);
@@ -440,6 +449,9 @@ const FileCfg = struct {
     provider_cmd: ?[]const u8 = null,
     caFile: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
+    skills: ?bool = null,
+    exa: ?bool = null,
+    mcp: ?bool = null,
     mcpServers: ?std.json.Value = null,
     lsp: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
@@ -525,6 +537,9 @@ fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
 }
 
 fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) !void {
+    if (pi.skills) |enabled| cfg.skills = enabled;
+    if (pi.exa) |enabled| cfg.exa = enabled;
+    if (pi.mcp) |enabled| cfg.mcp = enabled;
     if (pi.contextWindows) |value| try setContextWindows(alloc, cfg, value);
     if (pi.lsp) |value| try setLsp(alloc, cfg, value);
     if (pi.mcpServers) |value| try setMcp(alloc, cfg, value);
@@ -1159,4 +1174,22 @@ test "context window overrides validate values and own model names" {
         try std.testing.expectError(error.InvalidContextWindow, setContextWindows(alloc, &cfg, bad.value));
         try std.testing.expectEqual(@as(u64, 131072), cfg.context_windows.get("gpt-6.1-sol").?);
     }
+}
+
+test "integration switches load from project and global settings" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeAutoCfg(tmp.dir, "{\"skills\":false,\"exa\":false,\"mcp\":false,\"lsp\":false}");
+    var cfg = try discover(a, std.testing.io, tmp.dir, try args.parse(&.{}), .{});
+    defer cfg.deinit(a);
+    try std.testing.expect(!cfg.skills);
+    try std.testing.expect(!cfg.exa);
+    try std.testing.expect(!cfg.mcp);
+    try std.testing.expectEqualStrings("false", cfg.lsp_json.?);
+    try applySettingsCfg(a, &cfg, .{ .skills = true, .exa = true, .mcp = true, .lsp = .{ .bool = true } }, error.InvalidFileMode);
+    try std.testing.expect(cfg.skills);
+    try std.testing.expect(cfg.exa);
+    try std.testing.expect(cfg.mcp);
+    try std.testing.expectEqualStrings("true", cfg.lsp_json.?);
 }

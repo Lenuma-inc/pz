@@ -271,6 +271,8 @@ pub const Runtime = struct {
     tasks: todo.State = .{},
     entries: [16]tools.Entry = undefined,
     selected: [16]tools.Entry = undefined,
+    skills_enabled: bool = true,
+    exa_enabled: bool = true,
     mcp: ?*@import("../mcp.zig").Manager = null,
     lsp: ?@import("../lsp.zig").Manager = null,
     combined: [18 + @import("../mcp.zig").max_tools]tools.Entry = undefined,
@@ -331,6 +333,9 @@ pub const Runtime = struct {
     pub fn configureLsp(self: *Runtime, raw: []const u8) !void {
         if (self.sandbox_locked) return error.PolicyDenied;
         std.debug.assert(self.lsp == null);
+        const value = try std.json.parseFromSlice(std.json.Value, self.alloc, raw, .{});
+        defer value.deinit();
+        if (value.value == .bool and !value.value.bool) return;
         self.lsp = try @import("../lsp.zig").Manager.create(self.alloc, raw);
     }
 
@@ -619,7 +624,7 @@ pub const Runtime = struct {
             self.selected[len] = self.entries[8];
             len += 1;
         }
-        if ((self.tool_mask & mask_skill) != 0) {
+        if (self.skills_enabled and (self.tool_mask & mask_skill) != 0) {
             self.selected[len] = self.entries[9];
             len += 1;
         }
@@ -986,6 +991,7 @@ pub const Runtime = struct {
     }
 
     fn runWebSearch(self: *Runtime, call: tools.Call, query: []const u8, num_results: u8) !tools.Result {
+        if (!self.exa_enabled) return error.ExaDisabled;
         if (query.len == 0 or num_results == 0 or num_results > 10) return error.InvalidArgs;
         var env = try sys.environ().createMap(self.alloc);
         defer env.deinit();
@@ -1020,6 +1026,7 @@ pub const Runtime = struct {
     }
 
     fn runSkill(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
+        if (!self.skills_enabled) return error.SkillsDisabled;
         const h = skill.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -1866,4 +1873,28 @@ test "MCP agent inventory tool lists failed servers and respects tools none" {
     try std.testing.expect(std.mem.indexOf(u8, result.out[0].chunk, "failed") != null);
     rt.tool_mask = 0;
     try std.testing.expectEqual(@as(usize, 0), rt.registry().entries.len);
+}
+
+test "disabled integrations do not expose LSP or call Exa" {
+    var rt = Runtime.init(.{ .alloc = std.testing.allocator });
+    defer rt.deinit();
+    try rt.configureLsp("false");
+    try std.testing.expect(rt.registry().byName("lsp") == null);
+    try std.testing.expect(rt.registry().byName("mcp") == null);
+    rt.exa_enabled = false;
+    try std.testing.expectError(error.ExaDisabled, rt.runWebSearch(.{ .id = "test", .kind = .web, .src = .model, .at_ms = 0, .args = .{ .web = .{ .query = "test" } } }, "test", 1));
+    try rt.configureLsp("true");
+    try std.testing.expect(rt.registry().byName("lsp") != null);
+}
+
+test "skill switch hides and restores the tool independently of the mask" {
+    var rt = Runtime.init(.{ .alloc = std.testing.allocator });
+    defer rt.deinit();
+    try std.testing.expect(rt.registry().byName("skill") != null);
+    rt.skills_enabled = false;
+    try std.testing.expect(rt.registry().byName("skill") == null);
+    rt.skills_enabled = true;
+    try std.testing.expect(rt.registry().byName("skill") != null);
+    rt.tool_mask &= ~mask_skill;
+    try std.testing.expect(rt.registry().byName("skill") == null);
 }
