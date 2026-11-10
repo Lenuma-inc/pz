@@ -2789,8 +2789,15 @@ fn runTui(
 
     // Model cycle list: from config or default
     const cfg_models = run_cmd.cfg.enabled_models;
-    var available = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+    var available = try availableModelsLocal(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
     defer available.deinit(alloc);
+    // Keep the current model selectable even before its remote catalog is read.
+    if (model.len > 0) {
+        const present = for (available.items()) |id| {
+            if (std.mem.eql(u8, id, model)) break true;
+        } else false;
+        if (!present) try available.ids.append(alloc, model);
+    }
     var metadata_arena = std.heap.ArenaAllocator.init(alloc);
     defer metadata_arena.deinit();
     const metadata_alloc = metadata_arena.allocator();
@@ -2824,16 +2831,18 @@ fn runTui(
     ui.panels.context_windows = &context_windows;
     ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
     ui.panels.is_sub = is_sub;
-    if (tui_hooks.native) |router| {
-        if (router.ready.* and router.slot.providerKind() == .openrouter) {
-            const client = &router.slot.openrouter;
-            const key = switch (client.auth.auth) {
-                .api_key => |key| key,
-                .oauth => |oauth| oauth.access,
-            };
-            ui.panels.limits = core.providers.openrouter.fetchLimits(alloc, key, client.ca_file) catch |err| .{ .unavailable = @errorName(err) };
-        }
-    }
+    var lazy_catalog = LazyModelCatalog{
+        .alloc = alloc,
+        .metadata_alloc = metadata_alloc,
+        .available = &available,
+        .models = &models_list,
+        .configured = cfg_models != null,
+        .windows = &context_windows,
+        .overrides = &run_cmd.cfg.context_windows,
+        .ui = &ui,
+        .hooks = audit_hooks.auth(),
+        .tui_hooks = tui_hooks,
+    };
 
     _ = tui_term.installSigwinch();
     try tui_render.Renderer.setup(out);
@@ -3021,6 +3030,8 @@ fn runTui(
                 const refreshed = try availableModels(alloc, audit_hooks.auth(), false);
                 available.deinit(alloc);
                 available = refreshed;
+                lazy_catalog.loaded = true;
+                lazy_catalog.limits_loaded = false;
                 for (available.warnings.items) |warning| try ui.tr.infoText(warning);
                 try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                 if (cfg_models == null) models_list = available.items();
@@ -3040,6 +3051,7 @@ fn runTui(
     if (run_cmd.prompt) |prompt| {
         var init_cmd_writer = std.Io.Writer.Allocating.init(alloc);
         defer init_cmd_writer.deinit();
+        if (std.mem.startsWith(u8, prompt, "/model")) try lazy_catalog.ensure(model);
         const cmd = try handleSlashCommand(
             alloc,
             prompt,
@@ -3070,6 +3082,7 @@ fn runTui(
             try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
         }
         if (cmd == .cost) {
+            lazy_catalog.ensureLimits();
             try showCost(alloc, &ui);
         }
         if (cmd == .reload) {
@@ -3083,6 +3096,7 @@ fn runTui(
             _ = try resume_ctx.restore(sid.*);
         }
         if (cmd == .select_model) {
+            try lazy_catalog.ensure(model);
             var cur_idx: usize = 0;
             for (models_list, 0..) |m, i| {
                 if (std.mem.eql(u8, model, m)) {
@@ -3131,6 +3145,7 @@ fn runTui(
             try ui.draw(out);
             if (is_tty and !watcher.start()) try ui.tr.infoText("[ESC cancel unavailable]");
             defer if (is_tty) watcher.join(null);
+            try lazy_catalog.ensureForInference(model, provider_label, run_cmd.cfg.provider_cmd != null);
             try tctx.run(.{
                 .sid = sid.*,
                 .prompt = prompt,
@@ -3214,6 +3229,7 @@ fn runTui(
         var stop_after_completions = tui_hooks.stop_after_completions;
         syncInputFooter(&ui, input_mode, pending.total());
         if (tui_hooks.submit_text) |prompt| {
+            try lazy_catalog.ensureForInference(model, provider_label, run_cmd.cfg.provider_cmd != null);
             try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, auto_compact_on, &retried_overflow);
             try ui.draw(out);
         }
@@ -3451,6 +3467,7 @@ fn runTui(
                                     ui.ed.cur = ui.ed.buf.items.len;
                                 }
                                 ui.picker = null;
+                                if (std.mem.startsWith(u8, ui.ed.text(), "/model ")) if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                                 ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                                 try ui.updatePreview();
                                 try ui.draw(out);
@@ -3482,6 +3499,7 @@ fn runTui(
 
                             var cmd_writer = std.Io.Writer.Allocating.init(alloc);
                             defer cmd_writer.deinit();
+                            if (std.mem.startsWith(u8, prompt, "/model")) if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             const cmd = try handleSlashCommand(
                                 alloc,
                                 prompt,
@@ -3516,6 +3534,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .cost) {
+                                lazy_catalog.ensureLimits();
                                 try showCost(alloc, &ui);
                                 try ui.draw(out);
                                 continue;
@@ -3533,6 +3552,7 @@ fn runTui(
                                 _ = try resume_ctx.restore(sid.*);
                             }
                             if (cmd == .select_model) {
+                                if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                                 var cur_idx: usize = 0;
                                 for (models_list, 0..) |m, i| {
                                     if (std.mem.eql(u8, model, m)) {
@@ -3588,6 +3608,8 @@ fn runTui(
                                     const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
                                     available.deinit(alloc);
                                     available = refreshed;
+                                    lazy_catalog.loaded = true;
+                                    lazy_catalog.limits_loaded = false;
                                     for (available.warnings.items) |warning| try ui.tr.infoText(warning);
                                     try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
                                     if (cfg_models == null) models_list = available.items();
@@ -3620,12 +3642,21 @@ fn runTui(
                             }
                             if (cmd == .handled or cmd == .logged_in or cmd == .compacted or cmd == .resumed) {
                                 if (cmd == .logged_in) {
-                                    const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
-                                    available.deinit(alloc);
-                                    available = refreshed;
-                                    for (available.warnings.items) |warning| try ui.tr.infoText(warning);
-                                    try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
-                                    if (cfg_models == null) models_list = available.items();
+                                    // A live inference may still read the context map.
+                                    // Defer the refreshed catalog until the next demand.
+                                    lazy_catalog.loaded = false;
+                                    lazy_catalog.limits_loaded = false;
+                                    available.remote_catalogs = true;
+                                    if (!live_turn.isRunning()) {
+                                        const refreshed = try availableModels(alloc, audit_hooks.auth(), run_cmd.cfg.provider_cmd != null);
+                                        available.deinit(alloc);
+                                        available = refreshed;
+                                        lazy_catalog.loaded = true;
+                                        lazy_catalog.limits_loaded = false;
+                                        for (available.warnings.items) |warning| try ui.tr.infoText(warning);
+                                        try mergeContextWindows(metadata_alloc, &context_windows, &available, &run_cmd.cfg.context_windows);
+                                        if (cfg_models == null) models_list = available.items();
+                                    }
                                     if (model.len == 0) {
                                         const req = try parseAuthReq(std.mem.trim(u8, prompt["/login".len..], " \t"), null);
                                         if (parseNativeProviderKind(req.prov_name) != null) {
@@ -3671,6 +3702,8 @@ fn runTui(
                                 continue;
                             }
 
+                            try lazy_catalog.ensureForInference(model, provider_label, run_cmd.cfg.provider_cmd != null);
+
                             try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, auto_compact_on, &retried_overflow);
                             try ui.draw(out);
                         },
@@ -3705,6 +3738,7 @@ fn runTui(
                         },
                         .cycle_model => {
                             if (pre) |p| alloc.free(p);
+                            if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             model = try cycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
@@ -3732,6 +3766,7 @@ fn runTui(
                         },
                         .select_model => {
                             if (pre) |p| alloc.free(p);
+                            if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             // Find current model index
                             var cur_idx: usize = 0;
                             for (models_list, 0..) |m, i| {
@@ -3805,6 +3840,7 @@ fn runTui(
                         },
                         .reverse_cycle_model => {
                             if (pre) |p| alloc.free(p);
+                            if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             model = try reverseCycleModel(alloc, model, &model_owned, models_list);
                             ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
                             try syncThinking(alloc, &ui, model, &thinking, &popts);
@@ -3819,6 +3855,7 @@ fn runTui(
                             } else if (tab_text.len > 0) {
                                 try completeFilePath(alloc, &ui);
                             }
+                            if (std.mem.startsWith(u8, ui.ed.text(), "/model ")) if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                             try ui.updatePreview();
                             try ui.draw(out);
@@ -3835,6 +3872,7 @@ fn runTui(
                         },
                         .none => {
                             if (pre) |p| alloc.free(p);
+                            if (std.mem.startsWith(u8, ui.ed.text(), "/model ")) if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                             ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                             try ui.updatePreview();
                             try ui.draw(out);
@@ -3929,6 +3967,7 @@ fn runTui(
                         if (pending.popNext()) |next_turn| {
                             defer alloc.free(next_turn.text);
                             syncInputFooter(&ui, input_mode, pending.total());
+                            try lazy_catalog.ensureForInference(model, provider_label, run_cmd.cfg.provider_cmd != null);
                             live_turn.start(&live_tctx, .{
                                 .sid = sid.*,
                                 .prompt = next_turn.text,
@@ -3976,6 +4015,7 @@ fn runTui(
                         ui.ed.insertSlice(text) catch {
                             try ui.tr.infoText("[paste: invalid UTF-8]");
                         };
+                        if (std.mem.startsWith(u8, ui.ed.text(), "/model ")) if (!live_turn.isRunning()) try lazy_catalog.ensure(model);
                         ui.arg_src = resolveArgSrcWithProviders(ui.ed.text(), models_list, available.provider_names.items);
                         try ui.updatePreview();
                         try ui.draw(out);
@@ -4020,6 +4060,7 @@ fn runTui(
             const trimmed = std.mem.trim(u8, line, " \t");
             if (trimmed.len == 0) continue;
 
+            if (std.mem.startsWith(u8, trimmed, "/model")) try lazy_catalog.ensure(model);
             const cmd = try handleSlashCommand(
                 alloc,
                 trimmed,
@@ -4056,6 +4097,7 @@ fn runTui(
                 continue;
             }
             if (cmd == .cost) {
+                lazy_catalog.ensureLimits();
                 try showCost(alloc, &ui);
                 try ui.draw(out);
                 cmd_ct += 1;
@@ -4087,6 +4129,8 @@ fn runTui(
                 turn_ct += 1;
                 continue;
             }
+
+            try lazy_catalog.ensureForInference(model, provider_label, run_cmd.cfg.provider_cmd != null);
 
             try tctx.run(.{
                 .sid = sid.*,
@@ -7003,7 +7047,66 @@ fn buildSystemPromptWithApproval(alloc: std.mem.Allocator, run_cmd: cli.Run, hom
     return ctx;
 }
 
+// Remote discovery waits for model interaction or the first inference, after
+// initial drawing and before a live turn can read the shared context windows.
+// Idle startup and immediate quit remain independent of DNS/connect.
+const LazyModelCatalog = struct {
+    alloc: std.mem.Allocator,
+    metadata_alloc: std.mem.Allocator,
+    available: *ModelList,
+    models: *[]const []const u8,
+    configured: bool,
+    windows: *std.StringHashMapUnmanaged(u64),
+    overrides: *const std.StringHashMapUnmanaged(u64),
+    ui: *tui_harness.Ui,
+    hooks: core.providers.auth.Hooks,
+    tui_hooks: TuiHooks,
+    loaded: bool = false,
+    limits_loaded: bool = false,
+
+    fn ensureForInference(self: *LazyModelCatalog, model: []const u8, provider_label: []const u8, external: bool) !void {
+        if (external or std.mem.eql(u8, provider_label, "openai")) return;
+        try self.ensure(model);
+    }
+
+    fn ensure(self: *LazyModelCatalog, model: []const u8) !void {
+        if (self.loaded or !self.available.remote_catalogs) {
+            self.ensureLimits();
+            return;
+        }
+        // Preserve discovery failures: inference must not silently use a fallback
+        // capacity after a required remote catalog could not be loaded.
+        const refreshed = try availableModels(self.alloc, self.hooks, false);
+        self.loaded = true;
+        self.ui.picker = null;
+        self.available.deinit(self.alloc);
+        self.available.* = refreshed;
+        if (!self.configured) self.models.* = self.available.items();
+        try mergeContextWindows(self.metadata_alloc, self.windows, self.available, self.overrides);
+        self.ui.panels.ctx_limit = modelCtxWindow(model, self.windows);
+        self.ui.arg_src = resolveArgSrcWithProviders(self.ui.ed.text(), self.models.*, self.available.provider_names.items);
+        for (self.available.warnings.items) |warning| try self.ui.tr.infoText(warning);
+        self.ensureLimits();
+    }
+
+    fn ensureLimits(self: *LazyModelCatalog) void {
+        if (self.limits_loaded) return;
+        if (self.tui_hooks.native) |router| {
+            if (router.ready.* and router.slot.providerKind() == .openrouter) {
+                const client = &router.slot.openrouter;
+                const key = switch (client.auth.auth) {
+                    .api_key => |key| key,
+                    .oauth => |oauth| oauth.access,
+                };
+                self.limits_loaded = true;
+                self.ui.panels.limits = core.providers.openrouter.fetchLimits(self.alloc, key, client.ca_file) catch |err| .{ .unavailable = @errorName(err) };
+            }
+        }
+    }
+};
+
 const ModelList = struct {
+    remote_catalogs: bool = false,
     ids: std.ArrayList([]const u8) = .empty,
     router_catalog: ?core.providers.openrouter.Catalog = null,
     compatible_arena: ?std.heap.ArenaAllocator = null,
@@ -7052,7 +7155,31 @@ fn mergeContextWindows(
     }
 }
 
+test "lazy catalog context hydration preserves configured capacity overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var windows = std.StringHashMapUnmanaged(u64).empty;
+    var overrides = std.StringHashMapUnmanaged(u64).empty;
+    var models = ModelList{};
+    try overrides.put(alloc, "compatible/model", 8192);
+    try mergeContextWindows(alloc, &windows, &models, &overrides);
+    try models.compatible_windows.put(alloc, "compatible/model", 32768);
+    try models.compatible_windows.put(alloc, "compatible/other", 65536);
+    try mergeContextWindows(alloc, &windows, &models, &overrides);
+    try std.testing.expectEqual(@as(?u64, 8192), windows.get("compatible/model"));
+    try std.testing.expectEqual(@as(?u64, 65536), windows.get("compatible/other"));
+}
+
 fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool) !ModelList {
+    return availableModelsImpl(alloc, hooks, external, true);
+}
+
+fn availableModelsLocal(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool) !ModelList {
+    return availableModelsImpl(alloc, hooks, external, false);
+}
+
+fn availableModelsImpl(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, external: bool, remote: bool) !ModelList {
     var result = ModelList{};
     errdefer result.deinit(alloc);
     try result.provider_names.appendSlice(alloc, &core.providers.auth.provider_names);
@@ -7075,9 +7202,12 @@ fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, e
         if (core.providers.auth.loadForProviderWithHooks(alloc, .openrouter, hooks)) |loaded| {
             var auth = loaded;
             auth.deinit();
-            const catalog = try core.providers.openrouter.fetchModels(alloc, hooks.ca_file);
-            result.router_catalog = catalog;
-            try result.ids.appendSlice(alloc, catalog.ids);
+            result.remote_catalogs = true;
+            if (remote) {
+                const catalog = try core.providers.openrouter.fetchModels(alloc, hooks.ca_file);
+                result.router_catalog = catalog;
+                try result.ids.appendSlice(alloc, catalog.ids);
+            }
         } else |err| {
             if (err != error.AuthNotFound) return err;
         }
@@ -7088,7 +7218,9 @@ fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, e
         var registry = try core.providers.compatible.load(alloc, hooks);
         defer registry.deinit();
         for (registry.entries) |entry| {
+            result.remote_catalogs = true;
             try result.provider_names.append(alloc, try ar.dupe(u8, entry.name));
+            if (!remote) continue;
             const models = core.providers.compatible.fetchModels(ar, entry, hooks.ca_file) catch |err| {
                 if (err == error.OutOfMemory) return err;
                 try result.warnings.append(alloc, try std.fmt.allocPrint(ar, "Provider {s}: model catalog unavailable ({s})", .{ entry.name, @errorName(err) }));
@@ -7104,6 +7236,25 @@ fn availableModels(alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks, e
         }
     }
     return result;
+}
+
+test "startup model discovery defers remote catalogs with saved credentials" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(home);
+    const hooks = core.providers.auth.Hooks{ .home_override = home };
+    try core.providers.auth.saveApiKeyWithHooks(alloc, .openai, "sk-test-no-network", hooks);
+    try core.providers.auth.saveApiKeyWithHooks(alloc, .openrouter, "sk-test-no-network", hooks);
+    var models = try availableModelsLocal(alloc, hooks, false);
+    defer models.deinit(alloc);
+    try std.testing.expect(models.remote_catalogs);
+    try std.testing.expect(models.router_catalog == null);
+    try std.testing.expectEqual(openai_models.len, models.items().len);
+    for (openai_models, models.items()) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "OpenAI credentials unlock picker and native backend together" {
