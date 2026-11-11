@@ -275,7 +275,8 @@ pub const Runtime = struct {
     exa_enabled: bool = true,
     mcp: ?*@import("../mcp.zig").Manager = null,
     lsp: ?@import("../lsp.zig").Manager = null,
-    combined: [18 + @import("../mcp.zig").max_tools]tools.Entry = undefined,
+    plugins: ?*@import("../plugins.zig").Manager = null,
+    combined: [18 + @import("../mcp.zig").max_tools + @import("../plugins.zig").max_tools]tools.Entry = undefined,
 
     const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
@@ -320,14 +321,72 @@ pub const Runtime = struct {
             };
             len += 1;
         }
-        return tools.Registry.init(self.combined[0..len]);
+        var reg = tools.Registry.init(self.combined[0..len]);
+        if (self.plugins) |manager| {
+            if (self.pluginsAllowed()) {
+                @memcpy(self.combined[len..][0..manager.entries.items.len], manager.entries.items);
+                len += manager.entries.items.len;
+                reg = tools.Registry.init(self.combined[0..len]);
+                reg.hook_ctx = manager;
+                reg.hook_event = pluginEvent;
+            }
+        }
+        return reg;
+    }
+
+    fn pluginsAllowed(self: *const Runtime) bool {
+        // Custom tools are conservatively destructive; never add them to a
+        // read-only registry or let their hooks alter a read-only agent turn.
+        return (self.tool_mask & (mask_write | mask_edit | mask_bash | mask_patch)) != 0;
+    }
+
+    fn pluginEvent(ctx: *anyopaque, alloc: std.mem.Allocator, name: []const u8, payload: []const u8) ![]u8 {
+        const manager: *@import("../plugins.zig").Manager = @ptrCast(@alignCast(ctx));
+        return manager.event(alloc, name, payload);
+    }
+
+    pub fn configurePlugins(self: *Runtime, raw: []const u8) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.alloc, raw, .{});
+        defer parsed.deinit();
+        try @import("../plugins.zig").validate(parsed.value);
+        if (parsed.value.array.items.len == 0) return;
+        if (self.sandbox_locked) return error.PolicyDenied;
+        if (self.plugins != null) return error.PluginsAlreadyConfigured;
+        const manager = try @import("../plugins.zig").Manager.create(self.alloc, raw);
+        errdefer manager.destroy();
+        const base = self.registry();
+        for (manager.entries.items) |entry| {
+            if (base.byName(entry.name) != null) return error.DuplicatePluginTool;
+        }
+        self.plugins = manager;
+    }
+
+    pub fn pluginReport(self: *Runtime) ![]u8 {
+        if (self.plugins) |manager| return manager.report();
+        return self.alloc.dupe(u8, "{\"tools\":[],\"commands\":[],\"events\":[]}");
+    }
+
+    pub fn pluginCommand(self: *Runtime, line: []const u8) !?[]u8 {
+        if (!self.pluginsAllowed()) return null;
+        const manager = self.plugins orelse return null;
+        if (self.sandbox_locked) return error.PolicyDenied;
+        return manager.command(line);
     }
 
     pub fn configureMcp(self: *Runtime, raw: []const u8) !void {
         // External executables cannot inherit the verified sandbox policy.
         if (self.sandbox_locked) return error.PolicyDenied;
         std.debug.assert(self.mcp == null);
-        self.mcp = try @import("../mcp.zig").Manager.create(self.alloc, raw);
+        const manager = try @import("../mcp.zig").Manager.create(self.alloc, raw);
+        errdefer manager.destroy();
+        if (self.plugins) |plugins| {
+            for (manager.entries.items) |entry| {
+                for (plugins.entries.items) |plugin| {
+                    if (std.mem.eql(u8, entry.name, plugin.name)) return error.DuplicatePluginTool;
+                }
+            }
+        }
+        self.mcp = manager;
     }
 
     pub fn configureLsp(self: *Runtime, raw: []const u8) !void {
@@ -358,6 +417,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.plugins) |manager| manager.destroy();
         if (self.lsp) |*manager| manager.deinit();
         if (self.mcp) |m| m.destroy();
         self.skill_cache.deinit(self.alloc);
@@ -1897,4 +1957,37 @@ test "skill switch hides and restores the tool independently of the mask" {
     try std.testing.expect(rt.registry().byName("skill") != null);
     rt.tool_mask &= ~mask_skill;
     try std.testing.expect(rt.registry().byName("skill") == null);
+}
+
+test "disabled plugins allocate no runtime and locked policy rejects loading" {
+    var rt = Runtime.init(.{ .alloc = std.testing.allocator, .sandbox_locked = true });
+    defer rt.deinit();
+    try rt.configurePlugins("[]");
+    try std.testing.expect(rt.plugins == null);
+    try std.testing.expect(rt.registry().hook_event == null);
+    try std.testing.expectError(error.PolicyDenied, rt.configurePlugins("[\"./unread-plugin.js\"]"));
+    try std.testing.expect(rt.plugins == null);
+}
+
+test "plugin entries reach registry lookup and disappear under read-only masks" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "plugin.js",
+        .data = "pz.registerTool({name:'custom_hello',description:'hello',parameters:{type:'object'},execute:()=> 'hello'});",
+    });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "plugin.js", a);
+    defer a.free(path);
+    const raw = try std.json.Stringify.valueAlloc(a, [_][]const u8{path}, .{});
+    defer a.free(raw);
+    var rt = Runtime.init(.{ .alloc = a });
+    defer rt.deinit();
+    try rt.configurePlugins(raw);
+    try std.testing.expect(rt.registry().byName("custom_hello") != null);
+    try std.testing.expect(rt.registry().hook_event != null);
+    rt.tool_mask = mask_read;
+    try std.testing.expect(rt.registry().byName("custom_hello") == null);
+    try std.testing.expect(rt.registry().hook_event == null);
+    try std.testing.expect((try rt.pluginCommand("/missing")) == null);
 }

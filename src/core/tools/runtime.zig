@@ -22,6 +22,14 @@ pub fn bind(
         pub const Registry = struct {
             entries: []const Entry,
             inner: reg.Registry,
+            hook_ctx: ?*anyopaque = null,
+            hook_event: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8) anyerror![]u8 = null,
+
+            /// Owned JSON response, or null without an enabled extension runtime.
+            pub fn event(self: Registry, alloc: std.mem.Allocator, name: []const u8, payload: []const u8) !?[]u8 {
+                const callback = self.hook_event orelse return null;
+                return try callback(self.hook_ctx orelse return error.InvalidExtensionHook, alloc, name, payload);
+            }
 
             pub fn init(entries: []const Entry) Registry {
                 return .{

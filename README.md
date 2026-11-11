@@ -356,3 +356,25 @@ values in the object by parameter name; use `body` for a JSON request body.
 Calls require approval and are limited to operations served from the
 specification's origin. YAML, `$ref`, and server-variable expansion are not
 supported yet.
+
+
+## JavaScript plugins
+
+pz embeds QuickJS-ng for explicitly configured JavaScript plugins. No Node,
+npm, external interpreter or plugin-host process is required. Without enabled
+scripts, no JS runtime is created.
+
+```json
+{"plugins": ["./examples/plugins/hello.js"]}
+```
+
+Add this to your settings, then use `/plugins` to inspect registrations or
+`/hello world` to run the example command. Set `plugins` to `false` or `[]` to
+disable them. Paths are relative to the working directory; use absolute paths
+in global settings.
+
+API v1 supports synchronous tools, slash/RPC commands, in-memory state and
+session/request/tool events. The embedding exposes no filesystem, network or
+shell APIs. It does not load TypeScript, npm packages or pi extensions, and does
+not yet support custom model providers or compaction implementations. See
+[the plugin API and limits](docs/PLUGINS.md) and [examples](examples/plugins/).

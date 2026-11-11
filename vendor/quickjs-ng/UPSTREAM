@@ -1,0 +1,4 @@
+QuickJS-ng v0.18.0
+https://github.com/quickjs-ng/quickjs
+Commit: d7215b0ad3fc2c562e8317fd9bca058fd4863804
+Only engine source and headers; quickjs-libc is not linked.

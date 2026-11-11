@@ -39,6 +39,7 @@ pub const cmds = [_]Cmd{
     .{ .name = "tools", .desc = "Set/show tools" },
     .{ .name = "lsp", .desc = "Installed language servers and status" },
     .{ .name = "mcp", .desc = "MCP servers, status and tools" },
+    .{ .name = "plugins", .desc = "JavaScript plugin tools, commands and events" },
     .{ .name = "tree", .desc = "List sessions" },
     .{ .name = "upgrade", .desc = "Self-update" },
     .{ .name = "bg", .desc = "Background jobs" },

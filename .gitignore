@@ -6,6 +6,10 @@ pz/
 src/**
 !src/core/
 !src/core/lsp.zig
+!src/core/plugins.zig
+!src/core/plugins_bridge.c
+!src/core/plugins_bridge.h
+!src/core/plugins_bootstrap.js
 !src/core/providers/
 !src/core/providers/openrouter.zig
 !src/core/providers/compatible.zig

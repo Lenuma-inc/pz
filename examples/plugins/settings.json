@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    "./examples/plugins/presets.js",
+    "./examples/plugins/protected-paths.js",
+    "./examples/plugins/tool-stats.js",
+    "./examples/plugins/session-notes.js",
+    "./examples/plugins/handoff.js"
+  ]
+}

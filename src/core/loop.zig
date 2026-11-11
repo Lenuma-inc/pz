@@ -865,7 +865,10 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
                 self.hist.flushText() catch |err| return failWithReport(self.opts, .stream_next, err);
-                const req_msgs = buildReqMsgs(turn_alloc, self.hist.items.items, tool_prompt, self.opts.skip_prompt_guard) catch |msg_err| {
+                const plugin_prompt = pluginRequestPrompt(turn_alloc, self.opts, tool_prompt) catch |hook_err| {
+                    return failWithReport(self.opts, .provider_start, hook_err);
+                };
+                const req_msgs = buildReqMsgs(turn_alloc, self.hist.items.items, plugin_prompt, self.opts.skip_prompt_guard) catch |msg_err| {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
 
@@ -1328,6 +1331,28 @@ const ToolCancelBridge = struct {
     }
 };
 
+fn pluginRequestPrompt(alloc: std.mem.Allocator, opts: Opts, prompt: ?[]const u8) !?[]const u8 {
+    if (opts.reg.hook_event == null) return prompt;
+    const payload = try std.json.Stringify.valueAlloc(alloc, .{
+        .sessionId = opts.sid,
+        .model = opts.model,
+        .provider = opts.provider_label,
+        .prompt = opts.prompt,
+        .systemPrompt = prompt orelse "",
+    }, .{});
+    defer alloc.free(payload);
+    const reply = (try opts.reg.event(alloc, "before_request", payload)) orelse return prompt;
+    defer alloc.free(reply);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, reply, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPluginHookResult;
+    const append = parsed.value.object.get("systemPromptAppend") orelse return prompt;
+    if (append != .string) return error.InvalidPluginHookResult;
+    if (append.string.len == 0) return prompt;
+    if (prompt) |base| return try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ base, append.string });
+    return try alloc.dupe(u8, append.string);
+}
+
 fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Err || anyerror)!providers.ToolResult {
     const entry = opts.reg.byName(tc.name) orelse {
         return .{
@@ -1362,6 +1387,28 @@ fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Er
             },
             else => return auth_err,
         };
+    }
+
+    if (opts.reg.hook_event != null) {
+        const a = parse_arena.allocator();
+        const input = try std.json.parseFromSlice(std.json.Value, a, tc.args, .{});
+        const payload = try std.json.Stringify.valueAlloc(a, .{ .toolName = tc.name, .toolCallId = tc.id, .input = input.value }, .{});
+        if (try opts.reg.event(a, "tool_call", payload)) |reply| {
+            const result = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+            if (result.value != .object) return error.InvalidPluginHookResult;
+            if (result.value.object.get("block")) |block| {
+                if (block != .bool) return error.InvalidPluginHookResult;
+                if (block.bool) {
+                    const reason = result.value.object.get("reason");
+                    if (reason != null and reason.? != .string) return error.InvalidPluginHookResult;
+                    return .{
+                        .id = try opts.alloc.dupe(u8, tc.id),
+                        .output = try std.fmt.allocPrint(opts.alloc, "blocked by plugin: {s}", .{if (reason) |r| r.string else "operation denied"}),
+                        .is_err = true,
+                    };
+                }
+            }
+        }
     }
 
     noteApproval(opts, entry.kind, entry.spec.destructive, tc, parsed_args) catch |approval_err| switch (approval_err) {
@@ -1455,6 +1502,16 @@ fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Er
 
     const out = try resultOut(opts.alloc, run_res);
     errdefer opts.alloc.free(out);
+    if (opts.reg.hook_event != null) {
+        const a = parse_arena.allocator();
+        const payload = try std.json.Stringify.valueAlloc(a, .{
+            .toolName = tc.name,
+            .toolCallId = tc.id,
+            .output = out,
+            .isError = run_res.final != .ok,
+        }, .{});
+        _ = try opts.reg.event(a, "tool_result", payload);
+    }
     if (run_res.image) |img| {
         image_out.* = .{ .media_type = img.media_type, .data = try opts.alloc.dupe(u8, img.data) };
     }
@@ -6226,4 +6283,45 @@ test "MCP arguments remain raw JSON objects" {
     try std.testing.expectEqualStrings(raw, parsed.mcp.arguments);
     try std.testing.expectError(error.InvalidToolArgs, parseCallArgs(a, .mcp, "[]"));
     try std.testing.expectError(error.InvalidToolArgs, parseCallArgs(a, .mcp, "bad json"));
+}
+
+test "plugin request hooks preserve absent prompts and append to optional prompts" {
+    const a = std.testing.allocator;
+    const Hook = struct {
+        expected_prompt: []const u8 = "",
+        reply: []const u8 = "{\"systemPromptAppend\":\"extra\"}",
+
+        fn event(ctx: *anyopaque, alloc: std.mem.Allocator, name: []const u8, payload: []const u8) ![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expectEqualStrings("before_request", name);
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(self.expected_prompt, parsed.value.object.get("systemPrompt").?.string);
+            return alloc.dupe(u8, self.reply);
+        }
+    };
+    var opts = Opts{
+        .alloc = a,
+        .sid = "plugin-test",
+        .prompt = "hello",
+        .model = "test-model",
+        .provider = undefined,
+        .store = undefined,
+        .mode = undefined,
+        .reg = tools.Registry.init(&.{}),
+    };
+    try std.testing.expect((try pluginRequestPrompt(a, opts, null)) == null);
+    try std.testing.expectEqualStrings("base", (try pluginRequestPrompt(a, opts, "base")).?);
+    var hook = Hook{};
+    opts.reg.hook_ctx = &hook;
+    opts.reg.hook_event = Hook.event;
+    const absent = (try pluginRequestPrompt(a, opts, null)).?;
+    defer a.free(absent);
+    try std.testing.expectEqualStrings("extra", absent);
+    hook.expected_prompt = "base";
+    const appended = (try pluginRequestPrompt(a, opts, "base")).?;
+    defer a.free(appended);
+    try std.testing.expectEqualStrings("base\n\nextra", appended);
+    hook.reply = "{\"systemPromptAppend\":1}";
+    try std.testing.expectError(error.InvalidPluginHookResult, pluginRequestPrompt(a, opts, "base"));
 }

@@ -98,6 +98,7 @@ pub const Config = struct {
     mcp: bool = true,
     mcp_servers_json: ?[]u8 = null,
     lsp_json: ?[]u8 = null,
+    plugins_json: ?[]u8 = null,
     context_windows: std.StringHashMapUnmanaged(u64) = .empty,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
@@ -246,6 +247,7 @@ const SettingsCfg = struct {
     mcp: ?bool = null,
     mcpServers: ?std.json.Value = null,
     lsp: ?std.json.Value = null,
+    plugins: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
@@ -348,6 +350,7 @@ pub fn discover(
             if (file_cfg.value.contextWindows) |value| try setContextWindows(alloc, &out, value);
             if (file_cfg.value.lsp) |value| try setLsp(alloc, &out, value);
             if (file_cfg.value.mcpServers) |value| try setMcp(alloc, &out, value);
+            if (file_cfg.value.plugins) |value| try setPlugins(alloc, &out, value);
             try applyRawCfg(
                 alloc,
                 &out,
@@ -454,6 +457,7 @@ const FileCfg = struct {
     mcp: ?bool = null,
     mcpServers: ?std.json.Value = null,
     lsp: ?std.json.Value = null,
+    plugins: ?std.json.Value = null,
     contextWindows: ?std.json.Value = null,
 };
 
@@ -529,6 +533,14 @@ fn setLsp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
     cfg.lsp_json = raw;
 }
 
+fn setPlugins(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
+    const disabled = value == .bool and !value.bool;
+    if (!disabled) try @import("../core/plugins.zig").validate(value);
+    const raw = if (disabled) try alloc.dupe(u8, "[]") else try std.json.Stringify.valueAlloc(alloc, value, .{});
+    if (cfg.plugins_json) |old| alloc.free(old);
+    cfg.plugins_json = raw;
+}
+
 fn setMcp(alloc: std.mem.Allocator, cfg: *Config, value: std.json.Value) !void {
     try @import("../core/mcp.zig").validate(value);
     const raw = try std.json.Stringify.valueAlloc(alloc, value, .{});
@@ -543,6 +555,7 @@ fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, com
     if (pi.contextWindows) |value| try setContextWindows(alloc, cfg, value);
     if (pi.lsp) |value| try setLsp(alloc, cfg, value);
     if (pi.mcpServers) |value| try setMcp(alloc, cfg, value);
+    if (pi.plugins) |value| try setPlugins(alloc, cfg, value);
     try applyRawCfg(
         alloc,
         cfg,
@@ -1192,4 +1205,18 @@ test "integration switches load from project and global settings" {
     try std.testing.expect(cfg.exa);
     try std.testing.expect(cfg.mcp);
     try std.testing.expectEqualStrings("true", cfg.lsp_json.?);
+}
+
+test "plugin settings validate paths and allow an explicit disable override" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeAutoCfg(tmp.dir, "{\"plugins\":[\"./examples/plugins/hello.js\"]}");
+    var cfg = try discover(a, std.testing.io, tmp.dir, try args.parse(&.{}), .{});
+    defer cfg.deinit(a);
+    try std.testing.expectEqualStrings("[\"./examples/plugins/hello.js\"]", cfg.plugins_json.?);
+    try applySettingsCfg(a, &cfg, .{ .plugins = .{ .bool = false } }, error.InvalidFileMode);
+    try std.testing.expectEqualStrings("[]", cfg.plugins_json.?);
+    try std.testing.expectError(error.InvalidPluginConfig, applySettingsCfg(a, &cfg, .{ .plugins = .{ .bool = true } }, error.InvalidFileMode));
+    try std.testing.expectEqualStrings("[]", cfg.plugins_json.?);
 }

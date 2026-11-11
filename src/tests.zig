@@ -10,6 +10,7 @@ test {
     _ = @import("core/tools/bash.zig");
     _ = @import("core/tools/builtin.zig");
     _ = @import("core/mcp.zig");
+    _ = @import("core/plugins.zig");
     _ = @import("core/sandbox.zig");
     _ = @import("core/tools/path_guard.zig");
     _ = @import("core/net.zig");

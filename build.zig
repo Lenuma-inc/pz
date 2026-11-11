@@ -8,6 +8,24 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     };
+    // Engine only: no QuickJS libc helpers, module loader, filesystem or shell.
+    const quickjs = b.addLibrary(.{
+        .name = "pz-quickjs",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    quickjs.root_module.addIncludePath(b.path("vendor/quickjs-ng"));
+    quickjs.root_module.addCSourceFiles(.{
+        .files = &.{
+            "vendor/quickjs-ng/quickjs.c",
+            "vendor/quickjs-ng/dtoa.c",
+            "vendor/quickjs-ng/libregexp.c",
+            "vendor/quickjs-ng/libunicode.c",
+            "src/core/plugins_bridge.c",
+        },
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    quickjs.root_module.linkSystemLibrary("m", .{});
     const policy_pk_hex = b.option(
         []const u8,
         "policy-pk-hex",
@@ -59,6 +77,7 @@ pub fn build(b: *std.Build) void {
     });
 
     core_mod.addImport("pz_io", io_mod);
+    core_mod.linkLibrary(quickjs);
 
     const exe = b.addExecutable(.{
         .name = "pz",
@@ -70,6 +89,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("pz_io", io_mod);
+    exe.root_module.linkLibrary(quickjs);
     exe.root_module.addOptions("build_options", options);
     b.installArtifact(exe);
     test_options.addOptionPath("pz_bin_path", exe.getEmittedBin());
@@ -123,6 +143,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     suite_tests.root_module.addImport("pz_io", io_mod);
+    suite_tests.root_module.linkLibrary(quickjs);
     configTestMod(suite_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_suite_tests = b.addRunArtifact(suite_tests);
     run_suite_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
@@ -137,6 +158,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"MCP"},
     });
     mcp_tests.root_module.addImport("pz_io", io_mod);
+    mcp_tests.root_module.linkLibrary(quickjs);
     configTestMod(mcp_tests.root_module, ohsnap_mod, zcheck_mod, options);
     b.step("test-mcp", "Run focused MCP integration tests").dependOn(&b.addRunArtifact(mcp_tests).step);
 
@@ -170,6 +192,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     perf_tests.root_module.addImport("pz_io", io_mod);
+    perf_tests.root_module.linkLibrary(quickjs);
+    for ([_]*std.Build.Module{ core_mod, exe.root_module, suite_tests.root_module, mcp_tests.root_module, perf_tests.root_module }) |module| {
+        module.addIncludePath(b.path("src/core"));
+    }
     configTestMod(perf_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     run_perf_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");

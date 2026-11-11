@@ -428,7 +428,7 @@ const PolicyToolDispatch = struct {
 };
 
 const PolicyToolRegistry = struct {
-    const max_tools = 18 + @import("../core/mcp.zig").max_tools;
+    const max_tools = 18 + @import("../core/mcp.zig").max_tools + @import("../core/plugins.zig").max_tools;
     ctxs: [max_tools]PolicyToolDispatch = undefined,
     entries: [max_tools]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
@@ -445,6 +445,8 @@ const PolicyToolRegistry = struct {
             self.entries[i].dispatch = &self.ctxs[i].dispatch;
         }
         self.reg = core.tools.Registry.init(self.entries[0..base.entries.len]);
+        self.reg.hook_ctx = base.hook_ctx;
+        self.reg.hook_event = base.hook_event;
     }
 
     fn registry(self: *const PolicyToolRegistry) core.tools.Registry {
@@ -1976,6 +1978,7 @@ const SwarmRun = struct {
             cmd.tool_mask &= ~(core.tools.builtin.mask_bash | core.tools.builtin.mask_write | core.tools.builtin.mask_edit | core.tools.builtin.mask_patch | core.tools.builtin.mask_todo | core.tools.builtin.mask_ffmpeg);
             cmd.cfg.mcp_servers_json = null;
             cmd.cfg.lsp_json = null;
+            cmd.cfg.plugins_json = null;
         }
         cmd.prompt = try std.fmt.allocPrint(
             alloc,
@@ -2289,6 +2292,8 @@ fn execWithIoTuiHooks(
         if (run_cmd.cfg.mcp_servers_json) |raw| try tools_rt.configureMcp(raw);
     }
 
+    if (run_cmd.cfg.plugins_json) |raw| try tools_rt.configurePlugins(raw);
+
     var sid: []u8 = &.{};
     var session_dir_path: ?[]u8 = null;
     defer if (session_dir_path) |path| alloc.free(path);
@@ -2373,6 +2378,12 @@ fn execWithIoTuiHooks(
             .replay = .{},
         });
         store = &fs_store_impl.session_store;
+    }
+
+    if (tools_rt.plugins != null) {
+        const payload = try std.json.Stringify.valueAlloc(alloc, .{ .sessionId = sid, .model = model_name, .provider = provider_name }, .{});
+        defer alloc.free(payload);
+        if (try tools_rt.registry().event(alloc, "session_start", payload)) |reply| alloc.free(reply);
     }
 
     // Dispatch
@@ -2460,6 +2471,11 @@ fn execWithIoTuiHooks(
         }
     }
 
+    if (tools_rt.plugins != null) {
+        const payload = try std.json.Stringify.valueAlloc(alloc, .{ .sessionId = sid }, .{});
+        defer alloc.free(payload);
+        if (try tools_rt.registry().event(alloc, "session_end", payload)) |reply| alloc.free(reply);
+    }
     return sid;
 }
 
@@ -4251,7 +4267,7 @@ fn runRpc(
         }
         const cmd = normalizeRpcCmd(raw_cmd);
 
-        const RpcCmd = enum { prompt, model, provider, tools, mcp, lsp, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
+        const RpcCmd = enum { prompt, model, provider, tools, mcp, lsp, plugins, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
         const rpc_map = std.StaticStringMap(RpcCmd).initComptime(.{
             .{ "prompt", .prompt },
             .{ "model", .model },
@@ -4259,6 +4275,7 @@ fn runRpc(
             .{ "tools", .tools },
             .{ "mcp", .mcp },
             .{ "lsp", .lsp },
+            .{ "plugins", .plugins },
             .{ "bg", .bg },
             .{ "login", .login },
             .{ "logout", .logout },
@@ -4276,6 +4293,15 @@ fn runRpc(
         });
 
         const resolved = rpc_map.get(cmd) orelse {
+            if (tools_rt.plugins != null and pol.allowsCmd(cmd)) {
+                const plugin_line = try std.fmt.allocPrint(alloc, "/{s} {s}", .{ cmd, req.arg orelse "" });
+                defer alloc.free(plugin_line);
+                if (try tools_rt.pluginCommand(plugin_line)) |text| {
+                    defer alloc.free(text);
+                    try writeJsonLine(alloc, out, .{ .type = "rpc_ack", .id = req.id, .cmd = raw_cmd, .output = text });
+                    continue;
+                }
+            }
             try writeJsonLine(alloc, out, .{
                 .type = "rpc_error",
                 .id = req.id,
@@ -4423,6 +4449,13 @@ fn runRpc(
                 const raw = try tools_rt.lspCommand(req.arg orelse "");
                 defer alloc.free(raw);
                 try writeJsonLine(alloc, out, .{ .type = "rpc_ack", .id = req.id, .cmd = raw_cmd, .lsp = raw });
+            },
+            .plugins => {
+                const raw = try tools_rt.pluginReport();
+                defer alloc.free(raw);
+                const inventory = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+                defer inventory.deinit();
+                try writeJsonLine(alloc, out, .{ .type = "rpc_ack", .id = req.id, .cmd = raw_cmd, .plugins = inventory.value });
             },
             .mcp => {
                 const raw = try tools_rt.mcpReport();
@@ -4801,12 +4834,12 @@ fn runRpc(
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_help",
                     .id = req.id,
-                    .commands = "prompt,model,provider,tools,mcp,lsp,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
+                    .commands = "prompt,model,provider,tools,mcp,lsp,plugins,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
                 });
             },
             .commands => {
                 const commands = [_][]const u8{
-                    "prompt", "model", "provider", "tools", "mcp", "lsp", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
+                    "prompt", "model", "provider", "tools", "mcp", "lsp", "plugins", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
                 };
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_commands",
@@ -5186,7 +5219,7 @@ fn handleSlashCommand(
     const cmd = if (sp) |i| body[0..i] else body;
     const arg = if (sp) |i| std.mem.trim(u8, body[i + 1 ..], " \t") else "";
 
-    const Cmd = enum { help, quit, exit, session, model, provider, tools, mcp, lsp, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
+    const Cmd = enum { help, quit, exit, session, model, provider, tools, mcp, lsp, plugins, bg, upgrade, new, @"resume", tree, fork, compact, @"export", settings, hotkeys, login, logout, clear, cost, copy, name, reload, share, changelog };
     const cmd_map = std.StaticStringMap(Cmd).initComptime(.{
         .{ "help", .help },
         .{ "quit", .quit },
@@ -5197,6 +5230,7 @@ fn handleSlashCommand(
         .{ "tools", .tools },
         .{ "mcp", .mcp },
         .{ "lsp", .lsp },
+        .{ "plugins", .plugins },
         .{ "bg", .bg },
         .{ "upgrade", .upgrade },
         .{ "new", .new },
@@ -5219,6 +5253,14 @@ fn handleSlashCommand(
     });
 
     const resolved = cmd_map.get(cmd) orelse {
+        if (tools_rt.plugins != null and pol.allowsCmd(cmd)) {
+            if (try tools_rt.pluginCommand(line)) |text| {
+                defer alloc.free(text);
+                try out.writeAll(text);
+                if (text.len == 0 or text[text.len - 1] != '\n') try out.writeByte('\n');
+                return .handled;
+            }
+        }
         switch (if (tools_rt.skills_enabled) try loadSlashSkill(alloc, cmd, home) else SlashSkill.missing) {
             .allowed => {
                 if (pol.allowsCmd(cmd)) return .unhandled;
@@ -5246,6 +5288,7 @@ fn handleSlashCommand(
                 \\  /provider <id>     Set/show provider
                 \\  /tools [list|all]  Set/show tools
                 \\  /lsp [list|download [server]]  Status or explicit server download
+                \\  /plugins [list]    JavaScript plugin tools, commands and events
                 \\  /mcp [list]        MCP servers, status and tools
                 \\  /bg <subcommand>   Background jobs
                 \\  /upgrade           Self-update to latest release
@@ -5331,6 +5374,16 @@ fn handleSlashCommand(
             defer alloc.free(inventory);
             try out.writeAll(inventory);
             try out.writeAll("\n");
+        },
+        .plugins => {
+            if (arg.len != 0 and !std.mem.eql(u8, arg, "list")) {
+                try out.writeAll("usage: /plugins [list]\n");
+                return .handled;
+            }
+            const inventory = try tools_rt.pluginReport();
+            defer alloc.free(inventory);
+            try out.writeAll(inventory);
+            try out.writeByte('\n');
         },
         .mcp => {
             if (arg.len != 0 and !std.mem.eql(u8, arg, "list")) {
