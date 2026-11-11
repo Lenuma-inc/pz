@@ -29,6 +29,7 @@ pub const Manager = struct {
     runtime: *c.pz_js,
     mutex: std.Io.Mutex = .init,
     entries: std.ArrayList(tools.Entry) = .empty,
+    has_footer: bool = false,
 
     pub fn create(alloc: std.mem.Allocator, raw: []const u8) !*Manager {
         if (raw.len > max_bytes) return error.InvalidPluginConfig;
@@ -80,7 +81,18 @@ pub const Manager = struct {
                 .dispatch = &binding.dispatch,
             });
         }
+        const inventory = try self.report();
+        defer alloc.free(inventory);
+        const description = try std.json.parseFromSlice(struct { events: []const []const u8 }, alloc, inventory, .{ .ignore_unknown_fields = true });
+        defer description.deinit();
+        for (description.value.events) |event_name| {
+            if (std.mem.eql(u8, event_name, "footer_render")) self.has_footer = true;
+        }
         return self;
+    }
+
+    pub fn footer(self: *Manager, alloc: std.mem.Allocator, payload: anytype) ![]u8 {
+        return self.request(alloc, .{ .op = "event", .name = "footer_render", .payload = payload });
     }
 
     pub fn destroy(self: *Manager) void {

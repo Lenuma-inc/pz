@@ -3,7 +3,7 @@
   const extensions = new Map();
   const tools = new Map(), commands = new Map(), hooks = new Map(), state = new Map();
   const parse = JSON.parse.bind(JSON), stringify = JSON.stringify.bind(JSON);
-  const events = new Set(['before_request','tool_call','tool_result','session_start','session_end']);
+  const events = new Set(['before_request','tool_call','tool_result','session_start','session_end','footer_render']);
   const reservedCommands = new Set(['help','quit','exit','session','model','provider','tools','mcp','lsp','plugins','bg','upgrade','new','resume','tree','fork','compact','export','settings','hotkeys','login','logout','clear','cost','copy','name','reload','share','changelog','prompt','commands']);
   let sealed = false;
   function name(n) { if (typeof n !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(n)) throw Error('Invalid plugin registration name'); }
@@ -72,6 +72,14 @@
         if (q.name === 'before_request' && r != null) {
           if (typeof r.systemPromptAppend !== 'string') throw Error('before_request must return systemPromptAppend string');
           result.systemPromptAppend = (result.systemPromptAppend ? result.systemPromptAppend + '\n\n' : '') + r.systemPromptAppend;
+        }
+        if (q.name === 'footer_render' && r != null) {
+          if (!Array.isArray(r.rows) || r.rows.length > 2 || !r.rows.every(row =>
+            Array.isArray(row) && row.length <= 32 && row.every(s => s &&
+              typeof s.text === 'string' && s.text.length <= 2048 && !/[\x00-\x1f\x7f-\x9f]/.test(s.text) &&
+              ['fg','bg'].every(k => s[k] === undefined || (Number.isInteger(s[k]) && s[k] >= 0 && s[k] <= 0xffffff)))))
+            throw Error('Invalid footer_render result');
+          result = {rows:r.rows};
         }
         if (q.name === 'tool_call' && r != null) {
           if (typeof r.block !== 'boolean' || (r.reason !== undefined && typeof r.reason !== 'string')) throw Error('Invalid tool_call hook result');

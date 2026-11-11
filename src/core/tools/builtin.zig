@@ -361,6 +361,11 @@ pub const Runtime = struct {
         self.plugins = manager;
     }
 
+    pub fn pluginFooter(self: *Runtime) ?*@import("../plugins.zig").Manager {
+        if (!self.pluginsAllowed() or self.sandbox_locked) return null;
+        return self.plugins;
+    }
+
     pub fn pluginReport(self: *Runtime) ![]u8 {
         if (self.plugins) |manager| return manager.report();
         return self.alloc.dupe(u8, "{\"tools\":[],\"commands\":[],\"events\":[]}");

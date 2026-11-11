@@ -2844,6 +2844,7 @@ fn runTui(
     var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, safe_model.text, safe_provider.text, safe_cwd.text, safe_branch.text, run_cmd.cfg.theme);
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
+    ui.panels.plugins = tools_rt.pluginFooter();
     ui.panels.context_windows = &context_windows;
     ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
     ui.panels.is_sub = is_sub;

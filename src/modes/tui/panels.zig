@@ -43,6 +43,7 @@ pub const InputMode = enum {
 
 pub const Panels = struct {
     alloc: std.mem.Allocator,
+    plugins: ?*@import("../../core/plugins.zig").Manager = null,
     rows: std.ArrayListUnmanaged(ToolRow) = .empty,
     model: std.ArrayListUnmanaged(u8) = .empty,
     provider: std.ArrayListUnmanaged(u8) = .empty,
@@ -79,6 +80,7 @@ pub const Panels = struct {
     pub const RenderError = frame.Frame.PosError || error{
         InvalidUtf8,
         NoSpaceLeft,
+        PluginFooter,
     };
     pub const compaction_indicator_ms: i64 = 2500;
 
@@ -277,6 +279,9 @@ pub const Panels = struct {
 
         const dim_st = frame.Style{ .fg = theme.get().dim };
         const y1 = rect.y;
+        if (self.plugins) |manager| {
+            if (manager.has_footer and (self.renderPluginFooter(manager, frm, rect) catch return error.PluginFooter)) return;
+        }
 
         // --- Line 1: dim(project path + branch) + right-aligned hint ---
         {
@@ -314,6 +319,37 @@ pub const Panels = struct {
             try self.renderTurns(frm, &x, x_end, y2, dim_st);
             try self.renderModelInfo(frm, x, x_end, y2, rect.w, dim_st);
         }
+    }
+
+    fn renderPluginFooter(self: *const Panels, manager: *@import("../../core/plugins.zig").Manager, frm: *frame.Frame, rect: Rect) !bool {
+        var quota_buf: [256]u8 = undefined;
+        const limits_text = try quota.formatForModel(self.limits, self.model.items, &quota_buf);
+        const raw = try manager.footer(self.alloc, .{
+            .width = rect.w, .height = @min(rect.h, 2),
+            .model = self.model.items, .provider = self.provider.items,
+            .thinking = self.thinking_label, .cwd = self.cwd, .branch = self.branch,
+            .inputTokens = self.tot_in, .outputTokens = self.tot_out,
+            .cacheRead = self.tot_cr, .cacheWrite = self.tot_cw,
+            .contextTokens = self.cum_tok, .contextLimit = self.ctx_limit,
+            .costMicents = self.cost_micents, .subscription = self.is_sub,
+            .turns = self.turns, .backgroundRunning = self.bg_running,
+            .limits = limits_text,
+        });
+        defer self.alloc.free(raw);
+        const Segment = struct { text: []const u8, fg: ?u24 = null, bg: ?u24 = null };
+        const parsed = try std.json.parseFromSlice(struct { rows: ?[]const []const Segment = null }, self.alloc, raw, .{});
+        defer parsed.deinit();
+        const rows = parsed.value.rows orelse return false;
+        for (rows[0..@min(rows.len, rect.h)], 0..) |segments, row| {
+            var x = rect.x;
+            for (segments) |segment| {
+                try writePart(frm, &x, rect.x + rect.w, rect.y + row, segment.text, .{
+                    .fg = if (segment.fg) |rgb| .{ .rgb = rgb } else .default,
+                    .bg = if (segment.bg) |rgb| .{ .rgb = rgb } else .default,
+                });
+            }
+        }
+        return true;
     }
 
     fn renderPathBranch(

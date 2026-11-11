@@ -113,6 +113,16 @@ pz.on("tool_call", (event, ctx) => {
     return {block: true, reason: "This plugin protects .env files"};
   }
 });
+
+pz.on("footer_render", (event, ctx) => {
+  // Customize the TUI footer: up to 2 rows of up to 32 segments each.
+  return {
+    rows: [
+      [{text: " model ", fg: 0xffffff, bg: 0x375a7f}, {text: "\ue0b0", fg: 0x375a7f}],
+      [{text: "secondary info", fg: 0xaaaaaa}]
+    ]
+  };
+});
 ```
 
 | Event | Payload | Return value |
@@ -121,6 +131,7 @@ pz.on("tool_call", (event, ctx) => {
 | `before_request` | `sessionId`, `model`, `provider`, `prompt`, `systemPrompt` | nothing, or `{systemPromptAppend: string}` |
 | `tool_call` | `toolName`, `toolCallId`, `input` | nothing, or `{block: boolean, reason?: string}` |
 | `tool_result` | `toolName`, `toolCallId`, `output`, `isError` | ignored |
+| `footer_render` | `width`, `height`, `model`, `provider`, `thinking`, `cwd`, `branch`, `inputTokens`, `outputTokens`, `cacheRead`, `cacheWrite`, `contextTokens`, `contextLimit`, `costMicents`, `subscription`, `turns`, `backgroundRunning`, `limits` | nothing, or `{rows: Array<Array<{text: string, fg?: number, bg?: number}>>}` |
 | `session_end` | `sessionId` | ignored |
 
 Handlers run in registration order. Context additions are separated by blank
@@ -129,6 +140,18 @@ The tool-call hook runs after argument parsing/policy checks and before approval
 and dispatch. The result event observes completed dispatches; it does not cover
 validation failures, policy denials, approval denials or tools blocked by a hook.
 `session_end` runs after normal session completion, not as a crash/failure hook.
+
+The `footer_render` event fires before the TUI footer is rendered, providing
+terminal dimensions, model/provider/thinking state, path, branch, token counts,
+context usage, cost and quota data. A handler can return `{rows: [...]}` with up
+to 2 rows of up to 32 segments each. Each segment has `text` (string, max 2048
+bytes, no control characters U+0000–U+001F or U+007F–U+009F) and optional `fg`/`bg`
+colors (24-bit RGB integers 0x000000–0xFFFFFF). The native renderer handles
+wcwidth clipping for wide glyphs and applies the final layout. Returning nothing
+or an empty/absent `rows` array delegates to the built-in footer. The event is
+disabled under read-only tool masks and enforced policy mode, matching other
+plugin restrictions. See `examples/plugins/powerline-footer.js` for a complete
+implementation with responsive layout, presets and powerline separators.
 
 Context hooks append instructions for the outgoing request. They do **not**
 rewrite durable history, replace messages, override compaction, or implement a
