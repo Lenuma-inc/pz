@@ -13,6 +13,8 @@ src/**
 !src/core/providers/
 !src/core/providers/openrouter.zig
 !src/core/providers/compatible.zig
+!src/core/providers/tokenator.zig
+!src/core/providers/dahl.zig
 pkg/
 *.patch
 .pz/

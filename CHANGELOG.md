@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-11
+
+### Added
+- Experimental cc-safety-net-inspired JavaScript plugin example for lexical command and secret-path checks.
+
+### Fixed
+- Include the Tokenator and Dahl quota modules in source distributions, fixing release builds that failed with missing provider imports.
+
 ## [0.9.0] - 2026-11-11
 
 ### Added
