@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-11
+
+### Added
+- Embedded JavaScript plugins powered by QuickJS-ng, including extensions to built-in tools.
+- OpenRouter account login and named OpenAI-compatible endpoints.
+- Configuration switches for Exa, MCP, LSP, and skills.
+
+### Changed
+- Keep OpenAI as the sole built-in provider implementation, with other endpoints using the compatibility layer.
+- Defer remote model discovery until needed to reduce startup work.
+- Hide the LSP startup section when no servers are installed.
+- Clarify the approval flow for protected configuration edits.
+
+### Fixed
+- Skip invalid session replays when listing sessions and reject appends to torn JSONL records.
+- Prevent TUI crashes on trailing escapes in unterminated strings.
+- Restore Zig 0.17 compatibility for plugin C bindings and null-terminated string allocation.
+
 ## [0.8.0] - 2026-11-09
 
 ### Added
