@@ -3,9 +3,16 @@ const std = @import("std");
 const sys = @import("pz_io");
 const tools = @import("tools.zig");
 const path_guard = @import("tools/path_guard.zig");
-const c = @cImport({
-    @cInclude("plugins_bridge.h");
-});
+// Keep these declarations in sync with plugins_bridge.h. Zig 0.17 removed @cImport.
+const c = struct {
+    const pz_js = opaque {};
+    extern fn pz_js_create() ?*pz_js;
+    extern fn pz_js_destroy(p: *pz_js) void;
+    extern fn pz_js_eval(p: *pz_js, source: [*:0]const u8, len: usize, filename: [*:0]const u8) c_int;
+    extern fn pz_js_call(p: *pz_js, request: [*]const u8, len: usize) ?[*:0]u8;
+    extern fn pz_js_error(p: *pz_js) [*:0]const u8;
+    extern fn pz_js_free_string(s: [*:0]u8) void;
+};
 pub const max_tools = 64;
 const max_bytes = 1024 * 1024;
 
@@ -44,7 +51,7 @@ pub const Manager = struct {
             var reader = file.readerStreaming(sys.io, &buf);
             const source = try reader.interface.allocRemaining(alloc, .limited(max_bytes));
             defer alloc.free(source);
-            const filename = try a.dupeZ(u8, item.string);
+            const filename = try a.dupeSentinel(u8, item.string, 0);
             // Separate lexical scope for each script; registration closures retain state.
             const isolated = try std.fmt.allocPrint(alloc, "(function(){{\"use strict\";\n{s}\n}})();", .{source});
             defer alloc.free(isolated);
@@ -90,7 +97,7 @@ pub const Manager = struct {
 
     fn eval(self: *Manager, source: []const u8, filename: [:0]const u8) !void {
         // QuickJS requires a trailing NUL even though the source length is explicit.
-        const terminated = try self.alloc.dupeZ(u8, source);
+        const terminated = try self.alloc.dupeSentinel(u8, source, 0);
         defer self.alloc.free(terminated);
         if (c.pz_js_eval(self.runtime, terminated.ptr, source.len, filename.ptr) != 0) {
             std.log.warn("Plugin {s}: {s}", .{ filename, self.diagnostic() });
