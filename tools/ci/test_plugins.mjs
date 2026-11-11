@@ -139,4 +139,51 @@ test('example plugin runs without filesystem or network capabilities', () => {
   assert.equal(r.dispatch({op:'event',name:'tool_call',payload:{toolName:'hello',input:{name:'blocked'}}}).block, true);
   assert.equal(r.dispatch({op:'event',name:'tool_call',payload:{toolName:'hello',input:{name:'Ada'}}}).block, false);
 });
+test('workflow callbacks preserve state and context across completion rounds', () => {
+  const r = runtime(`pz.registerToolExtension({tool:'read',name:'flow',description:'x',parameters:{},
+    prepare:(args,ctx)=>{ctx.state.set('path',args.path);return {workflow:true,requests:[{path:args.path}],context:{round:1}}},
+    complete:(results,context,ctx)=>context.round===1
+      ? {workflow:true,requests:[{path:ctx.state.get('path')}],context:{round:2}}
+      : {workflow:true,output:results[0].output,isError:false}})`);
+  const event=(name,payload)=>r.dispatch({op:'event',name,payload});
+  assert.deepEqual(event('__prepare_tool_extension',{tool:'read',args:{extension:'flow',extension_args:{path:'a'}}}),
+    {workflow:true,requests:[{path:'a'}],context:{round:1}});
+  const complete=context=>event('__complete_tool_extension',{tool:'read',name:'flow',context,results:[{output:'native',isError:false}]});
+  assert.deepEqual(complete({round:1}),{workflow:true,requests:[{path:'a'}],context:{round:2}});
+  assert.deepEqual(complete({round:2}),{workflow:true,output:'native',isError:false});
+});
+test('workflow callbacks reject async, malformed, recursive and invalid final results', () => {
+  const source=(prepare,complete)=>`pz.registerToolExtension({tool:'read',name:'flow',description:'x',parameters:{},prepare:()=>(${prepare}),complete:()=>(${complete})})`;
+  const prepare=r=>r.dispatch({op:'event',name:'__prepare_tool_extension',payload:{tool:'read',args:{extension:'flow'}}});
+  const complete=r=>r.dispatch({op:'event',name:'__complete_tool_extension',payload:{tool:'read',name:'flow',results:[{output:'ok',isError:false}]}});
+  for (const value of ['Promise.resolve({workflow:true,output:"x"})','{then(){}}','null','[]','{workflow:true,requests:[]}',
+    '{workflow:true,requests:Array(9).fill({path:"a"})}','{workflow:true,requests:[null]}','{workflow:true,requests:[[]]}',
+    '{workflow:true,requests:[{extension:"flow"}]}','{workflow:true,requests:[{extension_args:{}}]}','{workflow:true,requests:[{workflow:true,requests:[]}]}',
+    '{workflow:true,requests:[{}],extra:true}','{workflow:true,output:42}','{workflow:true,output:"x",isError:"yes"}','{workflow:true,output:"x",extra:true}',
+    '{workflow:true,output:"x".repeat(262145)}']) {
+    assert.throws(()=>prepare(runtime(source(value,'{workflow:true,output:"ok"}'))));
+    assert.throws(()=>complete(runtime(source('{workflow:true,requests:[{path:"a"}]}',value))));
+  }
+  assert.deepEqual(complete(runtime(source('{}','{workflow:true,output:"failed",isError:true}'))),{workflow:true,output:'failed',isError:true});
+  assert.throws(()=>complete(runtime(source('{}','{path:"a"}'))));
+  for (const marker of ['false','1','"true"','null']) {
+    assert.throws(()=>prepare(runtime(source(`{workflow:${marker},requests:[{}]}`,'{workflow:true,output:"ok"}'))));
+  }
+  const legacy=runtime("pz.registerToolExtension({tool:'read',name:'flow',description:'x',parameters:{},prepare:a=>({path:'a'})})");
+  assert.deepEqual(prepare(legacy),{path:'a'});
+  const nativeOutput=runtime("pz.registerToolExtension({tool:'read',name:'flow',description:'x',parameters:{},prepare:()=>({output:'movie.mp4'})})");
+  assert.deepEqual(prepare(nativeOutput),{output:'movie.mp4'});
+  assert.throws(()=>complete(legacy),/Missing extension completion/);
+  assert.throws(()=>runtime(source('{workflow:true,requests:[{}]}','{workflow:true,output:"ok"}').replace('complete:()=>({workflow:true,output:"ok"})','complete:42')),/Invalid/);
+});
+test('web-access cached passage offsets preserve Unicode and literal matching', () => {
+  const r = runtime(readFileSync(new URL('../../examples/plugins/web-access.js', import.meta.url), 'utf8'));
+  const prepare = args => r.dispatch({op:'event',name:'__prepare_tool_extension',payload:{tool:'web',args:{extension:'web_access',extension_args:args}}});
+  const plan = prepare({op:'fetch',url:'https://example.com'});
+  const result = r.dispatch({op:'event',name:'__complete_tool_extension',payload:{tool:'web',name:'web_access',context:plan.context,results:[{output:'İ needle [literal]',isError:false}]}});
+  const responseId = JSON.parse(result.output).responseId;
+  const found = needle => JSON.parse(prepare({op:'get_search_content',responseId,findText:needle}).output);
+  assert.equal(found('NEEDLE').passages[0].matchOffset,2);
+  assert.equal(found('[literal]').passages[0].matchOffset,9);
+});
 console.log(`Passed ${passed} bootstrap logic tests under Node vm; native QuickJS C limits NOT tested.`);

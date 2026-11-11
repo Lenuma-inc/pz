@@ -1407,7 +1407,17 @@ fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.I
         return .{ .id = try opts.alloc.dupe(u8, tc.id), .output = try std.fmt.allocPrint(opts.alloc, "tool extension preparation failed: {s}", .{@errorName(extension_err)}), .is_err = true };
     };
 
-    var parsed_args = parseCallArgs(parse_arena.allocator(), entry.kind, tc.args) catch {
+    const prepared = try std.json.parseFromSlice(std.json.Value, parse_arena.allocator(), tc.args, .{});
+    const original_args = try std.json.parseFromSlice(std.json.Value, parse_arena.allocator(), incoming_tc.args, .{});
+    if (original_args.value.object.contains("extension") and prepared.value.object.contains("workflow")) {
+        return runToolWorkflow(opts, incoming_tc, tc.args, parse_arena.allocator()) catch |workflow_err| {
+            if (workflow_err == error.OutOfMemory or workflow_err == error.Canceled) return workflow_err;
+            return .{ .id = try opts.alloc.dupe(u8, tc.id), .output = try std.fmt.allocPrint(opts.alloc, "tool extension workflow failed: {s}", .{@errorName(workflow_err)}), .is_err = true };
+        };
+    }
+
+    var parsed_args = parseCallArgs(parse_arena.allocator(), entry.kind, tc.args) catch |parse_err| {
+        if (parse_err == error.OutOfMemory) return parse_err;
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
             .output = try std.fmt.allocPrint(opts.alloc, "invalid tool arguments for {s}", .{tc.name}),
@@ -1753,6 +1763,97 @@ fn joinChunks(alloc: std.mem.Allocator, out: []const tools.Output) ![]const u8 {
         at += chunk.chunk.len;
     }
     return buf;
+}
+
+fn workflowFinal(alloc: std.mem.Allocator, id: []const u8, value: std.json.Value) !providers.ToolResult {
+    if (value != .object) return error.InvalidToolArgs;
+    const marker = value.object.get("workflow") orelse return error.InvalidToolArgs;
+    if (marker != .bool or !marker.bool) return error.InvalidToolArgs;
+    var keys = value.object.iterator();
+    while (keys.next()) |item| {
+        if (!std.mem.eql(u8, item.key_ptr.*, "workflow") and !std.mem.eql(u8, item.key_ptr.*, "output") and !std.mem.eql(u8, item.key_ptr.*, "isError")) return error.InvalidToolArgs;
+    }
+    const output = value.object.get("output") orelse return error.InvalidToolArgs;
+    const is_error = value.object.get("isError") orelse std.json.Value{ .bool = false };
+    if (output != .string or is_error != .bool or output.string.len > 256 * 1024) return error.InvalidToolArgs;
+    const owned_id = try alloc.dupe(u8, id);
+    errdefer alloc.free(owned_id);
+    return .{ .id = owned_id, .output = try alloc.dupe(u8, output.string), .is_err = is_error.bool };
+}
+
+test "extension final output validates shape and preserves error status" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const valid = try std.json.parseFromSlice(std.json.Value, alloc, "{\"workflow\":true,\"output\":\"cached\",\"isError\":true}", .{});
+    const result = try workflowFinal(alloc, "parent", valid.value);
+    try std.testing.expectEqualStrings("parent", result.id);
+    try std.testing.expectEqualStrings("cached", result.output);
+    try std.testing.expect(result.is_err);
+    for ([_][]const u8{ "{\"workflow\":true,\"output\":1}", "{\"workflow\":true,\"output\":\"x\",\"isError\":1}", "{\"workflow\":true,\"output\":\"x\",\"requests\":[]}" }) |raw| {
+        const invalid = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+        try std.testing.expectError(error.InvalidToolArgs, workflowFinal(alloc, "parent", invalid.value));
+    }
+    const oversized = try alloc.alloc(u8, 256 * 1024 + 1);
+    var object = std.json.ObjectMap.init(alloc);
+    try object.put("workflow", .{ .bool = true });
+    try object.put("output", .{ .string = oversized });
+    try std.testing.expectError(error.InvalidToolArgs, workflowFinal(alloc, "parent", .{ .object = object }));
+}
+
+// Workflow children always re-enter normal native authorization and approval.
+fn runToolWorkflow(opts: Opts, tc: providers.ToolCall, initial: []const u8, alloc: std.mem.Allocator) anyerror!providers.ToolResult {
+    const original = try std.json.parseFromSlice(std.json.Value, alloc, tc.args, .{});
+    const extension = original.value.object.get("extension") orelse return error.InvalidToolArgs;
+    if (extension != .string) return error.InvalidToolArgs;
+    var step = initial;
+    var total: usize = 0;
+    var output_bytes: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 8) : (rounds += 1) {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, step, .{});
+        if (parsed.value != .object) return error.InvalidToolArgs;
+        const marker = parsed.value.object.get("workflow") orelse return error.InvalidToolArgs;
+        if (marker != .bool or !marker.bool) return error.InvalidToolArgs;
+        var keys = parsed.value.object.iterator();
+        while (keys.next()) |item| {
+            if (!std.mem.eql(u8, item.key_ptr.*, "workflow") and !std.mem.eql(u8, item.key_ptr.*, "requests") and !std.mem.eql(u8, item.key_ptr.*, "context") and !std.mem.eql(u8, item.key_ptr.*, "output") and !std.mem.eql(u8, item.key_ptr.*, "isError")) return error.InvalidToolArgs;
+        }
+        if (!parsed.value.object.contains("requests")) return workflowFinal(opts.alloc, tc.id, parsed.value);
+        if (parsed.value.object.contains("output") or parsed.value.object.contains("isError")) return error.InvalidToolArgs;
+        const requests = parsed.value.object.get("requests").?;
+        if (requests != .array or requests.array.items.len == 0 or requests.array.items.len > 8 - total) return error.InvalidToolArgs;
+        const Result = struct { output: []const u8, isError: bool };
+        const results = try alloc.alloc(Result, requests.array.items.len);
+        for (requests.array.items, 0..) |request, i| {
+            if (request != .object or request.object.contains("extension") or request.object.contains("extension_args") or request.object.contains("workflow")) return error.InvalidToolArgs;
+            const raw = try std.json.Stringify.valueAlloc(alloc, request, .{});
+            var image: ?providers.Image = null;
+            defer if (image) |img| opts.alloc.free(img.data);
+            const child = try runTool(opts, .{ .id = tc.id, .name = tc.name, .args = raw }, &image);
+            if (child.is_err) return child;
+            defer opts.alloc.free(child.id);
+            defer opts.alloc.free(child.output);
+            total += 1;
+            if (child.output.len > 256 * 1024 - output_bytes) return error.InvalidToolArgs;
+            output_bytes += child.output.len;
+            if (image != null) return error.UnsupportedWorkflowImage;
+            results[i] = .{ .output = try alloc.dupe(u8, child.output), .isError = false };
+        }
+        const payload = try std.json.Stringify.valueAlloc(alloc, .{
+            .tool = tc.name,
+            .name = extension.string,
+            .args = original.value,
+            .context = parsed.value.object.get("context") orelse .null,
+            .results = results,
+        }, .{});
+        step = (try opts.reg.event(alloc, "__complete_tool_extension", payload)) orelse return error.InvalidToolArgs;
+        const reply = try std.json.parseFromSlice(std.json.Value, alloc, step, .{});
+        if (reply.value != .object) return error.InvalidToolArgs;
+        if (reply.value.object.contains("requests")) continue;
+        return workflowFinal(opts.alloc, tc.id, reply.value);
+    }
+    return error.ToolWorkflowLimit;
 }
 
 // Transform once, before parsing, authorization, hooks and approval. Never dispatch
@@ -2756,6 +2857,170 @@ test "runTool forwards cancel source to dispatch" {
         .dispatch_run_ct = dispatch_impl.run_ct,
         .tr = tr,
     });
+}
+
+test "workflow native authorization bounds and completion preserve parent and target" {
+    const DispatchImpl = struct {
+        dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
+        run_ct: usize = 0,
+        out: [1]tools.Output = undefined,
+
+        fn run(self: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
+            self.run_ct += 1;
+            try std.testing.expectEqual(tools.Kind.read, call.kind);
+            try std.testing.expectEqualStrings("call-1", call.id);
+
+            self.out[0] = .{
+                .call_id = call.id,
+                .seq = 0,
+                .at_ms = call.at_ms,
+                .stream = .stdout,
+                .chunk = "tool-ok",
+            };
+
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms,
+                .out = self.out[0..],
+                .final = .{
+                    .ok = .{ .code = 0 },
+                },
+            };
+        }
+        const Bind = tools.Dispatch.Bind(@This(), @This().run);
+    };
+
+    const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        fn start(_: *@This(), _: providers.Request) !*providers.Stream {
+            return error.Unused;
+        }
+    };
+
+    const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
+        fn append(_: *@This(), _: []const u8, _: session.Event) !void {
+            return error.Unused;
+        }
+
+        fn replay(_: *@This(), _: []const u8) !*session.Reader {
+            return error.Unused;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const Auth = struct {
+        tool_auth: ToolAuth = .{ .vt = &ToolAuth.Bind(@This(), @This().check).vt },
+        deny: bool = true,
+        fn check(self: *@This(), _: []const u8, _: []const u8, _: tools.Kind, _: []const u8, _: tools.Call.Args) !void {
+            if (self.deny) return error.PolicyDenied;
+        }
+    };
+    const Hook = struct {
+        completions: usize = 0,
+        finish: bool = false,
+        fn event(ptr: *anyopaque, allocator: std.mem.Allocator, name: []const u8, payload: []const u8) ![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (std.mem.eql(u8, name, "__prepare_tool_extension")) return allocator.dupe(u8, "{\"workflow\":true,\"requests\":[{\"path\":\"a.txt\"},{\"path\":\"b.txt\"}],\"context\":{\"marker\":42}}");
+            if (std.mem.eql(u8, name, "__complete_tool_extension")) {
+                self.completions += 1;
+                try std.testing.expect(std.mem.indexOf(u8, payload, "\"tool\":\"read\"") != null);
+                try std.testing.expect(std.mem.indexOf(u8, payload, "\"marker\":42") != null);
+                try std.testing.expect(std.mem.indexOf(u8, payload, "tool-ok") != null);
+                return allocator.dupe(u8, if (self.finish) "{\"workflow\":true,\"output\":\"completed\"}" else "{\"workflow\":true,\"requests\":[{\"path\":\"a.txt\"},{\"path\":\"b.txt\"}],\"context\":{\"marker\":42}}");
+            }
+            return allocator.dupe(u8, "{}");
+        }
+    };
+
+    var dispatch_impl = DispatchImpl{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "read",
+            .kind = .read,
+            .spec = .{
+                .kind = .read,
+                .desc = "read file",
+                .params = &.{
+                    .{
+                        .name = "path",
+                        .ty = .string,
+                        .required = true,
+                        .desc = "path",
+                    },
+                },
+                .out = .{
+                    .max_bytes = 4096,
+                    .stream = false,
+                },
+                .timeout_ms = 1000,
+                .destructive = false,
+            },
+            .dispatch = &dispatch_impl.dispatch,
+        },
+    };
+
+    var mode_impl = ModeImpl{};
+
+    var provider_impl = ProviderImpl{};
+
+    var store_impl = StoreImpl{};
+
+    var auth = Auth{};
+    var hook = Hook{};
+    var reg = tools.Registry.init(entries[0..]);
+    reg.hook_ctx = &hook;
+    reg.hook_event = Hook.event;
+    const opts: Opts = .{
+        .alloc = std.testing.allocator,
+        .sid = "workflow",
+        .prompt = "prompt",
+        .model = "m",
+        .provider = &provider_impl.provider,
+        .store = &store_impl.session_store,
+        .reg = reg,
+        .mode = &mode_impl.mode_sink,
+        .tool_auth = &auth.tool_auth,
+    };
+    const call: providers.ToolCall = .{ .id = "call-1", .name = "read", .args = "{\"extension\":\"flow\"}" };
+    var image_out: ?providers.Image = null;
+    defer if (image_out) |img| std.testing.allocator.free(img.data);
+    const tr = try runTool(opts, call, &image_out);
+    defer std.testing.allocator.free(tr.id);
+    defer std.testing.allocator.free(tr.output);
+
+    try std.testing.expectEqualStrings("call-1", tr.id);
+    try std.testing.expect(tr.is_err);
+    try std.testing.expectEqual(@as(usize, 0), dispatch_impl.run_ct);
+    try std.testing.expectEqual(@as(usize, 0), hook.completions);
+    try std.testing.expect(std.mem.startsWith(u8, tr.output, "blocked by policy; do not retry"));
+
+    // Eight successful native operations exhaust the total bound, even when a
+    // completion callback asks for another round.
+    auth.deny = false;
+    const bounded = try runTool(opts, call, &image_out);
+    defer std.testing.allocator.free(bounded.id);
+    defer std.testing.allocator.free(bounded.output);
+    try std.testing.expect(bounded.is_err);
+    try std.testing.expectEqualStrings("call-1", bounded.id);
+    try std.testing.expectEqual(@as(usize, 8), dispatch_impl.run_ct);
+    try std.testing.expectEqual(@as(usize, 4), hook.completions);
+
+    hook.finish = true;
+    const finished = try runTool(opts, call, &image_out);
+    defer std.testing.allocator.free(finished.id);
+    defer std.testing.allocator.free(finished.output);
+    try std.testing.expectEqualStrings("call-1", finished.id);
+    try std.testing.expectEqualStrings("completed", finished.output);
+    try std.testing.expect(!finished.is_err);
+    try std.testing.expectEqual(@as(usize, 10), dispatch_impl.run_ct);
 }
 
 test "runTool approval hook binds repo policy session and cache state" {

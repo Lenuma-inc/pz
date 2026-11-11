@@ -30,6 +30,7 @@ See [the native API documentation](../../docs/PLUGINS.md).
 | `tool-stats.js` | `/toolstats [reset]` | Counts observed calls, results and `isError` results by exact `event.toolName`; reset clears counters. |
 | `session-notes.js` | `/notes [list\|add text\|clear]`; model tool `session_note` | Maintain small ephemeral notes. Only the user command can clear them. |
 | `handoff.js` | `/handoff [goal]` | Emit Markdown containing the current maintained goal, notes and observed session/model/provider metadata. |
+| `web-access.js` | `web` extension `web_access`; `/webaccess [status\|clear]` | [Native web-access adaptation](WEB_ACCESS.md): multi-query search, multi-page fetch, cached paging/passage finding and source evidence. Demonstrates multi-step extension callbacks; no yt-dlp. |
 
 Presets do **not** change tool permissions. In particular, `plan` is an
 instruction-only request to avoid mutation, not enforced read-only mode. Turning

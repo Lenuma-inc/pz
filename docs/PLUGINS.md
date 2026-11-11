@@ -83,8 +83,8 @@ dispatch implementation. Registrations for unavailable targets cannot execute.
 Call the original tool with only `extension` (the registered extension name)
 and optional `extension_args` (a JSON object encoded as a string). Native
 arguments cannot be mixed with this envelope. `prepare(args, ctx)` receives the
-decoded object and must synchronously return a native argument object for that
-same tool. Handlers must validate their input; `parameters` describes it to the
+decoded object and synchronously returns a native argument object for that
+same tool, or one of the multi-step result shapes described below. Handlers must validate their input; `parameters` describes it to the
 model, rather than providing automatic JSON Schema validation. The runtime also
 accepts an object for `extension_args`, but advertises a string in tool schemas.
 
@@ -94,6 +94,48 @@ paths, URLs and operations. Returning another extension envelope is rejected;
 there is no recursive dispatch, target switching, direct network access or shell
 access from JavaScript. Errors stop the call rather than falling back to the
 original operation. Ordinary calls retain their original behavior.
+
+### Multi-step extensions
+
+An extension can additionally register `complete(results, context, ctx)`.
+Instead of native arguments, `prepare` can return a bounded plan explicitly
+marked with `workflow: true`. The marker is required so native fields such as
+ffmpeg's `output` are never mistaken for extension results:
+
+```javascript
+pz.registerToolExtension({
+  tool: 'web', name: 'compare_pages',
+  description: 'Read two pages through the ordinary web tool',
+  parameters: { type: 'object' },
+  prepare(args) {
+    return {
+      workflow: true,
+      requests: [{ url: 'https://example.com/a' }, { url: 'https://example.com/b' }],
+      context: { label: 'Comparison sources' }
+    };
+  },
+  complete(results, context, ctx) {
+    return { workflow: true, output: context.label + '\n' + results.map(r => r.output).join('\n\n') };
+  }
+});
+```
+
+`requests` contains native argument objects for the **same target tool**, never
+extension envelopes. Each request independently passes through native parsing,
+authorization, `tool_call` hooks, approval, execution and `tool_result` hooks.
+The host executes requests sequentially outside the JavaScript callback; this
+is not direct JavaScript network access or a general tool-switching API.
+`complete` receives `{output, isError}` results and the JSON `context` returned
+with the plan. It may return another plan or a final
+`{workflow: true, output: string, isError?: boolean}`. A failed/denied native request aborts the
+workflow without invoking `complete`; extensions cannot retry around a denial.
+
+There are at most eight requests and eight rounds per invocation, and bounded
+final output (256 KiB). Nested extension calls are rejected. A pure cached read
+may return the marked final-output shape directly from `prepare`, without a native
+request. It does not grant new host capabilities; state is still local to the
+plugin runtime. Existing native argument adapters remain compatible. See the
+[web-access adaptation](../examples/plugins/WEB_ACCESS.md) for a real consumer.
 
 Only tools with matching registered extensions receive an alternative envelope
 in their model-facing schema. The original native schema remains an alternative.

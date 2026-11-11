@@ -8,6 +8,12 @@
   let sealed = false;
   function name(n) { if (typeof n !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(n)) throw Error('Invalid plugin registration name'); }
   function sync(v) { if (v && typeof v.then === 'function') throw Error('Async/Promise plugin results are not supported'); return v; }
+  function validateFinal(result) {
+    if (result.workflow !== true || Object.keys(result).some(k=>k !== 'workflow' && k !== 'output' && k !== 'isError') || typeof result.output !== 'string' || result.output.length > 262144 || (result.isError !== undefined && typeof result.isError !== 'boolean')) throw Error('Invalid extension output');
+  }
+  function validateWorkflow(result,t) {
+    if (result.workflow !== true || typeof t.complete !== 'function' || Object.keys(result).some(k=>k !== 'workflow' && k !== 'requests' && k !== 'context') || !Array.isArray(result.requests) || result.requests.length < 1 || result.requests.length > 8 || result.requests.some(r=>!r || typeof r !== 'object' || Array.isArray(r) || 'extension' in r || 'extension_args' in r || 'workflow' in r)) throw Error('Invalid extension workflow');
+  }
   function registering() { if (sealed) throw Error('Plugin registrations are closed'); }
   const api = Object.freeze({
     apiVersion: 1,
@@ -20,10 +26,10 @@
     registerToolExtension(t) {
       registering(); name(t.name);
       name(t.tool);
-      if (typeof t.description !== 'string' || !t.parameters || typeof t.parameters !== 'object' || Array.isArray(t.parameters) || typeof t.prepare !== 'function') throw Error('Invalid tool extension descriptor');
+      if (typeof t.description !== 'string' || !t.parameters || typeof t.parameters !== 'object' || Array.isArray(t.parameters) || typeof t.prepare !== 'function' || (t.complete !== undefined && typeof t.complete !== 'function')) throw Error('Invalid tool extension descriptor');
       const key = t.tool+':'+t.name;
       if (extensions.size >= 64 || extensions.has(key)) throw Error('Duplicate or excessive tool extension');
-      extensions.set(key,{tool:t.tool,name:t.name,description:t.description,parameters:parse(stringify(t.parameters)),prepare:t.prepare});
+      extensions.set(key,{tool:t.tool,name:t.name,description:t.description,parameters:parse(stringify(t.parameters)),prepare:t.prepare,complete:t.complete});
     },
     registerCommand(n,c) {
       registering(); name(n);
@@ -66,6 +72,20 @@
         if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Invalid extension arguments');
         result = sync(t.prepare(input,ctx));
         if (!result || typeof result !== 'object' || Array.isArray(result) || 'extension' in result || 'extension_args' in result) throw Error('Invalid or recursive extension result');
+        if ('workflow' in result) {
+          if ('requests' in result) validateWorkflow(result,t);
+          else validateFinal(result);
+        }
+      }
+      if (q.name === '__complete_tool_extension') {
+        const {tool,name:extension,results,context} = q.payload;
+        const t = extensions.get(tool+':'+extension);
+        if (!t || typeof t.complete !== 'function') throw Error('Missing extension completion callback');
+        if (!Array.isArray(results) || results.length < 1 || results.length > 8 || results.some(r=>!r || typeof r.output !== 'string' || r.isError !== false)) throw Error('Invalid extension results');
+        result = sync(t.complete(results,context,ctx));
+        if (!result || typeof result !== 'object' || Array.isArray(result) || 'extension' in result || 'extension_args' in result) throw Error('Invalid extension completion');
+        if ('requests' in result) validateWorkflow(result,t);
+        else validateFinal(result);
       }
       if (q.name === 'before_request' && extensions.size) result.systemPromptAppend = 'Available builtin tool extensions (call the same tool with only extension and extension_args as a JSON object string; derived native operations retain normal validation and approval):\n'+stringify(Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters})));
       for (const f of hooks.get(q.name) || []) {
