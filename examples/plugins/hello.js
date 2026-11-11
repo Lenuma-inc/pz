@@ -14,6 +14,7 @@ pz.registerTool({
   }
 });
 pz.registerCommand('hello', {
+    description: "Print a local greeting",
   handler(args) { return 'Hello, ' + (args || 'world') + '!'; }
 });
 pz.on('before_request', () => ({

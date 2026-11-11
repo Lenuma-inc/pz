@@ -36,6 +36,10 @@ rejected; custom commands cannot override pz commands.
 ```javascript
 pz.registerCommand("hello", {
   description: "Greet someone",
+  completions: [
+    { value: "world", description: "Greet the whole world" },
+    { value: "team", description: "Greet the team" }
+  ],
   handler(args, ctx) {
     return `Hello, ${args || "world"}!`;
   }

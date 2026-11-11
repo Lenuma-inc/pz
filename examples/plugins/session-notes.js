@@ -16,7 +16,10 @@
     n.push(text);
     return 'Added note ' + n.length + '.';
   }
-  pz.registerCommand('notes', { handler(args, ctx) {
+  pz.registerCommand('notes', {
+    description: "Manage temporary session notes",
+    completions: [{"value": "list", "description": "Show session notes"}, {"value": "add", "description": "Add a note: add text"}, {"value": "clear", "description": "Delete all session notes"}],
+    handler(args, ctx) {
     const arg = (args || '').trim();
     if (!arg || arg === 'list') return list(ctx);
     if (arg === 'clear') { ctx.state.set(key, []); return 'Session notes cleared.'; }

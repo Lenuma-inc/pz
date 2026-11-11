@@ -5,6 +5,14 @@
   const presets = ['default', 'minimal', 'compact', 'full', 'ascii'];
   pz.registerCommand('powerline', {
     description: 'Select footer preset: default, minimal, compact, full, ascii, off',
+    completions: [
+      { value: 'default', description: 'Use the default footer layout' },
+      { value: 'minimal', description: 'Show only essential footer segments' },
+      { value: 'compact', description: 'Use a compact footer layout' },
+      { value: 'full', description: 'Show all footer segments' },
+      { value: 'ascii', description: 'Use ASCII separators instead of powerline glyphs' },
+      { value: 'off', description: 'Hide the plugin footer' }
+    ],
     handler(args) {
       const value = (args || '').trim();
       if (!value) return 'Powerline footer: ' + preset + '. Presets: ' + presets.join(', ') + ', off.';

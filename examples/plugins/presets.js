@@ -6,7 +6,10 @@
     review: 'Review changes critically: prioritize correctness, regressions, and missing tests. Report concrete findings with file references.',
     plan: 'Planning mode (instruction only): inspect and explain a proposed plan. Do not modify files or run mutating commands unless the user explicitly exits this preset.'
   };
-  pz.registerCommand('preset', { handler(args, ctx) {
+  pz.registerCommand('preset', {
+    description: "Select a prompt instruction preset",
+    completions: [{"value": "list", "description": "Show presets and active selection"}, {"value": "off", "description": "Disable the prompt preset"}, {"value": "concise", "description": "Request concise answers"}, {"value": "review", "description": "Request a critical code review"}, {"value": "plan", "description": "Request planning only; tool permissions are unchanged"}],
+    handler(args, ctx) {
     const name = (args || '').trim() || 'list';
     if (name === 'list') return 'Presets: concise, review, plan, off. Active: ' + (ctx.state.get(key) || 'off') + '. Plan is instruction-only, not a permission boundary.';
     if (name === 'off' || Object.prototype.hasOwnProperty.call(presets, name)) {

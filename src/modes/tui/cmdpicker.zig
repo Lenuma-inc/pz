@@ -11,6 +11,8 @@ const Style = frame_mod.Style;
 pub const Cmd = struct {
     name: []const u8,
     desc: []const u8,
+    args: []const []const u8 = &.{},
+    arg_desc: []const []const u8 = &.{},
 };
 
 pub const cmds = [_]Cmd{
@@ -59,11 +61,17 @@ pub const Picker = struct {
     sel: u8 = 0,
     scroll: u8 = 0,
     arg_src: ?[]const []const u8 = null, // non-null = arg mode
+    command_src: []const Cmd = &cmds,
+    arg_desc: []const []const u8 = &.{},
 
     pub fn update(prefix: []const u8) ?Picker {
-        var cp = Picker{ .matches = undefined, .n = 0 };
+        return updateCommands(&cmds, prefix);
+    }
+
+    pub fn updateCommands(source: []const Cmd, prefix: []const u8) ?Picker {
+        var cp = Picker{ .matches = undefined, .n = 0, .command_src = source };
         // Try prefix matching first
-        for (cmds, 0..) |cmd, i| {
+        for (source, 0..) |cmd, i| {
             if (cp.n >= max_match) break;
             if (prefix.len <= cmd.name.len and std.mem.startsWith(u8, cmd.name, prefix)) {
                 cp.matches[cp.n] = i;
@@ -72,8 +80,8 @@ pub const Picker = struct {
         }
         if (cp.n > 0) return cp;
         // Fallback to fuzzy matching
-        var scores: [cmds.len]i32 = undefined;
-        for (cmds, 0..) |cmd, i| {
+        var scores: [max_match]i32 = undefined;
+        for (source, 0..) |cmd, i| {
             if (cp.n >= max_match) break;
             if (fuzzy_mod.score(prefix, cmd.name)) |s| {
                 scores[cp.n] = s;
@@ -158,7 +166,7 @@ pub const Picker = struct {
     }
 
     pub fn selected(self: *const Picker) Cmd {
-        return cmds[self.matches[self.sel]];
+        return self.command_src[self.matches[self.sel]];
     }
 
     /// Return the selected arg text (arg mode only).
@@ -224,9 +232,19 @@ pub const Picker = struct {
                         x += 1;
                     }
                 }
+                const item = self.matches[idx];
+                if (w > 40 and item < self.arg_desc.len) {
+                    const desc_st = if (is_sel) sel_st else Style{ .fg = t.muted };
+                    x = @max(desc_col, x + 2);
+                    for (self.arg_desc[item]) |ch| {
+                        if (x >= w -| 2) break;
+                        try frm.set(x, y, ch, desc_st);
+                        x += 1;
+                    }
+                }
             } else {
                 // Cmd mode: "/name" + description
-                const cmd = cmds[self.matches[idx]];
+                const cmd = self.command_src[self.matches[idx]];
                 if (x < w) {
                     try frm.set(x, y, '/', name_st);
                     x += 1;
@@ -275,7 +293,7 @@ fn snapAlloc(alloc: std.mem.Allocator, cp: Picker) ![]u8 {
     try buf.print(alloc, "n={} sel={} scroll={}", .{ cp.n, cp.sel, cp.scroll });
     var i: usize = 0;
     while (i < cp.n) : (i += 1) {
-        const name = if (cp.arg_src) |items| items[cp.matches[i]] else cmds[cp.matches[i]].name;
+        const name = if (cp.arg_src) |items| items[cp.matches[i]] else cp.command_src[cp.matches[i]].name;
         try buf.print(alloc, "\n[{d}] {s}", .{ i, name });
     }
     return buf.toOwnedSlice(alloc);

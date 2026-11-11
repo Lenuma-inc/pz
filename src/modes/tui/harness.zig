@@ -25,6 +25,7 @@ pub const Ui = struct {
     border_fg: frame.Color = .{ .rgb = 0x81a2be },
     ov: ?overlay_mod.Overlay = null,
     picker: ?cmdpicker_mod.Picker = null,
+    command_src: []const cmdpicker_mod.Cmd = &cmdpicker_mod.cmds,
     arg_src: ?[]const []const u8 = null, // runtime-provided arg completion source
     path_items: ?[][]u8 = null, // owned file path completion items
     path_prefix: ?[]u8 = null, // cached prefix for path_items
@@ -394,12 +395,24 @@ pub const Ui = struct {
             self.clearPathItems();
             const prefix = text[1..];
             if (std.mem.indexOfScalar(u8, prefix, ' ')) |sp| {
-                if (self.arg_src) |src| {
+                var source = self.arg_src;
+                var descriptions: []const []const u8 = &.{};
+                if (source == null) {
+                    for (self.command_src) |command| {
+                        if (std.mem.eql(u8, prefix[0..sp], command.name)) {
+                            source = command.args;
+                            descriptions = command.arg_desc;
+                            break;
+                        }
+                    }
+                }
+                if (source) |src| {
                     const arg = std.mem.trim(u8, prefix[sp + 1 ..], " \t");
                     self.picker = cmdpicker_mod.Picker.updateArgs(src, arg);
+                    if (self.picker) |*picker| picker.arg_desc = descriptions;
                 }
             } else {
-                self.picker = cmdpicker_mod.Picker.update(prefix);
+                self.picker = cmdpicker_mod.Picker.updateCommands(self.command_src, prefix);
             }
         } else if (text.len > 0) {
             // Check for @ mention in last word

@@ -28,7 +28,8 @@
     registerCommand(n,c) {
       registering(); name(n);
       if (commands.size >= 64 || commands.has(n) || reservedCommands.has(n) || !c || typeof c.handler !== 'function') throw Error('Invalid, duplicate or excessive plugin command');
-      commands.set(n,{handler:c.handler});
+      if (c.completions !== undefined && (!Array.isArray(c.completions) || c.completions.length > 128 || c.completions.some(v => typeof v === 'string' ? v.length > 256 : !v || typeof v.value !== 'string' || v.value.length > 256 || typeof v.description !== 'string' || v.description.length > 1024))) throw Error('Invalid plugin command completions');
+      commands.set(n,{handler:c.handler,description:typeof c.description === 'string' ? c.description : '',completions:c.completions ? c.completions.map(v => typeof v === 'string' ? {value:v,description:''} : {value:v.value,description:v.description}) : []});
     },
     on(n,f) {
       registering(); if (!events.has(n) || typeof f !== 'function') throw Error('Invalid plugin event');
@@ -41,7 +42,7 @@
     const q = parse(raw); const ctx = Object.freeze({state:api.state});
     let result;
     if (q.op === 'list') { sealed = true; result = Array.from(tools.values(),t=>({name:t.name,description:t.description,parameters:t.parameters})); }
-    else if (q.op === 'describe') { result = {tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters}))}; }
+    else if (q.op === 'describe') { result = {tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),command_details:Array.from(commands,([name,c])=>({name,desc:c.description,args:c.completions.map(v=>v.value),arg_desc:c.completions.map(v=>v.description)})),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters}))}; }
     else if (q.op === 'tool') {
       const t = tools.get(q.name); if (!t) throw Error('Unknown plugin tool: '+q.name);
       result = sync(t.execute(q.args,ctx));

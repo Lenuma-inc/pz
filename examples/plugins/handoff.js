@@ -14,7 +14,9 @@
   }
   pz.on('session_start', observe);
   pz.on('before_request', (event, ctx) => { observe(event, ctx); return { systemPromptAppend: '' }; });
-  pz.registerCommand('handoff', { handler(args, ctx) {
+  pz.registerCommand('handoff', {
+    description: "Show maintained goal, notes and session metadata",
+    handler(args, ctx) {
     const goal = (args || '').trim();
     if (goal.length > 2000) return 'Usage: /handoff [goal] (maximum 2000 characters).';
     const s = state(ctx);

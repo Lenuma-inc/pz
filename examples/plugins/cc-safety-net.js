@@ -31,7 +31,8 @@
   }
 
   pz.registerCommand('safetynet', {
-    description: 'cc-safety-net guard: status/toggle/reset/explain',
+    completions: [{"value": "status", "description": "Show guard status and blocked calls"}, {"value": "toggle", "description": "Enable or disable the guard"}, {"value": "reset", "description": "Clear block counters"}],
+    description: "Inspect or configure the lexical safety guard",
     handler(args, ctx) {
       const arg = (args || '').trim();
       const s = state(ctx);

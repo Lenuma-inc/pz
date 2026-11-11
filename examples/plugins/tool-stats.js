@@ -25,7 +25,10 @@
   }
   pz.on('tool_call', (event, ctx) => { record(event, ctx, false); return { block: false }; });
   pz.on('tool_result', (event, ctx) => { record(event, ctx, true); });
-  pz.registerCommand('toolstats', { handler(args, ctx) {
+  pz.registerCommand('toolstats', {
+    description: "Show observed tool usage statistics",
+    completions: [{"value": "reset", "description": "Clear tool usage counters"}],
+    handler(args, ctx) {
     const arg = (args || '').trim();
     if (arg === 'reset') { ctx.state.set(key, null); return 'Tool statistics reset.'; }
     if (arg) return 'Usage: /toolstats [reset]';

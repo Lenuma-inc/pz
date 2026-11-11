@@ -2845,6 +2845,17 @@ fn runTui(
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
     ui.panels.plugins = tools_rt.pluginFooter();
+    const command_report = try tools_rt.pluginReport();
+    defer alloc.free(command_report);
+    const command_inventory = try std.json.parseFromSlice(struct { command_details: []const tui_cmdpicker.Cmd = &.{} }, alloc, command_report, .{ .ignore_unknown_fields = true });
+    defer command_inventory.deinit();
+    const completion_commands = try alloc.alloc(tui_cmdpicker.Cmd, tui_cmdpicker.cmds.len + command_inventory.value.command_details.len);
+    defer alloc.free(completion_commands);
+    @memcpy(completion_commands[0..tui_cmdpicker.cmds.len], &tui_cmdpicker.cmds);
+    for (command_inventory.value.command_details, tui_cmdpicker.cmds.len..) |command, i| {
+        completion_commands[i] = command;
+    }
+    ui.command_src = completion_commands;
     ui.panels.context_windows = &context_windows;
     ui.panels.ctx_limit = modelCtxWindow(model, ui.panels.context_windows);
     ui.panels.is_sub = is_sub;
@@ -3868,7 +3879,7 @@ fn runTui(
                             if (pre) |p| alloc.free(p);
                             const tab_text = ui.ed.text();
                             if (tab_text.len > 0 and tab_text[0] == '/') {
-                                completeSlashCmd(&ui.ed);
+                                completeSlashCmd(&ui.ed, ui.command_src);
                             } else if (tab_text.len > 0) {
                                 try completeFilePath(alloc, &ui);
                             }
@@ -6267,13 +6278,13 @@ fn parseCmdToolMask(raw: []const u8) !u16 {
 
 const tui_cmdpicker = @import("../modes/tui/cmdpicker.zig");
 
-fn completeSlashCmd(ed: *tui_harness.editor.Editor) void {
+fn completeSlashCmd(ed: *tui_harness.editor.Editor, commands: []const tui_cmdpicker.Cmd) void {
     const text = ed.text();
     if (text.len == 0 or text[0] != '/') return;
     const prefix = text[1..];
     var match: ?[]const u8 = null;
     var count: usize = 0;
-    for (tui_cmdpicker.cmds) |cmd| {
+    for (commands) |cmd| {
         if (prefix.len <= cmd.name.len and std.mem.startsWith(u8, cmd.name, prefix)) {
             if (match == null) match = cmd.name;
             count += 1;
