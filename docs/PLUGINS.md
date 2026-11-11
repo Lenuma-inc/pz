@@ -91,8 +91,9 @@ accepts an object for `extension_args`, but advertises a string in tool schemas.
 Preparation happens once, before native argument parsing, authorization, tool
 hooks, approval and execution. These stages see the derived arguments, including
 paths, URLs and operations. Returning another extension envelope is rejected;
-there is no recursive dispatch, target switching, direct network access or shell
-access from JavaScript. Errors stop the call rather than falling back to the
+there is no recursive dispatch, arbitrary target switching, direct network access
+or shell access from JavaScript. The opt-in MCP proxy capability below permits
+only routing to registered native remote MCP entries. Errors stop the call rather than falling back to the
 original operation. Ordinary calls retain their original behavior.
 
 ### Multi-step extensions
@@ -136,6 +137,34 @@ may return the marked final-output shape directly from `prepare`, without a nati
 request. It does not grant new host capabilities; state is still local to the
 plugin runtime. Existing native argument adapters remain compatible. See the
 [web-access adaptation](../examples/plugins/WEB_ACCESS.md) for a real consumer.
+
+### MCP discovery proxies
+
+An extension of the native `mcp` inventory tool may declare `mcpProxy: true`.
+This explicit capability omits remote MCP schemas from model-facing tool
+requests without removing entries from the registry. It does not hide native
+or plugin-defined tools; both can internally share kind `mcp`, so the host
+checks remote provenance rather than relying on the kind or name prefix.
+
+Such an extension may include a routed workflow request:
+
+```javascript
+{ workflow: true, requests: [{ tool: exactPublicMcpName, args: remoteArgs }] }
+```
+
+`tool` must resolve to a registered remote MCP entry. The same native parsing,
+authorization, hooks and approval path executes under that entry's real name.
+Routing to builtins, plugin-defined tools, other extensions, or unavailable
+targets is rejected. Other extensions retain same-target native argument
+requests. Remote arguments must be objects and cannot contain extension or
+workflow envelopes. The host validates the capability independently of the
+JavaScript callback.
+
+The standard native inventory supports paginated `list` and on-demand
+`describe` of one original input schema. The
+[MCP adapter example](../examples/plugins/MCP_ADAPTER.md) demonstrates this API.
+It does not grant server installation, process lifecycle, OAuth, filesystem,
+or general cross-tool execution capabilities.
 
 Only tools with matching registered extensions receive an alternative envelope
 in their model-facing schema. The original native schema remains an alternative.

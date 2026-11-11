@@ -310,6 +310,7 @@ pub const Manager = struct {
                 ctx.* = .{ .client = client, .server_name = server_name, .remote_name = try a.dupe(u8, name.string), .public_name = public_name };
                 try self.entries.append(self.alloc, .{
                     .name = public_name,
+                    .origin = .mcp,
                     .kind = .mcp,
                     .spec = .{ .kind = .mcp, .desc = try a.dupe(u8, desc.string), .params = &.{}, .schema_json = try std.json.Stringify.valueAlloc(a, schema, .{}), .out = .{ .max_bytes = max_frame, .stream = false }, .timeout_ms = client.timeout_ms, .destructive = true },
                     .dispatch = &ctx.dispatch,
@@ -708,6 +709,37 @@ fn eventEnd(raw: []const u8) ?struct { at: usize, len: usize } {
     };
     if (crlf) |at| return .{ .at = at, .len = 4 };
     return null;
+}
+
+/// Describe only registered remote tools; never expose transport configuration.
+pub fn describeAlloc(alloc: std.mem.Allocator, manager: ?*const Manager, name: []const u8) ![]u8 {
+    if (manager) |m| {
+        for (m.entries.items) |entry| {
+            if (entry.origin != .mcp or !std.mem.eql(u8, entry.name, name)) continue;
+            const schema = try std.json.parseFromSlice(std.json.Value, alloc, entry.spec.schema_json orelse return error.McpInvalidResponse, .{});
+            defer schema.deinit();
+            const binding: *Binding = @alignCast(@fieldParentPtr("dispatch", entry.dispatch));
+            return std.json.Stringify.valueAlloc(alloc, .{ .name = entry.name, .server = binding.server_name, .remote_name = binding.remote_name, .description = entry.spec.desc, .inputSchema = schema.value }, .{});
+        }
+    }
+    return error.McpToolNotFound;
+}
+
+pub fn reportPageAlloc(alloc: std.mem.Allocator, manager: ?*const Manager, offset: usize, limit: usize) ![]u8 {
+    if (limit == 0 or limit > 64) return error.InvalidToolArgs;
+    const raw = try reportAlloc(alloc, manager);
+    defer alloc.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    const inventory = parsed.value.object.get("tools").?.array.items;
+    if (offset > inventory.len) return error.InvalidToolArgs;
+    const end = offset + @min(limit, inventory.len - offset);
+    return std.json.Stringify.valueAlloc(alloc, .{
+        .servers = parsed.value.object.get("servers").?,
+        .tools = inventory[offset..end],
+        .total = inventory.len,
+        .nextOffset = if (end < inventory.len) @as(?usize, end) else null,
+    }, .{});
 }
 
 /// Safe public inventory: never expose executable arguments, environment variables or HTTP headers.

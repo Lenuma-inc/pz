@@ -75,6 +75,7 @@ pub fn bind(
 
         pub const Entry = struct {
             name: []const u8,
+            origin: enum { native, plugin, mcp } = .native,
             kind: Kind,
             spec: Spec,
             dispatch: *Dispatch,

@@ -32,6 +32,11 @@ See [the native API documentation](../../docs/PLUGINS.md).
 | `handoff.js` | `/handoff [goal]` | Emit Markdown containing the current maintained goal, notes and observed session/model/provider metadata. |
 | `web-access.js` | `web` extension `web_access`; `/webaccess [status\|clear]` | [Native web-access adaptation](WEB_ACCESS.md): multi-query search, multi-page fetch, cached paging/passage finding and source evidence. Demonstrates multi-step extension callbacks; no yt-dlp. |
 
+Optional MCP discovery proxy: [`mcp-adapter.js`](MCP_ADAPTER.md) extends the
+standard `mcp` tool with ranked search, on-demand schemas, native tool routing
+and cached results. It hides remote schemas from model requests, not from the
+native registry or permission checks. It does not change server startup.
+
 Presets do **not** change tool permissions. In particular, `plan` is an
 instruction-only request to avoid mutation, not enforced read-only mode. Turning
 a preset off stops future appendices; it cannot erase existing conversation text.

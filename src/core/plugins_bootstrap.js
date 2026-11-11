@@ -27,9 +27,10 @@
       registering(); name(t.name);
       name(t.tool);
       if (typeof t.description !== 'string' || !t.parameters || typeof t.parameters !== 'object' || Array.isArray(t.parameters) || typeof t.prepare !== 'function' || (t.complete !== undefined && typeof t.complete !== 'function')) throw Error('Invalid tool extension descriptor');
+      if (t.mcpProxy !== undefined && (t.mcpProxy !== true || t.tool !== 'mcp')) throw Error('Invalid MCP proxy capability');
       const key = t.tool+':'+t.name;
       if (extensions.size >= 64 || extensions.has(key)) throw Error('Duplicate or excessive tool extension');
-      extensions.set(key,{tool:t.tool,name:t.name,description:t.description,parameters:parse(stringify(t.parameters)),prepare:t.prepare,complete:t.complete});
+      extensions.set(key,{tool:t.tool,name:t.name,description:t.description,parameters:parse(stringify(t.parameters)),prepare:t.prepare,complete:t.complete,...(t.mcpProxy === true ? {mcpProxy:true} : {})});
     },
     registerCommand(n,c) {
       registering(); name(n);
@@ -48,7 +49,7 @@
     const q = parse(raw); const ctx = Object.freeze({state:api.state});
     let result;
     if (q.op === 'list') { sealed = true; result = Array.from(tools.values(),t=>({name:t.name,description:t.description,parameters:t.parameters})); }
-    else if (q.op === 'describe') { result = {tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),command_details:Array.from(commands,([name,c])=>({name,desc:c.description,args:c.completions.map(v=>v.value),arg_desc:c.completions.map(v=>v.description)})),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters}))}; }
+    else if (q.op === 'describe') { result = {tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),command_details:Array.from(commands,([name,c])=>({name,desc:c.description,args:c.completions.map(v=>v.value),arg_desc:c.completions.map(v=>v.description)})),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}))}; }
     else if (q.op === 'tool') {
       const t = tools.get(q.name); if (!t) throw Error('Unknown plugin tool: '+q.name);
       result = sync(t.execute(q.args,ctx));
@@ -60,7 +61,7 @@
       if (c && typeof result !== 'string') throw Error('Plugin command must return a string');
     } else if (q.op === 'event') {
       result = {};
-      if (q.name === '__tool_extensions') result = Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters}));
+      if (q.name === '__tool_extensions') result = Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}));
       if (q.name === '__prepare_tool_extension') {
         const {tool,args} = q.payload;
         name(tool);
@@ -87,7 +88,7 @@
         if ('requests' in result) validateWorkflow(result,t);
         else validateFinal(result);
       }
-      if (q.name === 'before_request' && extensions.size) result.systemPromptAppend = 'Available builtin tool extensions (call the same tool with only extension and extension_args as a JSON object string; derived native operations retain normal validation and approval):\n'+stringify(Array.from(extensions.values(),({tool,name,description,parameters})=>({tool,name,description,parameters})));
+      if (q.name === 'before_request' && extensions.size) result.systemPromptAppend = 'Available builtin tool extensions (call the same tool with only extension and extension_args as a JSON object string; derived native operations retain normal validation and approval):\n'+stringify(Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})})));
       for (const f of hooks.get(q.name) || []) {
         const r = sync(f(q.payload,ctx));
         if (q.name === 'before_request' && r != null) {

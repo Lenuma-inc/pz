@@ -1243,6 +1243,25 @@ fn reloadHist(opts: Opts, hist: *Hist) !void {
     }
 }
 
+// Proxy capability is scoped to the native MCP inventory entry and registered metadata.
+fn mcpProxyEnabled(reg: tools.Registry, extensions: []const std.json.Value, extension_name: ?[]const u8) bool {
+    const inventory = reg.byName("mcp") orelse return false;
+    if (inventory.origin != .native or inventory.kind != .mcp) return false;
+    for (extensions) |extension| {
+        if (extension != .object) continue;
+        const target = extension.object.get("tool") orelse continue;
+        const name = extension.object.get("name") orelse continue;
+        const capability = extension.object.get("mcpProxy") orelse continue;
+        if (target != .string or name != .string or capability != .bool or !capability.bool) continue;
+        if (!std.mem.eql(u8, target.string, "mcp")) continue;
+        if (extension_name) |wanted| {
+            if (!std.mem.eql(u8, wanted, name.string)) continue;
+        }
+        return true;
+    }
+    return false;
+}
+
 fn buildReqTools(
     alloc: std.mem.Allocator,
     reg: tools.Registry,
@@ -1260,7 +1279,10 @@ fn buildReqTools(
         for (out[0..built]) |t| alloc.free(t.schema);
         alloc.free(out);
     }
-    for (reg.entries, out) |entry, *slot| {
+    const hide_mcp = if (extension_list) |parsed| mcpProxyEnabled(reg, parsed.value.array.items, null) else false;
+    for (reg.entries) |entry| {
+        if (hide_mcp and entry.origin == .mcp) continue;
+        const slot = &out[built];
         const schema = if (entry.spec.schema_json) |raw_schema|
             try alloc.dupe(u8, raw_schema)
         else
@@ -1276,7 +1298,7 @@ fn buildReqTools(
         };
         built += 1;
     }
-    return out;
+    return try alloc.realloc(out, built);
 }
 
 fn toolExtensionSchema(alloc: std.mem.Allocator, native_schema: []const u8, tool_name: []const u8, extensions: []const std.json.Value) ![]const u8 {
@@ -1806,11 +1828,15 @@ fn runToolWorkflow(opts: Opts, tc: providers.ToolCall, initial: []const u8, allo
     const original = try std.json.parseFromSlice(std.json.Value, alloc, tc.args, .{});
     const extension = original.value.object.get("extension") orelse return error.InvalidToolArgs;
     if (extension != .string) return error.InvalidToolArgs;
+    const metadata = try opts.reg.event(alloc, "__tool_extensions", "{}");
+    const extensions = if (metadata) |raw| try std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) else null;
+    const proxy = if (extensions) |parsed| parsed.value == .array and std.mem.eql(u8, tc.name, "mcp") and mcpProxyEnabled(opts.reg, parsed.value.array.items, extension.string) else false;
     var step = initial;
     var total: usize = 0;
     var output_bytes: usize = 0;
     var rounds: usize = 0;
     while (rounds < 8) : (rounds += 1) {
+        if (step.len > 1024 * 1024) return error.ToolWorkflowLimit;
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, step, .{});
         if (parsed.value != .object) return error.InvalidToolArgs;
         const marker = parsed.value.object.get("workflow") orelse return error.InvalidToolArgs;
@@ -1827,15 +1853,28 @@ fn runToolWorkflow(opts: Opts, tc: providers.ToolCall, initial: []const u8, allo
         const results = try alloc.alloc(Result, requests.array.items.len);
         for (requests.array.items, 0..) |request, i| {
             if (request != .object or request.object.contains("extension") or request.object.contains("extension_args") or request.object.contains("workflow")) return error.InvalidToolArgs;
-            const raw = try std.json.Stringify.valueAlloc(alloc, request, .{});
+            var target = tc.name;
+            var args = request;
+            // Native requests keep their original argument shape; routing is explicit and privileged.
+            if ((request.object.contains("tool") and request.object.contains("args")) or (proxy and (request.object.contains("tool") or request.object.contains("args")))) {
+                if (!proxy or request.object.count() != 2) return error.InvalidToolArgs;
+                const tool = request.object.get("tool") orelse return error.InvalidToolArgs;
+                args = request.object.get("args") orelse return error.InvalidToolArgs;
+                if (tool != .string or args != .object) return error.InvalidToolArgs;
+                const remote = opts.reg.byName(tool.string) orelse return error.InvalidToolArgs;
+                if (remote.origin != .mcp) return error.InvalidToolArgs;
+                target = remote.name;
+            }
+            if (args.object.contains("extension") or args.object.contains("extension_args") or args.object.contains("workflow")) return error.InvalidToolArgs;
+            const raw = try std.json.Stringify.valueAlloc(alloc, args, .{});
             var image: ?providers.Image = null;
             defer if (image) |img| opts.alloc.free(img.data);
-            const child = try runTool(opts, .{ .id = tc.id, .name = tc.name, .args = raw }, &image);
-            if (child.is_err) return child;
+            const child = try runTool(opts, .{ .id = tc.id, .name = target, .args = raw }, &image);
             defer opts.alloc.free(child.id);
             defer opts.alloc.free(child.output);
             total += 1;
             if (child.output.len > 256 * 1024 - output_bytes) return error.InvalidToolArgs;
+            if (child.is_err) return .{ .id = try opts.alloc.dupe(u8, tc.id), .output = try opts.alloc.dupe(u8, child.output), .is_err = true };
             output_bytes += child.output.len;
             if (image != null) return error.UnsupportedWorkflowImage;
             results[i] = .{ .output = try alloc.dupe(u8, child.output), .isError = false };
@@ -1848,6 +1887,7 @@ fn runToolWorkflow(opts: Opts, tc: providers.ToolCall, initial: []const u8, allo
             .results = results,
         }, .{});
         step = (try opts.reg.event(alloc, "__complete_tool_extension", payload)) orelse return error.InvalidToolArgs;
+        if (step.len > 1024 * 1024) return error.ToolWorkflowLimit;
         const reply = try std.json.parseFromSlice(std.json.Value, alloc, step, .{});
         if (reply.value != .object) return error.InvalidToolArgs;
         if (reply.value.object.contains("requests")) continue;
@@ -1857,7 +1897,7 @@ fn runToolWorkflow(opts: Opts, tc: providers.ToolCall, initial: []const u8, allo
 }
 
 // Transform once, before parsing, authorization, hooks and approval. Never dispatch
-// a plugin-selected tool name: the original builtin entry remains authoritative.
+// an unvalidated plugin-selected name; workflow proxy routing is checked separately.
 fn prepareToolExtension(alloc: std.mem.Allocator, reg: tools.Registry, tool_name: []const u8, raw: []const u8) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
     defer parsed.deinit();
@@ -2926,8 +2966,14 @@ test "workflow native authorization bounds and completion preserve parent and ta
     const Hook = struct {
         completions: usize = 0,
         finish: bool = false,
+        proxy_target: ?[]const u8 = null,
+        proxy_capability: bool = true,
         fn event(ptr: *anyopaque, allocator: std.mem.Allocator, name: []const u8, payload: []const u8) ![]u8 {
             const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.proxy_target) |target| {
+                if (std.mem.eql(u8, name, "__tool_extensions")) return allocator.dupe(u8, if (self.proxy_capability) "[{\"tool\":\"mcp\",\"name\":\"flow\",\"mcpProxy\":true}]" else "[{\"tool\":\"mcp\",\"name\":\"flow\"}]");
+                if (std.mem.eql(u8, name, "__prepare_tool_extension")) return std.fmt.allocPrint(allocator, "{{\"workflow\":true,\"requests\":[{{\"tool\":\"{s}\",\"args\":{{}}}}]}}", .{target});
+            }
             if (std.mem.eql(u8, name, "__prepare_tool_extension")) return allocator.dupe(u8, "{\"workflow\":true,\"requests\":[{\"path\":\"a.txt\"},{\"path\":\"b.txt\"}],\"context\":{\"marker\":42}}");
             if (std.mem.eql(u8, name, "__complete_tool_extension")) {
                 self.completions += 1;
@@ -3020,6 +3066,68 @@ test "workflow native authorization bounds and completion preserve parent and ta
     try std.testing.expectEqualStrings("call-1", finished.id);
     try std.testing.expectEqualStrings("completed", finished.output);
     try std.testing.expect(!finished.is_err);
+    try std.testing.expectEqual(@as(usize, 10), dispatch_impl.run_ct);
+
+    // A proxy changes presentation, not registry membership or authorization.
+    var proxy_entries = [_]tools.Entry{ entries[0], entries[0], entries[0], entries[0] };
+    proxy_entries[1].name = "mcp";
+    proxy_entries[1].kind = .mcp;
+    proxy_entries[1].spec.kind = .mcp;
+    proxy_entries[2].name = "remote";
+    proxy_entries[2].origin = .mcp;
+    proxy_entries[2].kind = .mcp;
+    proxy_entries[2].spec.kind = .mcp;
+    proxy_entries[3].name = "plugin";
+    proxy_entries[3].origin = .plugin;
+    proxy_entries[3].kind = .mcp;
+    proxy_entries[3].spec.kind = .mcp;
+    var proxy_opts = opts;
+    proxy_opts.reg = tools.Registry.init(&proxy_entries);
+    proxy_opts.reg.hook_ctx = &hook;
+    proxy_opts.reg.hook_event = Hook.event;
+    hook.proxy_target = "remote";
+    const advertised = try buildReqTools(std.testing.allocator, proxy_opts.reg);
+    defer {
+        for (advertised) |tool| std.testing.allocator.free(tool.schema);
+        std.testing.allocator.free(advertised);
+    }
+    try std.testing.expectEqual(@as(usize, 3), advertised.len);
+    try std.testing.expectEqualStrings("read", advertised[0].name);
+    try std.testing.expectEqualStrings("mcp", advertised[1].name);
+    try std.testing.expectEqualStrings("plugin", advertised[2].name);
+    try std.testing.expect(proxy_opts.reg.byName("remote") != null);
+    proxy_entries[1].origin = .plugin;
+    const plugin_inventory = try buildReqTools(std.testing.allocator, proxy_opts.reg);
+    defer {
+        for (plugin_inventory) |tool| std.testing.allocator.free(tool.schema);
+        std.testing.allocator.free(plugin_inventory);
+    }
+    try std.testing.expectEqual(@as(usize, 4), plugin_inventory.len);
+    proxy_entries[1].origin = .native;
+    auth.deny = true;
+    const proxy_call: providers.ToolCall = .{ .id = "call-1", .name = "mcp", .args = "{\"extension\":\"flow\"}" };
+    const denied = try runTool(proxy_opts, proxy_call, &image_out);
+    defer std.testing.allocator.free(denied.id);
+    defer std.testing.allocator.free(denied.output);
+    try std.testing.expect(denied.is_err);
+    try std.testing.expect(std.mem.startsWith(u8, denied.output, "blocked by policy; do not retry"));
+    try std.testing.expectEqual(@as(usize, 10), dispatch_impl.run_ct);
+
+    for ([_][]const u8{ "read", "mcp", "plugin", "missing" }) |target| {
+        hook.proxy_target = target;
+        const rejected = try runTool(proxy_opts, proxy_call, &image_out);
+        defer std.testing.allocator.free(rejected.id);
+        defer std.testing.allocator.free(rejected.output);
+        try std.testing.expect(rejected.is_err);
+        try std.testing.expect(std.mem.indexOf(u8, rejected.output, "InvalidToolArgs") != null);
+    }
+    hook.proxy_target = "remote";
+    hook.proxy_capability = false;
+    const no_capability = try runTool(proxy_opts, proxy_call, &image_out);
+    defer std.testing.allocator.free(no_capability.id);
+    defer std.testing.allocator.free(no_capability.output);
+    try std.testing.expect(no_capability.is_err);
+    try std.testing.expect(std.mem.indexOf(u8, no_capability.output, "InvalidToolArgs") != null);
     try std.testing.expectEqual(@as(usize, 10), dispatch_impl.run_ct);
 }
 

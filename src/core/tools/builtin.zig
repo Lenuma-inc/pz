@@ -307,7 +307,7 @@ pub const Runtime = struct {
             self.combined[len] = .{
                 .name = "mcp",
                 .kind = .mcp,
-                .spec = .{ .kind = .mcp, .desc = "List configured MCP servers, connection status and available tools. Use op=list when asked which MCP servers or tools are available. Does not expose secrets or execute remote tools.", .params = &.{}, .schema_json = "{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"enum\":[\"list\"]}},\"required\":[\"op\"],\"additionalProperties\":false}", .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 2000, .destructive = false },
+                .spec = .{ .kind = .mcp, .desc = "List configured MCP servers and tools, or describe a registered remote tool by name to retrieve its inputSchema. Does not expose secrets or execute remote tools.", .params = &.{}, .schema_json = "{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"enum\":[\"list\",\"describe\"]},\"name\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64}},\"required\":[\"op\"],\"additionalProperties\":false}", .out = .{ .max_bytes = @intCast(self.max_bytes), .stream = false }, .timeout_ms = 2000, .destructive = false },
                 .dispatch = &self.dispatch,
             };
             len += 1;
@@ -788,10 +788,23 @@ pub const Runtime = struct {
     }
 
     fn runMcpList(self: *Runtime, call: tools.Call) !tools.Result {
-        const parsed = try std.json.parseFromSlice(struct { op: enum { list } }, self.alloc, call.args.mcp.arguments, .{});
+        const parsed = try std.json.parseFromSlice(struct { op: enum { list, describe }, name: ?[]const u8 = null, offset: ?usize = null, limit: ?usize = null }, self.alloc, call.args.mcp.arguments, .{});
         defer parsed.deinit();
-        const raw = try self.mcpReport();
+        const raw = switch (parsed.value.op) {
+            .list => blk: {
+                if (parsed.value.name != null) return error.InvalidToolArgs;
+                if (parsed.value.offset != null or parsed.value.limit != null)
+                    break :blk try @import("../mcp.zig").reportPageAlloc(self.alloc, self.mcp, parsed.value.offset orelse 0, parsed.value.limit orelse 64);
+                break :blk try self.mcpReport();
+            },
+            .describe => blk: {
+                if (parsed.value.offset != null or parsed.value.limit != null) return error.InvalidToolArgs;
+                break :blk try @import("../mcp.zig").describeAlloc(self.alloc, self.mcp, parsed.value.name orelse return error.InvalidToolArgs);
+            },
+        };
         defer self.alloc.free(raw);
+        if ((parsed.value.op == .describe or parsed.value.offset != null or parsed.value.limit != null) and raw.len > self.max_bytes)
+            return error.McpInventoryTooLarge;
         return shared.buildSlicedResult(self.alloc, call.id, call.at_ms, tools.truncate.apply(raw, self.max_bytes));
     }
 

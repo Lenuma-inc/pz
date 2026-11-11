@@ -76,6 +76,7 @@ pub const Manager = struct {
             binding.* = .{ .manager = self, .name = name };
             try self.entries.append(alloc, .{
                 .name = name,
+                .origin = .plugin,
                 .kind = .mcp,
                 .spec = .{ .kind = .mcp, .desc = item.object.get("description").?.string, .params = &.{}, .schema_json = try std.json.Stringify.valueAlloc(a, item.object.get("parameters").?, .{}), .out = .{ .max_bytes = max_bytes, .stream = false }, .timeout_ms = 1000, .destructive = true },
                 .dispatch = &binding.dispatch,

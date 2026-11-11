@@ -186,4 +186,72 @@ test('web-access cached passage offsets preserve Unicode and literal matching', 
   assert.equal(found('NEEDLE').passages[0].matchOffset,2);
   assert.equal(found('[literal]').passages[0].matchOffset,9);
 });
+function mcpAdapterRuntime() {
+  const r = runtime(readFileSync(new URL('../../examples/plugins/mcp-adapter.js', import.meta.url), 'utf8'));
+  return {
+    dispatch: r.dispatch,
+    prepare: args => r.dispatch({op:'event',name:'__prepare_tool_extension',payload:{tool:'mcp',args:{extension:'mcp_adapter',extension_args:JSON.stringify(args)}}}),
+    complete: (plan, result) => r.dispatch({op:'event',name:'__complete_tool_extension',payload:{tool:'mcp',name:'mcp_adapter',context:plan.context,results:[{output:JSON.stringify(result),isError:false}]}})
+  };
+}
+const mcpAdapterTool = (server, name, description = '') => ({server,name:server+'__'+name,remote_name:name,description});
+const mcpAdapterInventory = tools => ({servers:[{name:'browser',status:'connected'},{name:'db',status:'connected'}],tools,nextOffset:null});
+test('registers one mcp extension and no replacement remote tools', () => {
+  const r = mcpAdapterRuntime();
+  assert.deepEqual(r.dispatch({op:'list'}),[]);
+  const extensions = r.dispatch({op:'event',name:'__tool_extensions',payload:{}});
+  assert.equal(extensions[0].tool,'mcp');
+  assert.equal(extensions[0].mcpProxy,true);
+});
+test('ranked search and regex search return paginated summaries without schemas', () => {
+  const r = mcpAdapterRuntime();
+  const tools = [mcpAdapterTool('browser','screenshot','Capture pixels'),mcpAdapterTool('db','query','Screenshot records')];
+  const result = JSON.parse(r.complete(r.prepare({search:'screenshot',limit:1}),mcpAdapterInventory(tools)).output);
+  assert.equal(result.tools[0].name,'browser__screenshot');
+  assert.equal(result.nextOffset,1);
+  assert.equal(result.tools[0].inputSchema,undefined);
+  const regex = JSON.parse(r.complete(r.prepare({search:'^browser',regex:true}),mcpAdapterInventory(tools)).output);
+  assert.equal(regex.total,1);
+  assert.throws(()=>r.complete(r.prepare({search:'[',regex:true}),mcpAdapterInventory(tools)));
+});
+test('describe resolves a unique alias then requests the exact native schema', () => {
+  const r = mcpAdapterRuntime();
+  const next = r.complete(r.prepare({describe:'take-screenshot'}),mcpAdapterInventory([mcpAdapterTool('browser','take_screenshot')]));
+  assert.deepEqual(next.requests,[{op:'describe',name:'browser__take_screenshot'}]);
+  const schema = {type:'object',properties:{x:{type:'integer',minimum:2}},required:['x']};
+  const described = JSON.parse(r.complete(next,{name:'browser__take_screenshot',inputSchema:schema}).output);
+  assert.deepEqual(described.inputSchema,schema);
+});
+test('calls route only the resolved native public name and preserve remote args', () => {
+  const r = mcpAdapterRuntime();
+  const next = r.complete(r.prepare({tool:'query',server:'db',args:'{"sql":"SELECT 1"}'}),mcpAdapterInventory([mcpAdapterTool('browser','query'),mcpAdapterTool('db','query')]));
+  assert.deepEqual(next.requests,[{tool:'db__query',args:{sql:'SELECT 1'}}]);
+  assert.throws(()=>r.complete(r.prepare({tool:'query'}),mcpAdapterInventory([mcpAdapterTool('browser','query'),mcpAdapterTool('db','query')])));
+  assert.throws(()=>r.prepare({tool:'query',args:'[]'}));
+  assert.throws(()=>r.prepare({tool:'query',args:{extension:'evil'}}));
+});
+test('discovery continuation retains summaries and leaves a request for execution', () => {
+  const r = mcpAdapterRuntime();
+  let plan = r.prepare({tool:'target'});
+  for (let page = 0; page < 3; page++) {
+    plan = r.complete(plan,{...mcpAdapterInventory([mcpAdapterTool('db','page'+page)]),nextOffset:(page+1)*64});
+    assert.equal(plan.requests[0].offset,(page+1)*64);
+  }
+  const call = r.complete(plan,mcpAdapterInventory([mcpAdapterTool('db','target')]));
+  assert.equal(call.requests[0].tool,'db__target');
+});
+test('structured JSON extraction is deterministic and missing fields are explicit', () => {
+  const r = mcpAdapterRuntime();
+  const call = r.complete(r.prepare({tool:'query',extract:{total:'stats.total',missing:'absent'}}),mcpAdapterInventory([mcpAdapterTool('db','query')]));
+  const result = JSON.parse(r.complete(call,{structuredContent:{stats:{total:42}}}).output);
+  assert.deepEqual(result.extracted,{total:{found:true,value:42},missing:{found:false}});
+  assert.equal(result.output,undefined);
+  const cached = JSON.parse(r.prepare({responseId:result.responseId}).output);
+  assert.match(cached.output,/structuredContent/);
+  assert.equal(cached.cachedOnly,true);
+});
+test('unsupported capabilities and mixed modes fail rather than pretending to work', () => {
+  const r = mcpAdapterRuntime();
+  for (const args of [{action:'install',url:'https://example.com'},{connect:'db'},{search:'x',tool:'x'},{args:{}},{responseId:'mcp-1',tool:'x'},{tool:'x',extract:{n:'x'},limit:1}]) assert.throws(()=>r.prepare(args));
+});
 console.log(`Passed ${passed} bootstrap logic tests under Node vm; native QuickJS C limits NOT tested.`);
