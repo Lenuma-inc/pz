@@ -25,6 +25,7 @@ See [the native API documentation](../../docs/PLUGINS.md).
 | --- | --- | --- |
 | `presets.js` | `/preset [list\|off\|concise\|review\|plan]` | Select one prompt appendix; `off` removes it on subsequent requests. Default lists choices and current selection. |
 | `protected-paths.js` | `tool_call` hook | Blocks observed direct `write`, `edit`, `patch` modifications to protected lexical paths. |
+| `cc-safety-net.js` | `/safetynet [status\|toggle\|reset]`; `tool_call` hook | pz adaptation of the cc-safety-net idea (MIT): blocks destructive git/filesystem commands (`git reset --hard`, `git push --force`, `rm -rf` of root/home/`.git`/cwd/outside targets, `find -delete`, `shred`, `dd` to devices, `mkfs`, `curl\|bash`) and secret file access (`.env*`, `.npmrc`, key files, `~/.ssh`, `~/.aws`, etc.) across `bash`, file and patch tools. Lexical guard only, not a sandbox. |
 | `tool-stats.js` | `/toolstats [reset]` | Counts observed calls, results and `isError` results by exact `event.toolName`; reset clears counters. |
 | `session-notes.js` | `/notes [list\|add text\|clear]`; model tool `session_note` | Maintain small ephemeral notes. Only the user command can clear them. |
 | `handoff.js` | `/handoff [goal]` | Emit Markdown containing the current maintained goal, notes and observed session/model/provider metadata. |
