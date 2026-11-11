@@ -16,6 +16,18 @@ fn seekEnd(file: std.Io.File) !void {
         .SUCCESS => {},
         else => |err| return std.posix.unexpectedErrno(err),
     }
+    if (rc == 0) return;
+
+    // Never append an event to an incomplete record left by a failed write.
+    // Preserve the torn tail for diagnosis rather than turning it into malformed JSON.
+    const tail = std.c.lseek(file.handle, -1, std.c.SEEK.END);
+    switch (std.posix.errno(tail)) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    var byte: [1]u8 = undefined;
+    const n = try file.readStreaming(sys.io, &.{byte[0..]});
+    if (n != 1 or byte[0] != '\n') return error.TornReplayLine;
 }
 
 /// When to fsync: after every write or every N writes.
@@ -58,7 +70,7 @@ pub const Writer = struct {
 
         // Confined create: O_NOFOLLOW + hardlink check for .pz state.
         var file = try fs_secure.createConfined(self.dir, path, .{
-            .read = false,
+            .read = true,
             .truncate = false,
         });
         defer file.close(sys.io);
@@ -175,4 +187,20 @@ test "writer rejects invalid session id" {
 
     try std.testing.expectError(error.InvalidSessionId, writer.append("", .{}));
     try std.testing.expectError(error.InvalidSessionId, writer.append("a/b", .{}));
+}
+
+test "writer preserves torn tail instead of appending to it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try Writer.init(std.testing.allocator, tmp.dir, .{});
+    try writer.append("torn", .{ .data = .{ .text = .{ .text = "complete" } } });
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "torn.jsonl", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(before);
+    const torn = try std.mem.concat(std.testing.allocator, u8, &.{ before, "{\"version\":1" });
+    defer std.testing.allocator.free(torn);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "torn.jsonl", .data = torn });
+    try std.testing.expectError(error.TornReplayLine, writer.append("torn", .{ .data = .{ .err = .{ .text = "replay failed" } } }));
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "torn.jsonl", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(torn, after);
 }
