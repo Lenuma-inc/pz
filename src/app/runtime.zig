@@ -6659,7 +6659,16 @@ fn listSessionRows(alloc: std.mem.Allocator, session_dir: []const u8) ![]tui_ove
     const now_ms = core.time.milliTimestamp();
     var count: usize = 0;
     for (names.items) |sid| {
-        if (try buildSessionRow(alloc, dir, sid, now_ms)) |row| {
+        const maybe_row = buildSessionRow(alloc, dir, sid, now_ms) catch |err| switch (err) {
+            error.MalformedReplayLine,
+            error.TornReplayLine,
+            error.EmptyReplayLine,
+            error.ReplayLineTooLong,
+            error.UnsupportedVersion,
+            => continue,
+            else => return err,
+        };
+        if (maybe_row) |row| {
             rows[count] = row;
             count += 1;
         }
