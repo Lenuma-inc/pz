@@ -67,6 +67,40 @@ internal dynamic-dispatch kind is shared with MCP, but no MCP server is started.
 All callbacks are synchronous. Promise/thenable results are rejected. There are
 no timers, background jobs or async host APIs.
 
+## Extending existing tools
+
+`pz.registerToolExtension({tool, name, description, parameters, prepare})`
+registers a named argument adapter for an existing tool. `tool` is its exact
+registry name, not a hardcoded capability list: any builtin can be extended,
+including tools added later. The same mechanism works with other registered
+tools by name. It does not create a tool, enable a disabled tool, or replace its
+dispatch implementation. Registrations for unavailable targets cannot execute.
+
+Call the original tool with only `extension` (the registered extension name)
+and optional `extension_args` (a JSON object encoded as a string). Native
+arguments cannot be mixed with this envelope. `prepare(args, ctx)` receives the
+decoded object and must synchronously return a native argument object for that
+same tool. Handlers must validate their input; `parameters` describes it to the
+model, rather than providing automatic JSON Schema validation. The runtime also
+accepts an object for `extension_args`, but advertises a string in tool schemas.
+
+Preparation happens once, before native argument parsing, authorization, tool
+hooks, approval and execution. These stages see the derived arguments, including
+paths, URLs and operations. Returning another extension envelope is rejected;
+there is no recursive dispatch, target switching, direct network access or shell
+access from JavaScript. Errors stop the call rather than falling back to the
+original operation. Ordinary calls retain their original behavior.
+
+Only tools with matching registered extensions receive an alternative envelope
+in their model-facing schema. The original native schema remains an alternative.
+Extension descriptions and parameter schemas are included in request guidance
+and `/plugins` output. Registration is closed after loading, with at most 64
+extensions in total and no duplicate `(tool, name)` pairs. Existing plugin
+read-only and enforced-policy restrictions still apply.
+
+Development API checks: `node tools/ci/test_plugins.mjs`. They exercise
+the JavaScript bootstrap, not native execution or authorization.
+
 ## Events and context
 
 ```javascript

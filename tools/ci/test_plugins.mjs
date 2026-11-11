@@ -108,6 +108,29 @@ test('reserved built-in command cannot be registered', () => {
 test('output serialization limit rejects oversized output', () => {
   assert.throws(() => runtime(tool("()=>'x'.repeat(1048576)")).dispatch({op:'tool',name:'hello'}), /output exceeds limit/);
 });
+test('generic tool extensions prepare arguments and validate registrations', () => {
+  const descriptor = prepare=>`pz.registerToolExtension({tool:'web',name:'test',description:'test',parameters:{type:'object'},prepare:${prepare}})`;
+  const prepare=(r,tool,extension,args={})=>r.dispatch({op:'event',name:'__prepare_tool_extension',payload:{tool,args:{extension,extension_args:args}}});
+  let r=runtime(descriptor("a=>({url:a.url})"));
+  assert.deepEqual(prepare(r,'web','test',{url:'https://example.com'}),{url:'https://example.com'});
+  assert.deepEqual(prepare(r,'web','test','{"url":"https://example.com"}'),{url:'https://example.com'});
+  assert.throws(()=>prepare(r,'web','missing'),/Unknown/);
+  assert.throws(()=>prepare(r,'ffmpeg','test'),/Unknown/);
+  assert.throws(()=>prepare(r,'web','test','[]'),/Invalid extension arguments/);
+  assert.throws(()=>r.dispatch({op:'event',name:'__prepare_tool_extension',payload:{tool:'web',args:{extension:'test',url:'https://example.com'}}}),/mix/);
+  for(const result of ['null','[]','42',"({extension:'test'})","({extension_args:{}})",'Promise.resolve({})']) {
+    assert.throws(()=>prepare(runtime(descriptor(`()=>${result}`)),'web','test'));
+  }
+  for(const tool of ['bash','mcp','read','write','future_tool']) {
+    const generic = runtime(descriptor('a=>({path:a.path})').replace("tool:'web'",`tool:'${tool}'`));
+    assert.deepEqual(prepare(generic,tool,'test',{path:'file.txt'}),{path:'file.txt'});
+  }
+  for(const tool of ['', 'bad tool', '../web']) assert.throws(()=>runtime(descriptor('()=>({})').replace("tool:'web'",`tool:'${tool}'`)));
+  assert.throws(()=>runtime(descriptor('()=>({})')+';'+descriptor('()=>({})')),/Duplicate/);
+  r.dispatch({op:'list'}); assert.throws(()=>r.run(descriptor('()=>({})')),/closed/);
+  assert.equal(r.dispatch({op:'describe'}).extensions[0].name,'test');
+  assert.match(r.dispatch({op:'event',name:'before_request',payload:{}}).systemPromptAppend,/test/);
+});
 test('example plugin runs without filesystem or network capabilities', () => {
   const r = runtime(readFileSync(new URL('../../examples/plugins/hello.js', import.meta.url), 'utf8'));
   assert.equal(r.dispatch({op:'list'})[0].name, 'hello');

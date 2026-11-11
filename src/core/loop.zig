@@ -1247,6 +1247,13 @@ fn buildReqTools(
     alloc: std.mem.Allocator,
     reg: tools.Registry,
 ) ![]providers.Tool {
+    const extension_json = try reg.event(alloc, "__tool_extensions", "{}");
+    defer if (extension_json) |raw| alloc.free(raw);
+    const extension_list = if (extension_json) |raw| try std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) else null;
+    defer if (extension_list) |parsed| parsed.deinit();
+    if (extension_list) |parsed| {
+        if (parsed.value != .array) return error.InvalidToolExtensions;
+    }
     const out = try alloc.alloc(providers.Tool, reg.entries.len);
     var built: usize = 0;
     errdefer {
@@ -1258,14 +1265,42 @@ fn buildReqTools(
             try alloc.dupe(u8, raw_schema)
         else
             try buildSchema(alloc, entry.spec.params);
+        const extended_schema = if (extension_list) |parsed| blk: {
+            defer alloc.free(schema);
+            break :blk try toolExtensionSchema(alloc, schema, entry.name, parsed.value.array.items);
+        } else schema;
         slot.* = .{
             .name = entry.name,
             .desc = entry.spec.desc,
-            .schema = schema,
+            .schema = extended_schema,
         };
         built += 1;
     }
     return out;
+}
+
+fn toolExtensionSchema(alloc: std.mem.Allocator, native_schema: []const u8, tool_name: []const u8, extensions: []const std.json.Value) ![]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(alloc);
+    for (extensions) |extension| {
+        if (extension != .object) return error.InvalidToolExtensions;
+        const target = extension.object.get("tool") orelse return error.InvalidToolExtensions;
+        const name = extension.object.get("name") orelse return error.InvalidToolExtensions;
+        if (target != .string or name != .string) return error.InvalidToolExtensions;
+        if (std.mem.eql(u8, target.string, tool_name)) try names.append(alloc, name.string);
+    }
+    if (names.items.len == 0) return alloc.dupe(u8, native_schema);
+    const envelope = try std.json.Stringify.valueAlloc(alloc, .{
+        .type = "object",
+        .properties = .{
+            .extension = .{ .type = "string", .@"enum" = names.items },
+            .extension_args = .{ .type = "string", .description = "JSON object string matching the registered extension's parameters; do not mix native arguments" },
+        },
+        .required = &[_][]const u8{"extension"},
+        .additionalProperties = false,
+    }, .{});
+    defer alloc.free(envelope);
+    return std.fmt.allocPrint(alloc, "{{\"type\":\"object\",\"anyOf\":[{s},{s}]}}", .{ native_schema, envelope });
 }
 
 fn buildSchema(alloc: std.mem.Allocator, params: []const tools.Spec.Param) ![]const u8 {
@@ -1353,7 +1388,8 @@ fn pluginRequestPrompt(alloc: std.mem.Allocator, opts: Opts, prompt: ?[]const u8
     return try alloc.dupe(u8, append.string);
 }
 
-fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Err || anyerror)!providers.ToolResult {
+fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.Image) (Err || anyerror)!providers.ToolResult {
+    var tc = incoming_tc;
     const entry = opts.reg.byName(tc.name) orelse {
         return .{
             .id = try opts.alloc.dupe(u8, tc.id),
@@ -1365,6 +1401,11 @@ fn runTool(opts: Opts, tc: providers.ToolCall, image_out: *?providers.Image) (Er
     const at_ms = nowMs(opts);
     var parse_arena = std.heap.ArenaAllocator.init(opts.alloc);
     defer parse_arena.deinit();
+
+    tc.args = prepareToolExtension(parse_arena.allocator(), opts.reg, entry.name, tc.args) catch |extension_err| {
+        if (extension_err == error.OutOfMemory or extension_err == error.Canceled) return extension_err;
+        return .{ .id = try opts.alloc.dupe(u8, tc.id), .output = try std.fmt.allocPrint(opts.alloc, "tool extension preparation failed: {s}", .{@errorName(extension_err)}), .is_err = true };
+    };
 
     var parsed_args = parseCallArgs(parse_arena.allocator(), entry.kind, tc.args) catch {
         return .{
@@ -1712,6 +1753,53 @@ fn joinChunks(alloc: std.mem.Allocator, out: []const tools.Output) ![]const u8 {
         at += chunk.chunk.len;
     }
     return buf;
+}
+
+// Transform once, before parsing, authorization, hooks and approval. Never dispatch
+// a plugin-selected tool name: the original builtin entry remains authoritative.
+fn prepareToolExtension(alloc: std.mem.Allocator, reg: tools.Registry, tool_name: []const u8, raw: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidToolArgs;
+    if (parsed.value.object.get("extension") == null) {
+        if (parsed.value.object.get("extension_args") != null) return error.InvalidToolArgs;
+        return raw;
+    }
+    const payload = try std.json.Stringify.valueAlloc(alloc, .{ .tool = tool_name, .args = parsed.value }, .{});
+    const result = (try reg.event(alloc, "__prepare_tool_extension", payload)) orelse return error.InvalidToolArgs;
+    const derived = try std.json.parseFromSlice(std.json.Value, alloc, result, .{});
+    defer derived.deinit();
+    if (derived.value != .object or derived.value.object.contains("extension") or derived.value.object.contains("extension_args")) return error.InvalidToolArgs;
+    return result;
+}
+
+test "builtin extensions transform once and fail closed without runtime" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var reg = tools.Registry.init(&.{});
+    try std.testing.expectEqualStrings("{\"url\":\"https://example.com\"}", try prepareToolExtension(alloc, reg, "web", "{\"url\":\"https://example.com\"}"));
+    try std.testing.expectError(error.InvalidToolArgs, prepareToolExtension(alloc, reg, "web", "{\"extension\":\"missing\"}"));
+    try std.testing.expectError(error.InvalidToolArgs, prepareToolExtension(alloc, reg, "ffmpeg", "{\"extension_args\":\"{}\"}"));
+    const Callback = struct {
+        fn event(_: *anyopaque, allocator: std.mem.Allocator, name: []const u8, payload: []const u8) ![]u8 {
+            try std.testing.expectEqualStrings("__prepare_tool_extension", name);
+            if (std.mem.indexOf(u8, payload, "\"tool\":\"read\"") != null) return allocator.dupe(u8, "{\"path\":\"derived.txt\"}");
+            try std.testing.expect(std.mem.indexOf(u8, payload, "web") != null);
+            return allocator.dupe(u8, "{\"url\":\"https://derived.example/\",\"method\":\"POST\",\"body\":\"test\"}");
+        }
+    };
+    var dummy: u8 = 0;
+    reg.hook_ctx = &dummy;
+    reg.hook_event = Callback.event;
+    const raw = try prepareToolExtension(alloc, reg, "web", "{\"extension\":\"test\"}");
+    const args = try parseCallArgs(alloc, .web, raw);
+    try std.testing.expectEqualStrings("https://derived.example/", args.web.url);
+    try std.testing.expectEqual(tools.web.Method.POST, args.web.method);
+    const read_raw = try prepareToolExtension(alloc, reg, "read", "{\"extension\":\"test\"}");
+    const read_args = try parseCallArgs(alloc, .read, read_raw);
+    try std.testing.expectEqualStrings("derived.txt", read_args.read.path);
 }
 
 fn parseCallArgs(
