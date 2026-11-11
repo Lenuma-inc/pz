@@ -37,6 +37,36 @@ standard `mcp` tool with ranked search, on-demand schemas, native tool routing
 and cached results. It hides remote schemas from model requests, not from the
 native registry or permission checks. It does not change server startup.
 
+## Reversible context memory
+
+[`context-memory.js`](context-memory.js) is an independent, bounded plugin
+inspired by billion-context. Add its path to your existing `plugins` array and
+restart pz; no proxy, dependency installation or settings rewrite is needed.
+The model gets four tools:
+
+- `acp_status`: inspect active folds and eligible original message indices.
+- `compress({from, to, summary})`: replace an inclusive range with a detailed
+  model-written summary in subsequent requests. Preserve constraints, paths,
+  decisions, failures and unfinished work; summaries are not lossless.
+- `decompress({id})`: restore an active range, or use `id: "all"` to restore all.
+- `search_context({query, limit?})`: literal search over bounded message previews
+  and saved summaries, **not** full-text search of the entire session archive.
+
+`/context-memory status`, `on`, `off`, and `restore` provide manual control.
+`off` sends the original history while retaining folds; `restore` removes active
+folds. Original session history is never deleted by this plugin. Range merging
+supports layered summaries, and stale fingerprints invalidate old folds.
+The cache is runtime-local: restarting or changing sessions restores the normal
+history rather than loading saved folds. Existing native compaction is separate.
+
+The host protects system instructions, the latest user message, the last two
+messages, images/reasoning, and tool call/result pairing. There are at most 32
+active folds and 64 archived summaries; each summary is bounded to 12,000
+JavaScript characters and 16,000 UTF-8 bytes. Search is limited to host previews.
+This is not a claim of billion-token capacity, automatic lossless compression,
+or measured token/cache savings. The model chooses when to compress and writes
+the summaries; no additional model request happens in the plugin.
+
 Presets do **not** change tool permissions. In particular, `plan` is an
 instruction-only request to avoid mutation, not enforced read-only mode. Turning
 a preset off stops future appendices; it cannot erase existing conversation text.

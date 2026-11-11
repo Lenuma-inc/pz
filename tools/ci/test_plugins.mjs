@@ -254,4 +254,91 @@ test('unsupported capabilities and mixed modes fail rather than pretending to wo
   const r = mcpAdapterRuntime();
   for (const args of [{action:'install',url:'https://example.com'},{connect:'db'},{search:'x',tool:'x'},{args:{}},{responseId:'mcp-1',tool:'x'},{tool:'x',extract:{n:'x'},limit:1}]) assert.throws(()=>r.prepare(args));
 });
+function contextMemoryRuntime() {
+  const r = runtime(readFileSync(new URL('../../examples/plugins/context-memory.js', import.meta.url), 'utf8'));
+  return {
+    event: payload => r.dispatch({op:'event',name:'context_transform',payload}),
+    tool: (name,args={}) => JSON.parse(r.dispatch({op:'tool',name,args}).content[0].text),
+    command: args => r.dispatch({op:'command',name:'context-memory',args})
+  };
+}
+function contextMemorySnapshot(sessionId='session-a') {
+  const message = (index,role,kind,text,protect=false,toolCallId=null) => ({index,role,kind,text,protected:protect,toolCallId,chars:1000,truncated:false,fingerprint:index.toString(16).padStart(64,'0')});
+  return {sessionId,eligibleEnd:6,latestUserIndex:1,messages:[
+    message(0,'system','text',null,true),
+    message(1,'user','text','Keep user constraints',true),
+    message(2,'assistant','tool_call',null,false,'call-a'),
+    message(3,'tool','tool_result','İ needle [literal]',false,'call-a'),
+    message(4,'assistant','text','Earlier completed work'),
+    message(5,'assistant','text','Another completed result'),
+    message(6,'assistant','text','Recent result',true),
+    message(7,'assistant','text','Latest result',true)
+  ]};
+}
+test('context-memory folds are reversible request-only views with stable fingerprints', () => {
+  const r = contextMemoryRuntime();
+  const snapshot = contextMemorySnapshot();
+  assert.deepEqual(r.event(snapshot),{folds:[]});
+  const result = r.tool('compress',{from:2,to:3,summary:'Completed read; preserve its caveats.'});
+  assert.equal(result.originalsDeleted,false);
+  const folded = r.event(snapshot);
+  assert.deepEqual(folded.folds[0].fingerprints,[snapshot.messages[2].fingerprint,snapshot.messages[3].fingerprint]);
+  assert.equal(r.tool('acp_status').activeRanges.length,1);
+  r.tool('decompress',{id:result.id});
+  assert.deepEqual(r.event(snapshot),{folds:[]});
+  assert.equal(snapshot.messages[3].text,'İ needle [literal]');
+});
+test('context-memory rejects protected messages, split pairs, overlaps and oversized summaries', () => {
+  const r = contextMemoryRuntime(); r.event(contextMemorySnapshot());
+  for (const args of [{from:0,to:1,summary:'x'},{from:1,to:2,summary:'x'},{from:2,to:2,summary:'x'},{from:3,to:3,summary:'x'},{from:6,to:7,summary:'x'},{from:4,to:4,summary:'x'.repeat(1001)},{from:4,to:4,summary:'😀'.repeat(4100)}]) assert.throws(()=>r.tool('compress',args));
+  r.tool('compress',{from:2,to:4,summary:'First range'});
+  assert.throws(()=>r.tool('compress',{from:4,to:5,summary:'Partial overlap'}));
+});
+test('context-memory merges contained ranges and invalidates stale or different sessions', () => {
+  const r = contextMemoryRuntime(); const snapshot = contextMemorySnapshot(); r.event(snapshot);
+  r.tool('compress',{from:2,to:3,summary:'Read result'});
+  const merged = r.tool('compress',{from:2,to:5,summary:'Read result and subsequent completed work'});
+  assert.equal(merged.generation,2);
+  assert.equal(r.tool('acp_status').activeRanges.length,1);
+  snapshot.messages[3].fingerprint='f'.repeat(64);
+  assert.deepEqual(r.event(snapshot),{folds:[]});
+  assert.equal(r.tool('acp_status').staleRangesDiscarded,1);
+  r.event(contextMemorySnapshot('session-b'));
+  assert.equal(r.tool('acp_status').sessionId,'session-b');
+});
+test('context-memory status excludes incomplete and duplicate tool groups', () => {
+  const r = contextMemoryRuntime();
+  const incomplete = contextMemorySnapshot();
+  incomplete.messages = incomplete.messages.filter(message => message.index !== 3);
+  r.event(incomplete);
+  assert.equal(r.tool('acp_status').compressible.some(message => message.index === 2),false);
+  const duplicate = contextMemorySnapshot();
+  duplicate.messages[5] = {...duplicate.messages[5],kind:'tool_call',toolCallId:'call-a'};
+  r.event(duplicate);
+  assert.equal(r.tool('acp_status').compressible.some(message => message.index === 2),false);
+  assert.throws(()=>r.tool('compress',{from:2,to:5,summary:'Duplicate tool IDs'}));
+});
+test('context-memory search uses literal Unicode-safe previews and summaries', () => {
+  const r = contextMemoryRuntime(); r.event(contextMemorySnapshot());
+  assert.equal(r.tool('search_context',{query:'NEEDLE'}).matches[0].matchOffset,2);
+  assert.equal(r.tool('search_context',{query:'[literal]'}).matches[0].matchOffset,9);
+  r.tool('compress',{from:2,to:3,summary:'Saved summary with constraints'});
+  assert.equal(r.tool('search_context',{query:'constraints'}).matches[0].kind,'summary');
+  r.command('off'); assert.deepEqual(r.event(contextMemorySnapshot()),{folds:[]});
+  assert.throws(()=>r.tool('compress',{from:4,to:5,summary:'Off'}));
+  r.command('on'); assert.equal(r.event(contextMemorySnapshot()).folds.length,1);
+  r.command('restore'); assert.deepEqual(r.event(contextMemorySnapshot()),{folds:[]});
+});
+test('context_transform combines distinct hooks and rejects overlapping or malformed folds', () => {
+  assert.deepEqual(runtime().dispatch({op:'event',name:'__context_transform_enabled',payload:{}}),{enabled:false});
+  const fold = (from,to) => ({from,to,summary:'summary',fingerprints:Array(to-from+1).fill('0'.repeat(64))});
+  const r = runtime(`pz.on('context_transform',()=>({folds:[${JSON.stringify(fold(1,2))}]}));pz.on('context_transform',()=>({folds:[${JSON.stringify(fold(3,4))}]}));`);
+  assert.deepEqual(r.dispatch({op:'event',name:'__context_transform_enabled',payload:{}}),{enabled:true});
+  assert.equal(r.dispatch({op:'event',name:'context_transform',payload:{}}).folds.length,2);
+  for (const source of [
+    `pz.on('context_transform',()=>({folds:[${JSON.stringify(fold(1,2))},${JSON.stringify(fold(2,3))}]}));`,
+    "pz.on('context_transform',()=>({folds:[{from:1,to:1,summary:'x',fingerprints:['bad']}]}));",
+    "pz.on('context_transform',()=>Promise.resolve({folds:[]}));"
+  ]) assert.throws(()=>runtime(source).dispatch({op:'event',name:'context_transform',payload:{}}));
+});
 console.log(`Passed ${passed} bootstrap logic tests under Node vm; native QuickJS C limits NOT tested.`);

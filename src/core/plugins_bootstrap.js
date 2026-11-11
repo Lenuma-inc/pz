@@ -3,7 +3,7 @@
   const extensions = new Map();
   const tools = new Map(), commands = new Map(), hooks = new Map(), state = new Map();
   const parse = JSON.parse.bind(JSON), stringify = JSON.stringify.bind(JSON);
-  const events = new Set(['before_request','tool_call','tool_result','session_start','session_end','footer_render']);
+  const events = new Set(['before_request','context_transform','tool_call','tool_result','session_start','session_end','footer_render']);
   const reservedCommands = new Set(['help','quit','exit','session','model','provider','tools','mcp','lsp','plugins','bg','upgrade','new','resume','tree','fork','compact','export','settings','hotkeys','login','logout','clear','cost','copy','name','reload','share','changelog','prompt','commands']);
   let sealed = false;
   function name(n) { if (typeof n !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(n)) throw Error('Invalid plugin registration name'); }
@@ -62,6 +62,7 @@
     } else if (q.op === 'event') {
       result = {};
       if (q.name === '__tool_extensions') result = Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}));
+      if (q.name === '__context_transform_enabled') result = {enabled:hooks.has('context_transform')};
       if (q.name === '__prepare_tool_extension') {
         const {tool,args} = q.payload;
         name(tool);
@@ -94,6 +95,14 @@
         if (q.name === 'before_request' && r != null) {
           if (typeof r.systemPromptAppend !== 'string') throw Error('before_request must return systemPromptAppend string');
           result.systemPromptAppend = (result.systemPromptAppend ? result.systemPromptAppend + '\n\n' : '') + r.systemPromptAppend;
+        }
+        if (q.name === 'context_transform' && r != null) {
+          if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some(k=>k !== 'folds') || !Array.isArray(r.folds) || r.folds.length > 32) throw Error('Invalid context_transform result');
+          const folds = (result.folds || []).concat(r.folds);
+          if (folds.length > 32 || folds.some(f=>!f || typeof f !== 'object' || Array.isArray(f) || Object.keys(f).some(k=>!['from','to','summary','fingerprints'].includes(k)) || !Number.isSafeInteger(f.from) || !Number.isSafeInteger(f.to) || f.from < 0 || f.to < f.from || typeof f.summary !== 'string' || f.summary.length < 1 || f.summary.length > 16000 || !Array.isArray(f.fingerprints) || f.fingerprints.length !== f.to-f.from+1 || f.fingerprints.some(s=>typeof s !== 'string' || !/^[0-9a-f]{64}$/.test(s)))) throw Error('Invalid context_transform folds');
+          folds.sort((a,b)=>a.from-b.from);
+          if (folds.some((f,i)=>i && folds[i-1].to >= f.from)) throw Error('Overlapping context_transform folds');
+          result.folds = folds;
         }
         if (q.name === 'footer_render' && r != null) {
           if (!Array.isArray(r.rows) || r.rows.length > 2 || !r.rows.every(row =>

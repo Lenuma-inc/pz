@@ -204,6 +204,7 @@ pz.on("footer_render", (event, ctx) => {
 |---|---|---|
 | `session_start` | `sessionId`, `model`, `provider` | ignored |
 | `before_request` | `sessionId`, `model`, `provider`, `prompt`, `systemPrompt` | nothing, or `{systemPromptAppend: string}` |
+| `context_transform` | `sessionId`, bounded `messages` snapshot, `eligibleEnd`, optional `disabledReason` | nothing, or `{folds: Array<{from, to, summary, fingerprints}>}` |
 | `tool_call` | `toolName`, `toolCallId`, `input` | nothing, or `{block: boolean, reason?: string}` |
 | `tool_result` | `toolName`, `toolCallId`, `output`, `isError` | ignored |
 | `footer_render` | `width`, `height`, `model`, `provider`, `thinking`, `cwd`, `branch`, `inputTokens`, `outputTokens`, `cacheRead`, `cacheWrite`, `contextTokens`, `contextLimit`, `costMicents`, `subscription`, `turns`, `backgroundRunning`, `limits` | nothing, or `{rows: Array<Array<{text: string, fg?: number, bg?: number}>>}` |
@@ -215,6 +216,38 @@ The tool-call hook runs after argument parsing/policy checks and before approval
 and dispatch. The result event observes completed dispatches; it does not cover
 validation failures, policy denials, approval denials or tools blocked by a hook.
 `session_end` runs after normal session completion, not as a crash/failure hook.
+
+### Reversible request-context folding
+
+`context_transform` runs after request messages are built and before the provider
+starts. It changes only that outgoing view; the host does not rewrite history,
+session events, tool results or files. Original messages remain available for
+subsequent requests. This is not an HTTP proxy or a persistent compression store.
+
+Each snapshot message has an original request `index`, `role`, `kind`, SHA-256
+`fingerprint`, `chars` (source UTF-8 byte count), `protected`, and optional bounded
+`text`, `toolCallId` and tool `name`. System contents, image data and reasoning
+are not exposed. Text is a preview, not a full history export. The host caps
+snapshot size, individual previews and total preview bytes. If a snapshot cannot
+be safely represented, `disabledReason` is supplied and the original messages
+are sent unchanged; a plugin must not assume missing previews mean missing data.
+
+A fold selects inclusive original indices `from` through `to`, with one exact
+`fingerprints` entry per selected message and a nonempty summary of at most
+16,000 UTF-8 bytes. At most 32 non-overlapping folds may be returned. The host
+validates indices and fingerprints independently of JavaScript. System messages,
+the latest user text message, the last two messages, reasoning and images are
+protected. A fold must contain whole completed tool call/result pairs; dangling
+or split pairs are rejected. Malformed or stale folds fail rather than silently
+removing history. Summaries are wrapped as untrusted data, never system policy.
+
+Return no folds to send the original history again. Fingerprints bind summaries
+to the current original messages, so compaction, branch changes or edited history
+must invalidate stale ranges. Normal native compaction still operates separately;
+this API does not resurrect history removed from the active branch by another
+mechanism. See [`context-memory.js`](../examples/plugins/context-memory.js) for
+model-driven folding, restoration, bounded search and status tools. Summary
+accuracy remains the model's responsibility; token savings are not guaranteed.
 
 The `footer_render` event fires before the TUI footer is rendered, providing
 terminal dimensions, model/provider/thinking state, path, branch, token counts,
