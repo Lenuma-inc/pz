@@ -45,12 +45,20 @@ const Block = struct {
     spans: std.ArrayListUnmanaged(Span) = .empty,
     alternate_buf: std.ArrayListUnmanaged(u8) = .empty,
     alternate_spans: std.ArrayListUnmanaged(Span) = .empty,
+    has_alternate: bool = false,
     tool_gid: u64 = 0,
     tool_phase: ToolPhase = .none,
     agent_phase: AgentPhase = .none,
     line_mode: LineMode = .wrap,
+    tool_name: []const u8 = "",
+    tool_args: []const u8 = "",
+    tool_args_truncated: bool = false,
+    tool_id: []const u8 = "",
 
     pub fn deinit(self: *Block, alloc: std.mem.Allocator) void {
+        if (self.tool_name.len > 0) alloc.free(self.tool_name);
+        if (self.tool_args.len > 0) alloc.free(self.tool_args);
+        if (self.tool_id.len > 0) alloc.free(self.tool_id);
         self.alternate_buf.deinit(alloc);
         self.alternate_spans.deinit(alloc);
         self.spans.deinit(alloc);
@@ -62,7 +70,7 @@ const Block = struct {
     }
 
     fn toggleOutput(self: *Block) void {
-        if (self.alternate_buf.items.len == 0) return;
+        if (self.alternate_buf.items.len == 0 and !self.has_alternate) return;
         std.mem.swap(std.ArrayListUnmanaged(u8), &self.buf, &self.alternate_buf);
         std.mem.swap(std.ArrayListUnmanaged(Span), &self.spans, &self.alternate_spans);
     }
@@ -95,6 +103,7 @@ pub const Transcript = struct {
     scroll_off: usize = 0,
     show_tools: bool = true,
     tools_expanded: bool = false,
+    plugins: ?*@import("../../core/plugins.zig").Manager = null,
     show_thinking: bool = true,
     img_refs: [8]ImageRef = undefined,
     img_ref_n: u8 = 0,
@@ -120,7 +129,7 @@ pub const Transcript = struct {
         self.scroll_off = 0;
     }
 
-    pub const AppendError = std.mem.Allocator.Error || error{InvalidUtf8};
+    pub const AppendError = std.mem.Allocator.Error || error{ InvalidUtf8, PluginRenderer };
     pub const RenderError = frame.Frame.InitError || frame.Frame.PosError || error{InvalidUtf8};
 
     pub fn init(alloc: std.mem.Allocator) Transcript {
@@ -174,26 +183,13 @@ pub const Transcript = struct {
                     .italic = true,
                 });
             },
-            .tool_call => |tc| {
-                // Format like pi: " $ command args" for bash,
-                // " $ tool_name path" for file tools, etc.
-                const display = fmtToolCall(self.alloc, tc.name, tc.args) catch
-                    try std.fmt.allocPrint(self.alloc, " $ {s}", .{tc.name});
-                defer self.alloc.free(display);
-                const idx = try self.pushBlock(seq, .tool, display, .{
-                    .fg = theme.get().dim,
-                    .bg = theme.get().tool_pending_bg,
-                });
-                if (std.mem.eql(u8, tc.name, "bash")) {
-                    self.blocks.items[idx].line_mode = .ellipsis;
-                }
-                self.tagToolAt(idx, toolGroup(tc.id), .call);
-            },
+            .tool_call => |tc| try self.appendToolCall(seq, tc),
             .tool_result => |tr| {
                 // Reject before collapsing can hide invalid bytes in alternate_buf.
                 try ensureUtf8(tr.output);
                 const gid = toolGroup(tr.id);
                 self.setToolCallStatus(gid, tr.is_err);
+                if (try self.appendPluginResult(seq, tr)) return;
                 if (tr.is_err) {
                     const idx = try self.pushAnsi(seq, .err, "", .{}, tr.output, .{
                         .fg = theme.get().err,
@@ -215,6 +211,125 @@ pub const Transcript = struct {
             .usage => {},
             .stop => {},
         }
+    }
+
+    fn appendToolCall(self: *Transcript, seq: u64, tc: core.providers.ToolCall) AppendError!void {
+        const enabled = if (self.plugins) |p| p.has_tool_renderers else false;
+        const name = if (enabled) try self.alloc.dupe(u8, tc.name) else "";
+        errdefer if (name.len > 0) self.alloc.free(name);
+        const args = if (enabled) try self.alloc.dupe(u8, preview(tc.args)) else "";
+        errdefer if (args.len > 0) self.alloc.free(args);
+        const id = if (enabled) try self.alloc.dupe(u8, tc.id) else "";
+        errdefer if (id.len > 0) self.alloc.free(id);
+        const base: frame.Style = .{ .fg = theme.get().dim, .bg = theme.get().tool_pending_bg };
+        const custom = if (enabled) try self.pluginToolBlock(seq, tc.name, tc.id, tc.args, tc.args.len > 65536, "call", "", false, base) else null;
+        const idx = custom orelse blk: {
+            const display = fmtToolCall(self.alloc, tc.name, tc.args) catch
+                try std.fmt.allocPrint(self.alloc, " $ {s}", .{tc.name});
+            defer self.alloc.free(display);
+            const i = try self.pushBlock(seq, .tool, display, base);
+            if (std.mem.eql(u8, tc.name, "bash")) self.blocks.items[i].line_mode = .ellipsis;
+            break :blk i;
+        };
+        self.blocks.items[idx].tool_name = name;
+        self.blocks.items[idx].tool_args = args;
+        self.blocks.items[idx].tool_args_truncated = tc.args.len > 65536;
+        self.blocks.items[idx].tool_id = id;
+        self.tagToolAt(idx, toolGroup(tc.id), .call);
+    }
+
+    fn appendPluginResult(self: *Transcript, seq: u64, tr: core.providers.ToolResult) AppendError!bool {
+        const manager = self.plugins orelse return false;
+        if (!manager.has_tool_renderers) return false;
+        var i = self.blocks.items.len;
+        while (i > 0) {
+            i -= 1;
+            const call = &self.blocks.items[i];
+            if (call.tool_phase != .call or !std.mem.eql(u8, call.tool_id, tr.id)) continue;
+            const base: frame.Style = .{
+                .fg = if (tr.is_err) theme.get().err else theme.get().tool_output,
+                .bg = if (tr.is_err) theme.get().tool_error_bg else theme.get().tool_success_bg,
+            };
+            const idx = (try self.pluginToolBlock(seq, call.tool_name, tr.id, call.tool_args, call.tool_args_truncated, "result", tr.output, tr.is_err, base)) orelse return false;
+            self.tagToolAt(idx, toolGroup(tr.id), .result);
+            return true;
+        }
+        return false;
+    }
+
+    fn preview(text: []const u8) []const u8 {
+        var n = @min(text.len, 65536);
+        while (n > 0 and n < text.len and (text[n] & 0xc0) == 0x80) n -= 1;
+        return text[0..n];
+    }
+
+    const PluginSegment = struct {
+        text: []const u8,
+        fg: ?u24 = null,
+        bg: ?u24 = null,
+        bold: bool = false,
+        italic: bool = false,
+    };
+    const PluginToolView = struct {
+        collapsed: []const []const PluginSegment,
+        expanded: ?[]const []const PluginSegment = null,
+    };
+
+    fn appendPluginRows(self: *Transcript, block: *Block, rows: []const []const PluginSegment, base: frame.Style, total: *usize) AppendError!void {
+        if (rows.len > 128) return error.PluginRenderer;
+        for (rows, 0..) |segments, row| {
+            if (segments.len > 32) return error.PluginRenderer;
+            if (row > 0) try block.buf.append(self.alloc, '\n');
+            for (segments) |segment| {
+                if (segment.text.len > 8192 or segment.text.len > 65536 - total.*) return error.PluginRenderer;
+                const text_view = std.unicode.Utf8View.init(segment.text) catch return error.PluginRenderer;
+                var chars = text_view.iterator();
+                while (chars.nextCodepoint()) |cp| {
+                    if (cp < 32 or (cp >= 127 and cp <= 159)) return error.PluginRenderer;
+                }
+                total.* += segment.text.len;
+                const start = block.buf.items.len;
+                try block.buf.appendSlice(self.alloc, segment.text);
+                var st = base;
+                if (segment.fg) |rgb| st.fg = .{ .rgb = rgb };
+                if (segment.bg) |rgb| st.bg = .{ .rgb = rgb };
+                st.bold = segment.bold;
+                st.italic = segment.italic;
+                if (block.buf.items.len > start) try block.spans.append(self.alloc, .{ .start = start, .end = block.buf.items.len, .st = st });
+            }
+        }
+    }
+
+    fn pluginToolBlock(self: *Transcript, seq: u64, name: []const u8, id: []const u8, args: []const u8, args_truncated: bool, phase: []const u8, output: []const u8, is_error: bool, base: frame.Style) AppendError!?usize {
+        const manager = self.plugins orelse return null;
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const input = if (!args_truncated and args.len <= 65536)
+            if (std.json.parseFromSlice(std.json.Value, a, args, .{})) |parsed| parsed.value else |err| if (err == error.OutOfMemory) return error.OutOfMemory else @as(std.json.Value, .null)
+        else
+            @as(std.json.Value, .null);
+        const raw = manager.renderTool(a, .{
+            .toolName = name, .toolCallId = id, .phase = phase, .input = input,
+            .output = preview(output), .isError = is_error,
+            .inputTruncated = args_truncated, .outputTruncated = output.len > 65536,
+        }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.PluginRenderer;
+        const parsed = std.json.parseFromSlice(?PluginToolView, a, raw, .{}) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.PluginRenderer;
+        const view = parsed.value orelse return null;
+        var block: Block = .{ .seq = seq, .kind = if (is_error) .err else .tool, .buf = .empty, .st = base };
+        errdefer block.deinit(self.alloc);
+        var total: usize = 0;
+        try self.appendPluginRows(&block, view.collapsed, base, &total);
+        if (view.expanded) |rows| {
+            block.has_alternate = true;
+            var expanded: Block = .{ .kind = .tool, .buf = .empty, .st = base };
+            defer expanded.deinit(self.alloc);
+            try self.appendPluginRows(&expanded, rows, base, &total);
+            std.mem.swap(std.ArrayListUnmanaged(u8), &block.alternate_buf, &expanded.buf);
+            std.mem.swap(std.ArrayListUnmanaged(Span), &block.alternate_spans, &expanded.spans);
+            if (self.tools_expanded) block.toggleOutput();
+        }
+        return try self.insertBlock(block);
     }
 
     pub fn userText(self: *Transcript, t: []const u8) AppendError!void {
@@ -2695,4 +2810,75 @@ test "tool output expands and collapses without hiding blocks or losing ANSI sty
         try std.testing.expect(std.mem.indexOf(u8, block.text(), "earlier lines") != null);
         try std.testing.expect(std.mem.indexOf(u8, block.text(), "first") == null);
     }
+}
+
+
+test "native plugin rows preserve styled spans and row boundaries" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+    var block: Block = .{ .kind = .tool, .buf = .empty, .st = .{} };
+    defer block.deinit(std.testing.allocator);
+    const first = [_]Transcript.PluginSegment{
+        .{ .text = "λ", .fg = 0x123456, .bg = 0x654321, .bold = true },
+        .{ .text = " plain", .italic = true },
+    };
+    const second = [_]Transcript.PluginSegment{.{ .text = "next" }};
+    const rows = [_][]const Transcript.PluginSegment{ &first, &second };
+    var total: usize = 0;
+    try tr.appendPluginRows(&block, &rows, .{}, &total);
+    try std.testing.expectEqualStrings("λ plain\nnext", block.text());
+    try std.testing.expectEqual(@as(usize, "λ plainnext".len), total);
+    try std.testing.expectEqual(@as(usize, 3), block.spans.items.len);
+    try std.testing.expectEqual(@as(usize, 2), block.spans.items[0].end);
+    try std.testing.expect(frame.Color.eql(block.styleAt(0).fg, .{ .rgb = 0x123456 }));
+    try std.testing.expect(frame.Color.eql(block.styleAt(1).bg, .{ .rgb = 0x654321 }));
+    try std.testing.expect(block.styleAt(0).bold);
+    try std.testing.expect(block.styleAt(2).italic);
+    try std.testing.expect(!block.styleAt(2).bold);
+}
+
+test "native plugin rows reject controls invalid utf8 and oversized views" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+    const bad = [_][]const u8{ "\x1b[31mred", "line\nline", "tab\t", "\x7f", "\xc2\x85", "\xff" };
+    for (bad) |text| {
+        var block: Block = .{ .kind = .tool, .buf = .empty, .st = .{} };
+        defer block.deinit(std.testing.allocator);
+        const segments = [_]Transcript.PluginSegment{.{ .text = text }};
+        const rows = [_][]const Transcript.PluginSegment{&segments};
+        var total: usize = 0;
+        try std.testing.expectError(error.PluginRenderer, tr.appendPluginRows(&block, &rows, .{}, &total));
+    }
+    var block: Block = .{ .kind = .tool, .buf = .empty, .st = .{} };
+    defer block.deinit(std.testing.allocator);
+    const empty_rows: [129][]const Transcript.PluginSegment = @splat(&.{});
+    var total: usize = 0;
+    try std.testing.expectError(error.PluginRenderer, tr.appendPluginRows(&block, &empty_rows, .{}, &total));
+    const many_segments: [33]Transcript.PluginSegment = @splat(.{ .text = "" });
+    const crowded = [_][]const Transcript.PluginSegment{&many_segments};
+    try std.testing.expectError(error.PluginRenderer, tr.appendPluginRows(&block, &crowded, .{}, &total));
+    const oversized_text: [8193]u8 = @splat('x');
+    const oversized = [_]Transcript.PluginSegment{.{ .text = &oversized_text }};
+    const long_row = [_][]const Transcript.PluginSegment{&oversized};
+    try std.testing.expectError(error.PluginRenderer, tr.appendPluginRows(&block, &long_row, .{}, &total));
+    const one = [_]Transcript.PluginSegment{.{ .text = "x" }};
+    const row = [_][]const Transcript.PluginSegment{&one};
+    total = 65535;
+    try tr.appendPluginRows(&block, &row, .{}, &total);
+    try std.testing.expectEqual(@as(usize, 65536), total);
+    // Shared accounting also rejects overflow in the expanded view.
+    try std.testing.expectError(error.PluginRenderer, tr.appendPluginRows(&block, &row, .{}, &total));
+}
+
+test "native plugin explicitly empty expanded view toggles and restores spans" {
+    var block: Block = .{ .kind = .tool, .buf = .empty, .st = .{}, .has_alternate = true };
+    defer block.deinit(std.testing.allocator);
+    try block.buf.appendSlice(std.testing.allocator, "summary");
+    try block.spans.append(std.testing.allocator, .{ .start = 0, .end = 7, .st = .{ .bold = true } });
+    block.toggleOutput();
+    try std.testing.expectEqualStrings("", block.text());
+    try std.testing.expect(!block.hasSpans());
+    block.toggleOutput();
+    try std.testing.expectEqualStrings("summary", block.text());
+    try std.testing.expect(block.styleAt(0).bold);
 }

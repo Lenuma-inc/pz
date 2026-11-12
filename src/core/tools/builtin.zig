@@ -329,6 +329,7 @@ pub const Runtime = struct {
                 reg = tools.Registry.init(self.combined[0..len]);
                 reg.hook_ctx = manager;
                 reg.hook_event = pluginEvent;
+                reg.lifecycle_events = manager.has_lifecycle;
             }
         }
         return reg;
@@ -359,6 +360,27 @@ pub const Runtime = struct {
             if (base.byName(entry.name) != null) return error.DuplicatePluginTool;
         }
         self.plugins = manager;
+        errdefer self.plugins = null;
+        try self.refreshPluginContext();
+    }
+
+    fn refreshPluginContext(self: *Runtime) !void {
+        const manager = self.plugins orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const reg = self.registry();
+        const Info = struct { name: []const u8, description: []const u8, parameters: std.json.Value };
+        const infos = try a.alloc(Info, reg.entries.len);
+        const active = try a.alloc([]const u8, reg.entries.len);
+        for (reg.entries, infos, active) |entry, *info, *name| {
+            const schema = entry.spec.schema_json orelse try @import("../loop.zig").buildSchema(a, entry.spec.params);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, schema, .{});
+            info.* = .{ .name = entry.name, .description = entry.spec.desc, .parameters = parsed.value };
+            name.* = entry.name;
+        }
+        const cwd = try std.Io.Dir.cwd().realPathFileAlloc(sys.io, ".", a);
+        try manager.setContext(.{ .cwd = cwd, .tools = infos, .activeTools = active });
     }
 
     pub fn pluginFooter(self: *Runtime) ?*@import("../plugins.zig").Manager {
@@ -392,6 +414,8 @@ pub const Runtime = struct {
             }
         }
         self.mcp = manager;
+        errdefer self.mcp = null;
+        try self.refreshPluginContext();
     }
 
     pub fn configureLsp(self: *Runtime, raw: []const u8) !void {
@@ -401,6 +425,11 @@ pub const Runtime = struct {
         defer value.deinit();
         if (value.value == .bool and !value.value.bool) return;
         self.lsp = try @import("../lsp.zig").Manager.create(self.alloc, raw);
+        errdefer {
+            if (self.lsp) |*manager| manager.deinit();
+            self.lsp = null;
+        }
+        try self.refreshPluginContext();
     }
 
     pub fn lspCommand(self: *Runtime, arg: []const u8) ![]u8 {

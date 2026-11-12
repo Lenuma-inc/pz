@@ -715,6 +715,7 @@ pub const LoopCtx = struct {
     end_turn: ?bool = null,
     pending_tc: ?providers.ToolCall,
     turn_state: TurnState,
+    ended: bool = false,
 
     pub fn init(opts: Opts) (Err || anyerror)!LoopCtx {
         if (opts.sid.len == 0) return error.EmptySessionId;
@@ -797,6 +798,7 @@ pub const LoopCtx = struct {
             opts.alloc.free(req_tools);
         }
 
+        try pluginLifecycle(opts, "agent_start", .{ .sessionId = opts.sid, .model = opts.model, .provider = opts.provider_label });
         return .{
             .opts = opts,
             .hist = hist,
@@ -875,7 +877,11 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .provider_start, hook_err);
                 };
 
-                if (self.stream) |s| s.deinit();
+                if (self.stream) |s| {
+                    s.deinit();
+                    self.stream = null;
+                }
+                try pluginLifecycle(self.opts, "turn_start", .{ .turnIndex = self.turns, .timestamp = nowMs(self.opts) });
                 self.stream = self.opts.provider.start(.{
                     .model = self.opts.model,
                     .provider = self.opts.provider_label,
@@ -909,6 +915,7 @@ pub const LoopCtx = struct {
                         };
                         continue :state .done;
                     }
+                    try pluginLifecycle(self.opts, "turn_end", .{ .turnIndex = self.turns, .timestamp = nowMs(self.opts) });
                     if (!self.saw_tool_call and self.end_turn != false) {
                         self.turns +|= 1;
                         continue :state .done;
@@ -1022,6 +1029,10 @@ pub const LoopCtx = struct {
             },
             .done => {
                 if (self.opts.abort_slot) |slot| slot.set(null);
+                if (!self.ended) {
+                    self.ended = true;
+                    try pluginLifecycle(self.opts, "agent_end", .{ .turns = self.turns, .toolCalls = self.tool_calls, .canceled = isCanceled(self.opts) });
+                }
                 return .{
                     .turns = self.turns,
                     .tool_calls = self.tool_calls,
@@ -1035,6 +1046,13 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
     var ctx = try LoopCtx.init(opts);
     defer ctx.deinit();
     return ctx.spin();
+}
+
+fn pluginLifecycle(opts: Opts, name: []const u8, value: anytype) !void {
+    if (!opts.reg.lifecycle_events) return;
+    const payload = try std.json.Stringify.valueAlloc(opts.alloc, value, .{});
+    defer opts.alloc.free(payload);
+    if (try opts.reg.event(opts.alloc, name, payload)) |reply| opts.alloc.free(reply);
 }
 
 fn isCanceled(opts: Opts) bool {
@@ -1328,7 +1346,7 @@ fn toolExtensionSchema(alloc: std.mem.Allocator, native_schema: []const u8, tool
     return std.fmt.allocPrint(alloc, "{{\"type\":\"object\",\"anyOf\":[{s},{s}]}}", .{ native_schema, envelope });
 }
 
-fn buildSchema(alloc: std.mem.Allocator, params: []const tools.Spec.Param) ![]const u8 {
+pub fn buildSchema(alloc: std.mem.Allocator, params: []const tools.Spec.Param) ![]const u8 {
     var buf: std.Io.Writer.Allocating = .init(alloc);
     errdefer buf.deinit();
 
@@ -1788,7 +1806,9 @@ fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.I
         .mode = opts.mode,
     };
 
+    try pluginLifecycle(opts, "tool_execution_start", .{ .toolCallId = tc.id, .toolName = tc.name, .args = prepared.value });
     const run_res = opts.reg.run(entry.name, call, &mode_sink.sink) catch |run_err| {
+        try pluginLifecycle(opts, "tool_execution_end", .{ .toolCallId = tc.id, .toolName = tc.name, .isError = true, .result = .{ .content = .{.{ .type = "text", .text = @errorName(run_err) }} } });
         const fail = tools.Result{
             .call_id = call.id,
             .started_at_ms = at_ms,
@@ -1828,6 +1848,7 @@ fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.I
 
     const out = try resultOut(opts.alloc, run_res);
     errdefer opts.alloc.free(out);
+    try pluginLifecycle(opts, "tool_execution_end", .{ .toolCallId = tc.id, .toolName = tc.name, .isError = run_res.final != .ok, .result = .{ .content = .{.{ .type = "text", .text = out }} } });
     if (opts.reg.hook_event != null) {
         const a = parse_arena.allocator();
         const payload = try std.json.Stringify.valueAlloc(a, .{

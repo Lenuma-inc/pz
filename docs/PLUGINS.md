@@ -1,8 +1,8 @@
 # JavaScript plugins (API v1)
 
 pz embeds QuickJS-ng. Plugins do not require Node, npm, a separate interpreter,
-or a plugin-host process. This is a pz API, **not** a pi extension compatibility
-layer. TypeScript, ES modules, npm packages and pi packages are not supported.
+or a plugin-host process. Plugins use the native `pz` API. TypeScript, npm packages and general package imports
+are not supported.
 
 ## Enable a plugin
 
@@ -27,7 +27,7 @@ print-mode prompts are still model prompts, not a command execution interface.
 
 ## API
 
-A script runs in its own function scope with the global `pz` object.
+A script runs in its own ES-module scope with the global `pz` object.
 `pz.apiVersion` is `1`. Register everything while the script loads; registration
 is closed before commands, tools or event handlers run. Names must match
 `[A-Za-z0-9_-]{1,128}`. Builtin tool/command names and duplicate registrations are
@@ -68,7 +68,7 @@ to the model; handlers must validate their inputs. Custom tools use the normal
 policy/approval pipeline and are conservatively marked destructive. Their
 internal dynamic-dispatch kind is shared with MCP, but no MCP server is started.
 
-All callbacks are synchronous. Promise/thenable results are rejected. There are
+Native `pz` callbacks are synchronous; Promise/thenable results are rejected. There are
 no timers, background jobs or async host APIs.
 
 ## Extending existing tools
@@ -275,7 +275,8 @@ also retain private state in its registration closures.
 ## Restrictions and trust
 
 This embedding exposes no filesystem, network, process, environment, shell,
-module loader or QuickJS libc APIs. Plugins can compute results, register tools
+import resolver or QuickJS libc APIs. The host can load a plugin ES module,
+but that module cannot import dependencies. Plugins can compute results, register tools
 and commands, and add context or block calls; they cannot directly run a shell,
 fetch URLs or read files. Native builtin tools remain responsible for those
 operations and their permissions. Only load trusted scripts: this is not an
@@ -308,3 +309,63 @@ execution is not zero-cost.
 VM as a **development test tool only**; Node is not linked, launched or required
 by pz. These tests do not validate the native QuickJS ABI or native limits.
 Native tests live in `src/core/plugins.zig` and the regular Zig test suite.
+
+## Native factories, callback context and metadata
+
+JavaScript modules may export a default factory receiving `pz`. Plain scripts
+may register directly on global `pz`. Factory initialization may await bounded
+microtasks; callback results must remain synchronous. Imports, npm packages,
+TypeScript and asynchronous host I/O are not supported. There is no compatibility
+facade or alternate registration global.
+
+Native callbacks receive `ctx` as their final argument: tools `(args, ctx)`,
+commands `(args, ctx)`, hooks `(event, ctx)`, and renderers `(event, ctx)`.
+It contains a copied host snapshot (when available: `cwd`, `model`, `sessionId`,
+`sessionName`, `sessionFile`) and `ctx.state`, the same store as `pz.state`.
+Do not assume optional host fields exist. `pz.getAllTools()` and
+`pz.getActiveTools()` return copied host metadata, or local registrations before
+host metadata arrives. `pz.getCommands()` returns registered command metadata.
+No shell, filesystem, session mutation or permission-bypass helpers are exposed.
+
+## Native tool renderers
+
+```js
+export default function (pz) {
+  pz.registerToolRenderer({
+    tool: 'read',
+    render(event, ctx) {
+      if (event.phase !== 'result') return null;
+      return {
+        collapsed: [[{text: event.isError ? 'Read failed' : 'Read complete',
+                      fg: event.isError ? 0xff5555 : 0x55cc88, bold: true}]],
+        expanded: [[{text: String(event.output ?? '').slice(0, 2048)
+          .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')}]]
+      };
+    }
+  });
+}
+```
+
+`tool` is an exact host tool name or `'*'`. Exact registrations take precedence;
+returning `null` or `undefined` falls back to the native renderer, not the wildcard.
+Registration is startup-only, limited to 64 unique tool names. Render callbacks
+only format supplied data: they do not execute tools. Errors and promises are
+rejected and passed to host error policy.
+
+Events contain `{toolName, toolCallId, phase, input, output, isError}`, with phase
+`'call'` or `'result'`; output is supplied for results. Arguments and output are
+bounded to 64 KiB for presentation. Oversized arguments yield `input: null` and
+`inputTruncated: true`; oversized output is a UTF-8-safe prefix with
+`outputTruncated: true`. Missing/malformed arguments also yield `input: null`.
+Results without an observed matching call retain native presentation.
+Original tool results and model/session data are not changed. The renderer is
+materialized when each call/result reaches the transcript, not rerun on resize.
+Return `null` for native
+fallback, or `{collapsed: rows, expanded?: rows}`. Each variant allows at most
+128 rows and each row at most 32 segments. A segment is
+`{text, fg?, bg?, bold?, italic?}`; colors are RGB integers `0..0xffffff` and
+style flags are booleans. Text is limited to 2048 characters per segment and
+64 KiB total across both variants. Terminal control characters are rejected.
+The host renders these as native styled spans and selects collapsed/expanded
+rows with the transcript's normal expansion controls. No ANSI escape output or
+custom UI runtime is accepted.

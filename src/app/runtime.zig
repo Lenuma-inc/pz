@@ -2845,6 +2845,7 @@ fn runTui(
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
     ui.panels.plugins = tools_rt.pluginFooter();
+    ui.tr.plugins = tools_rt.pluginFooter();
     const command_report = try tools_rt.pluginReport();
     defer alloc.free(command_report);
     const command_inventory = try std.json.parseFromSlice(struct { command_details: []const tui_cmdpicker.Cmd = &.{} }, alloc, command_report, .{ .ignore_unknown_fields = true });

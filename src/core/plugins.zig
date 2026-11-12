@@ -1,4 +1,4 @@
-//! Explicitly configured, synchronous in-process JavaScript plugins.
+//! Explicitly configured in-process JavaScript plugins with bounded microtasks.
 const std = @import("std");
 const sys = @import("pz_io");
 const tools = @import("tools.zig");
@@ -9,6 +9,7 @@ const c = struct {
     extern fn pz_js_create() ?*pz_js;
     extern fn pz_js_destroy(p: *pz_js) void;
     extern fn pz_js_eval(p: *pz_js, source: [*:0]const u8, len: usize, filename: [*:0]const u8) c_int;
+    extern fn pz_js_load(p: *pz_js, source: [*:0]const u8, len: usize, filename: [*:0]const u8) c_int;
     extern fn pz_js_call(p: *pz_js, request: [*]const u8, len: usize) ?[*:0]u8;
     extern fn pz_js_error(p: *pz_js) [*:0]const u8;
     extern fn pz_js_free_string(s: [*:0]u8) void;
@@ -30,6 +31,8 @@ pub const Manager = struct {
     mutex: std.Io.Mutex = .init,
     entries: std.ArrayList(tools.Entry) = .empty,
     has_footer: bool = false,
+    has_lifecycle: bool = false,
+    has_tool_renderers: bool = false,
 
     pub fn create(alloc: std.mem.Allocator, raw: []const u8) !*Manager {
         if (raw.len > max_bytes) return error.InvalidPluginConfig;
@@ -53,10 +56,8 @@ pub const Manager = struct {
             const source = try reader.interface.allocRemaining(alloc, .limited(max_bytes));
             defer alloc.free(source);
             const filename = try a.dupeSentinel(u8, item.string, 0);
-            // Separate lexical scope for each script; registration closures retain state.
-            const isolated = try std.fmt.allocPrint(alloc, "(function(){{\"use strict\";\n{s}\n}})();", .{source});
-            defer alloc.free(isolated);
-            try self.eval(isolated, filename);
+            // Modules isolate lexical scope and optionally export a native pz factory.
+            try self.load(source, filename);
         }
         const list = try self.request(alloc, .{ .op = "list" });
         defer alloc.free(list);
@@ -84,12 +85,25 @@ pub const Manager = struct {
         }
         const inventory = try self.report();
         defer alloc.free(inventory);
-        const description = try std.json.parseFromSlice(struct { events: []const []const u8 }, alloc, inventory, .{ .ignore_unknown_fields = true });
+        const description = try std.json.parseFromSlice(struct { events: []const []const u8, renderers: []const []const u8 = &.{} }, alloc, inventory, .{ .ignore_unknown_fields = true });
         defer description.deinit();
+        self.has_tool_renderers = description.value.renderers.len > 0;
         for (description.value.events) |event_name| {
             if (std.mem.eql(u8, event_name, "footer_render")) self.has_footer = true;
+            for ([_][]const u8{ "agent_start", "agent_end", "turn_start", "turn_end", "tool_execution_start", "tool_execution_end" }) |lifecycle| {
+                if (std.mem.eql(u8, event_name, lifecycle)) self.has_lifecycle = true;
+            }
         }
         return self;
+    }
+
+    pub fn setContext(self: *Manager, value: anytype) !void {
+        const reply = try self.request(self.alloc, .{ .op = "event", .name = "__host_context", .payload = .{}, .context = value });
+        self.alloc.free(reply);
+    }
+
+    pub fn renderTool(self: *Manager, alloc: std.mem.Allocator, payload: anytype) ![]u8 {
+        return self.request(alloc, .{ .op = "event", .name = "__render_tool", .payload = payload });
     }
 
     pub fn footer(self: *Manager, alloc: std.mem.Allocator, payload: anytype) ![]u8 {
@@ -113,6 +127,15 @@ pub const Manager = struct {
         const terminated = try self.alloc.dupeSentinel(u8, source, 0);
         defer self.alloc.free(terminated);
         if (c.pz_js_eval(self.runtime, terminated.ptr, source.len, filename.ptr) != 0) {
+            std.log.warn("Plugin {s}: {s}", .{ filename, self.diagnostic() });
+            return error.PluginJavaScript;
+        }
+    }
+
+    fn load(self: *Manager, source: []const u8, filename: [:0]const u8) !void {
+        const terminated = try self.alloc.dupeSentinel(u8, source, 0);
+        defer self.alloc.free(terminated);
+        if (c.pz_js_load(self.runtime, terminated.ptr, source.len, filename.ptr) != 0) {
             std.log.warn("Plugin {s}: {s}", .{ filename, self.diagnostic() });
             return error.PluginJavaScript;
         }
@@ -167,7 +190,7 @@ const Binding = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, call.args.mcp.arguments, .{});
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidArgs;
-        const raw = try self.manager.request(alloc, .{ .op = "tool", .name = self.name, .args = parsed.value });
+        const raw = try self.manager.request(alloc, .{ .op = "tool", .name = self.name, .toolCallId = call.id, .args = parsed.value });
         errdefer alloc.free(raw);
         return tools.shared.buildResult(alloc, call.id, call.at_ms, raw, max_bytes, raw.len);
     }
@@ -221,4 +244,44 @@ test "native plugin bootstrap synchronous callbacks and Promise rejection" {
     try std.testing.expectEqualStrings("{\"content\":[{\"type\":\"text\",\"text\":\"world\"}]}", tool);
     try std.testing.expectError(error.PluginJavaScript, manager.command("/async"));
     try std.testing.expect(std.mem.indexOf(u8, manager.diagnostic(), "Promise") != null);
+}
+
+test "native module factory receives pz and awaits initialization" {
+    const a = std.testing.allocator;
+    const runtime = c.pz_js_create() orelse return error.OutOfMemory;
+    const manager = try a.create(Manager);
+    manager.* = .{ .alloc = a, .arena = std.heap.ArenaAllocator.init(a), .runtime = runtime };
+    defer manager.destroy();
+    try manager.eval(@embedFile("plugins_bootstrap.js"), "test:bootstrap");
+    try manager.load(
+        \\export default async function(api) {
+        \\  await Promise.resolve();
+        \\  if (api !== pz || typeof globalThis.pi !== 'undefined') throw Error('Wrong native API');
+        \\  api.registerCommand('module_echo', {handler:args => 'echo:' + args});
+        \\  api.registerTool({name:'module_tool',description:'Native tool',parameters:{type:'object'},execute:(args,ctx) => ctx.cwd + ':' + args.value});
+        \\}
+    , "test:native-module.mjs");
+    try manager.setContext(.{ .cwd = "/project" });
+    const command = (try manager.command("/module_echo two words")).?;
+    defer a.free(command);
+    try std.testing.expectEqualStrings("echo:two words", command);
+    const tool = try manager.request(a, .{ .op = "tool", .name = "module_tool", .args = .{ .value = "value" } });
+    defer a.free(tool);
+    try std.testing.expectEqualStrings("{\"content\":[{\"type\":\"text\",\"text\":\"/project:value\"}]}", tool);
+}
+
+test "native module load rejects invalid factories imports and unsettled promises" {
+    const a = std.testing.allocator;
+    const cases = [_][]const u8{
+        "export default 42;",
+        "import unsupported from 'unsupported-native-test'; export default function(pz) {}",
+        "export default async function(pz) { throw Error('factory rejected'); }",
+        "export default function(pz) { return new Promise(() => {}); }",
+    };
+    for (cases) |source| {
+        const manager = try Manager.create(a, "[]");
+        defer manager.destroy();
+        try std.testing.expectError(error.PluginJavaScript, manager.load(source, "test:invalid-module.mjs"));
+        try std.testing.expect(manager.diagnostic().len != 0);
+    }
 }

@@ -23,6 +23,7 @@ pub fn bind(
             entries: []const Entry,
             inner: reg.Registry,
             hook_ctx: ?*anyopaque = null,
+            lifecycle_events: bool = false,
             hook_event: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8) anyerror![]u8 = null,
 
             /// Owned JSON response, or null without an enabled extension runtime.

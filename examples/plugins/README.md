@@ -27,6 +27,7 @@ See [the native API documentation](../../docs/PLUGINS.md).
 | `protected-paths.js` | `tool_call` hook | Blocks observed direct `write`, `edit`, `patch` modifications to protected lexical paths. |
 | `cc-safety-net.js` | `/safetynet [status\|toggle\|reset]`; `tool_call` hook | pz adaptation of the cc-safety-net idea (MIT): blocks destructive git/filesystem commands (`git reset --hard`, `git push --force`, `rm -rf` of root/home/`.git`/cwd/outside targets, `find -delete`, `shred`, `dd` to devices, `mkfs`, `curl\|bash`) and secret file access (`.env*`, `.npmrc`, key files, `~/.ssh`, `~/.aws`, etc.) across `bash`, file and patch tools. Lexical guard only, not a sandbox. |
 | `powerline-footer.js` | `/powerline [default\|minimal\|compact\|full\|ascii\|off]`; `footer_render` event | Native pz adaptation of the pi-powerline-footer segmented footer idea. Renders up to 2 rows of colored segments (model, thinking, path, branch, context %, cost, tokens, jobs) with powerline triangles or ASCII separators. Responsive: narrows segments in terminals <60 cols, prioritizes critical data. Presets control visible segments and style. |
+| `pretty-tools.js` | Native tool renderers | Optional presentation-only example for `read`, `bash`, `ls`, `find`, `grep`: collapsed summaries, colored previews, Nerd Font file/folder icons and tree rows for `ls`, grouped search results. Does not replace tool execution or add FFF/frecency search. |
 | `tool-stats.js` | `/toolstats [reset]` | Counts observed calls, results and `isError` results by exact `event.toolName`; reset clears counters. |
 | `session-notes.js` | `/notes [list\|add text\|clear]`; model tool `session_note` | Maintain small ephemeral notes. Only the user command can clear them. |
 | `handoff.js` | `/handoff [goal]` | Emit Markdown containing the current maintained goal, notes and observed session/model/provider metadata. |
@@ -116,3 +117,11 @@ cleared by session lifecycle events; clear/reset them explicitly when reusing a
 runtime. State keys are namespaced under `examples.*.v1`; scripts use a fixed
 number of keys and bounded collections. No registration happens inside hooks,
 commands or tool execution.
+
+### Native visual plugins
+
+Use `pz.registerToolRenderer({tool, render(event, ctx)})` to provide native
+colored collapsed and expanded tool rows. Return null for the builtin display.
+See the [native renderer example and bounds](../../docs/PLUGINS.md#native-tool-renderers).
+Module default factories receive `pz`; native callbacks are synchronous and
+receive the host context as their final argument. No compatibility API is exposed.

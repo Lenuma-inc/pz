@@ -12,7 +12,7 @@ function runtime(source = '') {
   const run = source => vm.runInContext(source, context, { timeout: 1000 });
   run(bootstrap);
   run(source);
-  return { run, dispatch: q => JSON.parse(run(`__pzDispatch(${JSON.stringify(JSON.stringify(q))})`)) };
+  return { run, dispatchAsync: async q => JSON.parse(await run(`__pzDispatch(${JSON.stringify(JSON.stringify(q))})`)), dispatch: q => JSON.parse(run(`__pzDispatch(${JSON.stringify(JSON.stringify(q))})`)) };
 }
 let passed = 0;
 function test(name, body) {
@@ -137,7 +137,7 @@ test('example plugin runs without filesystem or network capabilities', () => {
   assert.match(r.dispatch({op:'tool',name:'hello',args:{name:'Ada'}}).content[0].text, /Ada/);
   assert.match(r.dispatch({op:'event',name:'before_request',payload:{}}).systemPromptAppend, /hello/);
   assert.equal(r.dispatch({op:'event',name:'tool_call',payload:{toolName:'hello',input:{name:'blocked'}}}).block, true);
-  assert.equal(r.dispatch({op:'event',name:'tool_call',payload:{toolName:'hello',input:{name:'Ada'}}}).block, false);
+  assert.deepEqual(r.dispatch({op:'event',name:'tool_call',payload:{toolName:'hello',input:{name:'Ada'}}}), {}); // No veto is not an explicit allow; later hooks cannot undo a block.
 });
 test('workflow callbacks preserve state and context across completion rounds', () => {
   const r = runtime(`pz.registerToolExtension({tool:'read',name:'flow',description:'x',parameters:{},
@@ -342,3 +342,57 @@ test('context_transform combines distinct hooks and rejects overlapping or malfo
   ]) assert.throws(()=>runtime(source).dispatch({op:'event',name:'context_transform',payload:{}}));
 });
 console.log(`Passed ${passed} bootstrap logic tests under Node vm; native QuickJS C limits NOT tested.`);
+
+test('native renderer precedence, fallback, metadata and context',()=>{
+  const r=runtime(`pz.registerToolRenderer({tool:'*',render:()=>({collapsed:[[{text:'wild'}]]})});
+    pz.registerToolRenderer({tool:'read',render:(e,ctx)=>e.input===null ? null : ({collapsed:[[{text:ctx.cwd+ctx.sessionId,fg:0xff0000,bold:true}]],expanded:[]})});`);
+  const event=(toolName,input={})=>r.dispatch({op:'event',name:'__render_tool',context:{cwd:'/w',sessionId:'s'},payload:{toolName,phase:'call',input}});
+  assert.equal(event('read').collapsed[0][0].text,'/ws');
+  assert.equal(event('other').collapsed[0][0].text,'wild');
+  assert.equal(event('read',null),null);
+  assert.deepEqual(r.dispatch({op:'describe'}).renderers,['*','read']);
+  assert.equal(r.run('typeof pi'), 'undefined');
+  assert.equal(r.run('typeof __pzLoadPlugin'), 'undefined');
+  assert.throws(()=>r.run("pz.registerToolRenderer({tool:'read',render:()=>null})"),/Duplicate/);
+  r.dispatch({op:'list'});
+  assert.throws(()=>r.run("pz.registerToolRenderer({tool:'late',render:()=>null})"),/closed/);
+});
+test('native renderer validates rows, styles, controls and aggregate bounds',()=>{
+  for(const result of ["{}", "{collapsed:Array(129).fill([])}", "{collapsed:[Array(33).fill({text:'x'})]}", "{collapsed:[[{text:'x'.repeat(2049)}]]}", "{collapsed:[[{text:'\\n'}]]}", "{collapsed:[[{text:'x',fg:-1}]]}", "{collapsed:[[{text:'x',bold:1}]]}", "{collapsed:[Array(32).fill({text:'x'.repeat(2048)})],expanded:[[{text:'x'}]]}","Promise.resolve(null)"]){
+    const r=runtime(`pz.registerToolRenderer({tool:'*',render:()=>(${result})})`);
+    assert.throws(()=>r.dispatch({op:'event',name:'__render_tool',payload:{toolName:'read',phase:'result'}}),/renderer|Async/);
+  }
+  assert.equal(runtime('').dispatch({op:'event',name:'__render_tool',payload:{toolName:'x',phase:'call'}}),null);
+  assert.throws(()=>runtime("for(let i=0;i<65;i++)pz.registerToolRenderer({tool:'t'+i,render:()=>null})"),/excessive/);
+  const r=runtime("pz.registerToolRenderer({tool:'*',render:()=>{throw Error('render failure')}})");
+  assert.throws(()=>r.dispatch({op:'event',name:'__render_tool',payload:{toolName:'x',phase:'call'}}),/render failure/);
+});
+test('native context snapshots and metadata are copied',()=>{
+ const r=runtime(`pz.registerCommand('inspect',{handler:(a,ctx)=>JSON.stringify({cwd:ctx.cwd,id:ctx.sessionId,model:ctx.model})});`);
+ assert.deepEqual(JSON.parse(r.dispatch({op:'command',name:'inspect',context:{cwd:'/work',sessionId:'s',model:{id:'m'},tools:[{name:'read'}],activeTools:['read']}})),{cwd:'/work',id:'s',model:{id:'m'}});
+ r.run("pz.getAllTools()[0].name='changed';pz.getActiveTools().push('changed')");
+ assert.equal(r.run('pz.getAllTools()[0].name'),'read');
+ assert.equal(r.run('pz.getActiveTools().length'),1);
+ assert.equal(r.run('pz.getCommands()[0].name'),'inspect');
+ assert.throws(()=>r.dispatch({op:'command',name:'inspect',context:[]}),/Invalid plugin context/);
+});
+test('pretty-tools factory renders native icons trees and grouped search without executing tools',()=>{
+  // Exercise the factory body, not Node module loading or the native C loader.
+  const source=readFileSync(new URL('../../examples/plugins/pretty-tools.js',import.meta.url),'utf8');
+  const r=runtime('('+source.replace('export default ','')+')(pz);');
+  assert.deepEqual(r.dispatch({op:'list'}),[]);
+  const render=(toolName,output,input={})=>r.dispatch({op:'event',name:'__render_tool',payload:{toolName,toolCallId:'test',phase:'result',input,output,isError:false}});
+  const ls=render('ls','src/\nmain.js\n');
+  assert.match(ls.expanded[1][1].text,/\uf07b src\//);
+  assert.equal(ls.expanded[2][0].text,'└── ');
+  const grep=render('grep','src/a.js:3:match\nsrc/a.js:4:another\n',{pattern:'match'});
+  assert.equal(grep.expanded.filter(row=>row[0].bold).length,2);
+  assert.equal(grep.expanded[2][0].text,'  3: ');
+  const find=render('find','src/a.js\nsrc/b.js\n');
+  assert.equal(find.expanded[1][0].text,'\uf07b src');
+  assert.equal(render('other','unchanged'),null);
+  const huge=render('read',('界'.repeat(500)+'\u001b[31m\t\n').repeat(200));
+  assert.ok(huge.expanded.length<=128);
+  assert.ok(huge.expanded.every(row=>row.every(segment=>!/[\x00-\x1f\x7f-\x9f]/.test(segment.text))));
+});
+console.log(`Total: ${passed} bootstrap tests passed.`);

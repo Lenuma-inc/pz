@@ -1,9 +1,10 @@
 (() => {
   'use strict';
   const extensions = new Map();
+  const renderers = new Map();
   const tools = new Map(), commands = new Map(), hooks = new Map(), state = new Map();
   const parse = JSON.parse.bind(JSON), stringify = JSON.stringify.bind(JSON);
-  const events = new Set(['before_request','context_transform','tool_call','tool_result','session_start','session_end','footer_render']);
+  const events = new Set(['before_request','context_transform','tool_call','tool_result','session_start','session_end','footer_render','agent_start','agent_end','turn_start','turn_end','tool_execution_start','tool_execution_end']);
   const reservedCommands = new Set(['help','quit','exit','session','model','provider','tools','mcp','lsp','plugins','bg','upgrade','new','resume','tree','fork','compact','export','settings','hotkeys','login','logout','clear','cost','copy','name','reload','share','changelog','prompt','commands']);
   let sealed = false;
   function name(n) { if (typeof n !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(n)) throw Error('Invalid plugin registration name'); }
@@ -17,6 +18,15 @@
   function registering() { if (sealed) throw Error('Plugin registrations are closed'); }
   const api = Object.freeze({
     apiVersion: 1,
+    getCommands:()=>Array.from(commands,([name,c])=>({name,description:c.description})),
+    getAllTools:()=>clone(snapshot.tools || Array.from(tools.values(),t=>({name:t.name,description:t.description,parameters:t.parameters}))),
+    getActiveTools:()=>clone(snapshot.activeTools || Array.from(tools.keys())),
+    registerToolRenderer(r) {
+      registering();
+      if (!r || typeof r.tool !== 'string' || !r.tool || r.tool.length > 128 || /[\x00-\x20\x7f-\x9f]/.test(r.tool) || typeof r.render !== 'function') throw Error('Invalid tool renderer descriptor');
+      if (renderers.size >= 64 || renderers.has(r.tool)) throw Error('Duplicate or excessive tool renderer');
+      renderers.set(r.tool,r.render);
+    },
     registerTool(t) {
       registering(); name(t.name);
       if (tools.size >= 64 || tools.has(t.name)) throw Error('Duplicate or excessive plugin tool: '+t.name);
@@ -44,12 +54,42 @@
     },
     state:Object.freeze({get:k=>state.get(k),set:(k,v)=>{if (!state.has(k) && state.size >= 1024) throw Error('Too many state keys'); state.set(k,v);}})
   });
+  let snapshot = {};
+  const clone = v => parse(stringify(v));
+  function finish(result) { const out=stringify(result); if(typeof out !== 'string' || out.length > 1048576) throw Error('Plugin output exceeds limit'); return out; }
+  function context() { return Object.freeze({...clone(snapshot),state:api.state}); }
+  function validateRender(result) {
+    if (result == null) return null;
+    if (typeof result !== 'object' || Array.isArray(result) || Object.keys(result).some(k=>!['collapsed','expanded'].includes(k))) throw Error('Invalid tool renderer result');
+    let total = 0;
+    function rows(value) {
+      if (!Array.isArray(value) || value.length > 128) throw Error('Invalid tool renderer rows');
+      for (const row of value) {
+        if (!Array.isArray(row) || row.length > 32) throw Error('Invalid tool renderer row');
+        for (const s of row) {
+          if (!s || typeof s !== 'object' || Array.isArray(s) || Object.keys(s).some(k=>!['text','fg','bg','bold','italic'].includes(k)) || typeof s.text !== 'string' || s.text.length > 2048 || /[\x00-\x1f\x7f-\x9f]/.test(s.text) || !['fg','bg'].every(k=>s[k] === undefined || (Number.isInteger(s[k]) && s[k]>=0 && s[k]<=0xffffff)) || !['bold','italic'].every(k=>s[k] === undefined || typeof s[k] === 'boolean')) throw Error('Invalid tool renderer segment');
+          for (const ch of s.text) { const cp=ch.codePointAt(0); total += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4; }
+          if (total > 65536) throw Error('Tool renderer text exceeds limit');
+        }
+      }
+    }
+    rows(result.collapsed);
+    if (result.expanded !== undefined) rows(result.expanded);
+    return result;
+  }
   Object.defineProperty(globalThis,'pz',{value:api,writable:false,configurable:false});
   Object.defineProperty(globalThis,'__pzDispatch',{value: function(raw) {
-    const q = parse(raw); const ctx = Object.freeze({state:api.state});
+    const q = parse(raw);
+    if(q.context !== undefined) { if(!q.context || typeof q.context !== 'object' || Array.isArray(q.context)) throw Error('Invalid plugin context'); snapshot={...snapshot,...clone(q.context)}; }
+    if(q.op === 'event' && q.payload && ['session_start','before_request','agent_start'].includes(q.name)) {
+      const p=q.payload;
+      for(const key of ['cwd','sessionId','sessionName','sessionFile']) if(p[key] !== undefined) snapshot[key]=clone(p[key]);
+      if(p.model !== undefined) snapshot.model=typeof p.model === 'string' ? {id:p.model,...(typeof p.provider === 'string' ? {provider:p.provider} : {})} : clone(p.model);
+    }
+    const ctx = context();
     let result;
     if (q.op === 'list') { sealed = true; result = Array.from(tools.values(),t=>({name:t.name,description:t.description,parameters:t.parameters})); }
-    else if (q.op === 'describe') { result = {tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),command_details:Array.from(commands,([name,c])=>({name,desc:c.description,args:c.completions.map(v=>v.value),arg_desc:c.completions.map(v=>v.description)})),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}))}; }
+    else if (q.op === 'describe') { result = {renderers:Array.from(renderers.keys()),tools:Array.from(tools.keys()),commands:Array.from(commands.keys()),command_details:Array.from(commands,([name,c])=>({name,desc:c.description,args:c.completions.map(v=>v.value),arg_desc:c.completions.map(v=>v.description)})),events:Array.from(hooks.keys()),extensions:Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}))}; }
     else if (q.op === 'tool') {
       const t = tools.get(q.name); if (!t) throw Error('Unknown plugin tool: '+q.name);
       result = sync(t.execute(q.args,ctx));
@@ -61,6 +101,12 @@
       if (c && typeof result !== 'string') throw Error('Plugin command must return a string');
     } else if (q.op === 'event') {
       result = {};
+      if (q.name === '__render_tool') {
+        const event=q.payload;
+        if (!event || typeof event.toolName !== 'string' || !['call','result'].includes(event.phase)) throw Error('Invalid tool renderer event');
+        const render=renderers.get(event.toolName) || renderers.get('*');
+        return finish(render ? validateRender(sync(render(event,ctx))) : null);
+      }
       if (q.name === '__tool_extensions') result = Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})}));
       if (q.name === '__context_transform_enabled') result = {enabled:hooks.has('context_transform')};
       if (q.name === '__prepare_tool_extension') {
@@ -90,7 +136,7 @@
         else validateFinal(result);
       }
       if (q.name === 'before_request' && extensions.size) result.systemPromptAppend = 'Available builtin tool extensions (call the same tool with only extension and extension_args as a JSON object string; derived native operations retain normal validation and approval):\n'+stringify(Array.from(extensions.values(),({tool,name,description,parameters,mcpProxy})=>({tool,name,description,parameters,...(mcpProxy === true ? {mcpProxy:true} : {})})));
-      for (const f of hooks.get(q.name) || []) {
+      for (const f of (hooks.get(q.name) || []).slice()) {
         const r = sync(f(q.payload,ctx));
         if (q.name === 'before_request' && r != null) {
           if (typeof r.systemPromptAppend !== 'string') throw Error('before_request must return systemPromptAppend string');
@@ -117,7 +163,8 @@
           if (r.block) result = {block:true,reason:r.reason || 'Blocked by plugin'};
         }
       }
+      if(q.name === 'session_end') for(const key of ['sessionId','sessionName','sessionFile','entries','branch']) delete snapshot[key];
     } else throw Error('Invalid plugin dispatch');
-    const out = stringify(result); if (typeof out !== 'string' || out.length > 1048576) throw Error('Plugin output exceeds limit'); return out;
+    return finish(result);
   },writable:false,configurable:false});
 })();
