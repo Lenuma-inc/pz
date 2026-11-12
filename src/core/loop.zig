@@ -7189,7 +7189,7 @@ test "context snapshot excludes privileged content and disables oversized histor
     opts.reg.hook_event = Hook.event;
     var msgs = [_]providers.Msg{
         .{ .role = .system, .parts = &.{.{ .text = "PRIVATE system" }} },
-        .{ .role = .user, .parts = &.{.{ .text = "a" ** 3000 }} },
+        .{ .role = .user, .parts = &.{.{ .text = &@as([3000]u8, @splat('a')) }} },
         .{ .role = .assistant, .parts = &.{.{ .reasoning = "PRIVATE reasoning" }} },
         .{ .role = .assistant, .parts = &.{.{ .tool_call = .{ .id = "id", .name = "read", .args = "PRIVATE args" } }} },
         .{ .role = .user, .parts = &.{.{ .text = "latest" }} },
