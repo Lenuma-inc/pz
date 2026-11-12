@@ -178,8 +178,10 @@ const web_params = [_]tools.Tool.Param{
     .{ .name = "json_path", .ty = .string, .required = false, .desc = "Optional dot-separated JSON field path, including array indices, e.g. data.textHtml or items.0.title; selected HTML becomes text" },
     .{ .name = "url", .ty = .string, .required = false, .desc = "Fetch a page (provide exactly one of query or url); HTTP or HTTPS" },
     .{ .name = "openapi", .ty = .string, .required = false, .desc = "OpenAPI JSON URL for calling an operation (instead of url/query)" },
+    .{ .name = "rpc", .ty = .string, .required = false, .desc = "RPC protocol: http (GET query or POST form) or jsonrpc (JSON-RPC 2.0 POST, id=1). Requires url; mutually exclusive with query/openapi/body." },
+    .{ .name = "rpc_method", .ty = .string, .required = false, .desc = "Remote method name, required only for rpc=jsonrpc" },
     .{ .name = "operation_id", .ty = .string, .required = false, .desc = "OpenAPI operationId to call" },
-    .{ .name = "parameters", .ty = .string, .required = false, .desc = "JSON object of operation values; path/query/header scalar parameters use their names as keys, and `body` holds a JSON request body" },
+    .{ .name = "parameters", .ty = .string, .required = false, .desc = "JSON string: OpenAPI values (body for JSON body); RPC http object of scalars/arrays (arrays repeat the exact key); jsonrpc object or array params, default {}" },
     .{ .name = "method", .ty = .string, .required = false, .desc = "HTTP method for a direct URL request (default GET); OpenAPI calls use the method in the spec" },
     .{ .name = "body", .ty = .string, .required = false, .desc = "Request body" },
 };
@@ -1050,9 +1052,18 @@ pub const Runtime = struct {
         };
     }
 
-    fn runWeb(self: *Runtime, call: tools.Call, _: *tools.Sink) !tools.Result {
+    fn runWeb(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         if (call.kind != .web or std.meta.activeTag(call.args) != .web) return error.InvalidArgs;
         const req = call.args.web;
+
+        if (req.rpc != null) {
+            var arena = std.heap.ArenaAllocator.init(self.alloc);
+            defer arena.deinit();
+            var resolved = call;
+            resolved.args = .{ .web = try web.rpcRequestAlloc(arena.allocator(), req) };
+            return self.runWeb(resolved, sink);
+        }
+        if (req.rpc_method != null) return error.InvalidArgs;
 
         if (req.openapi != null or req.operation_id != null or req.parameters != null) {
             if (req.openapi == null or req.operation_id == null or req.parameters == null or req.query != null or req.url.len != 0 or req.method != .GET or req.headers.len != 0 or req.body != null) return error.InvalidArgs;

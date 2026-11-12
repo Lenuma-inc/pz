@@ -357,6 +357,25 @@ Calls require approval and are limited to operations served from the
 specification's origin. YAML, `$ref`, and server-variable expansion are not
 supported yet.
 
+RPC calls use an explicit `url` and `rpc` protocol, without an OpenAPI spec:
+
+```json
+{"rpc":"http","url":"https://aur.archlinux.org/rpc/","parameters":"{\"v\":5,\"type\":\"info\",\"arg[]\":[\"yay\",\"paru\"]}"}
+{"rpc":"jsonrpc","url":"https://example.org/rpc","rpc_method":"subtract","parameters":"[42,23]"}
+```
+
+`rpc: "http"` encodes the `parameters` JSON object into GET query parameters,
+keeping any existing query. Set `method: "POST"` to send a URL-encoded form.
+Values must be strings, numbers or booleans; arrays repeat the exact key (use
+`arg[]` explicitly for APIs such as AUR). Nested objects and null are rejected.
+`rpc: "jsonrpc"` sends a JSON-RPC 2.0 POST envelope with `rpc_method`, object or
+array `parameters`, and request `id: 1`. Parameters default to `{}` in both modes.
+JSON-RPC calls and HTTP POST require approval; HTTP GET uses normal read policy.
+Both modes retain egress checks, response redaction, `json_path` and pagination.
+Responses, including RPC error envelopes, are returned as received; no batch
+calls, notifications, or automatic retries are performed. RPC cannot be combined
+with `query`, `openapi`, `operation_id`, or an explicit `body`.
+
 
 ## JavaScript plugins
 

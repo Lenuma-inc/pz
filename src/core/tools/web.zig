@@ -26,6 +26,8 @@ pub const Request = struct {
     url: []const u8 = "",
     query: ?[]const u8 = null,
     openapi: ?[]const u8 = null,
+    rpc: ?enum { http, jsonrpc } = null,
+    rpc_method: ?[]const u8 = null,
     operation_id: ?[]const u8 = null,
     parameters: ?[]const u8 = null,
     num_results: u8 = 8,
@@ -80,12 +82,82 @@ fn isCrossOrigin(orig: ParsedUrl, next: ParsedUrl) bool {
 }
 
 pub fn requiresEscalationApproval(req: Request) bool {
-    if (req.openapi != null) return true;
+    if (req.openapi != null or req.rpc == .jsonrpc) return true;
     if (hasCredentialHeaders(req)) return true;
     return switch (req.method) {
         .GET, .HEAD, .OPTIONS => req.body != null,
         .POST, .PUT, .PATCH, .DELETE => true,
     };
+}
+
+/// Resolve RPC into an ordinary request; the caller owns the allocator lifetime.
+/// No endpoint is trusted implicitly: normal egress and redirect checks still apply.
+pub fn rpcRequestAlloc(alloc: std.mem.Allocator, req: Request) !Request {
+    const protocol = req.rpc orelse return error.InvalidArgs;
+    if (req.url.len == 0 or req.query != null or req.openapi != null or req.operation_id != null or req.body != null) return error.InvalidArgs;
+    _ = try parseUrl(req.url);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, req.parameters orelse "{}", .{});
+    defer parsed.deinit();
+    var result = req;
+    result.rpc = null;
+    result.rpc_method = null;
+    result.parameters = null;
+    var content_type: ?[]const u8 = null;
+    switch (protocol) {
+        .jsonrpc => {
+            const method = req.rpc_method orelse return error.InvalidArgs;
+            if (method.len == 0 or (req.method != .GET and req.method != .POST)) return error.InvalidArgs;
+            if (parsed.value != .object and parsed.value != .array) return error.InvalidArgs;
+            result.method = .POST;
+            result.body = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .method = method, .params = parsed.value, .id = @as(u32, 1) }, .{});
+            content_type = "application/json";
+        },
+        .http => {
+            if (req.rpc_method != null or parsed.value != .object or (req.method != .GET and req.method != .POST)) return error.InvalidArgs;
+            var encoded = std.ArrayList(u8).empty;
+            defer encoded.deinit(alloc);
+            var it = parsed.value.object.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* == .array) {
+                    for (entry.value_ptr.array.items) |value| try appendRpcPair(alloc, &encoded, entry.key_ptr.*, value);
+                } else try appendRpcPair(alloc, &encoded, entry.key_ptr.*, entry.value_ptr.*);
+            }
+            if (req.method == .POST) {
+                result.body = try alloc.dupe(u8, encoded.items);
+                content_type = "application/x-www-form-urlencoded";
+            } else if (encoded.items.len != 0) {
+                // Insert before the fragment and preserve existing query parameters.
+                const end = std.mem.indexOfScalar(u8, req.url, '#') orelse req.url.len;
+                const base = req.url[0..end];
+                const separator: []const u8 = if (std.mem.indexOfScalar(u8, base, '?') == null) "?" else if (std.mem.endsWith(u8, base, "?") or std.mem.endsWith(u8, base, "&")) "" else "&";
+                result.url = try std.fmt.allocPrint(alloc, "{s}{s}{s}{s}", .{ base, separator, encoded.items, req.url[end..] });
+            }
+        },
+    }
+    if (content_type) |value| {
+        for (req.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type") or std.ascii.eqlIgnoreCase(header.name, "content-length") or std.ascii.eqlIgnoreCase(header.name, "transfer-encoding")) return error.InvalidArgs;
+        }
+        const headers = try alloc.alloc(Header, req.headers.len + 1);
+        @memcpy(headers[0..req.headers.len], req.headers);
+        headers[req.headers.len] = .{ .name = "Content-Type", .value = value };
+        result.headers = headers;
+    }
+    return result;
+}
+
+fn appendRpcPair(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: std.json.Value) !void {
+    if (value != .string and value != .integer and value != .float and value != .bool) return error.InvalidArgs;
+    const scalar = try jsonScalarAlloc(alloc, value);
+    defer alloc.free(scalar);
+    if (out.items.len != 0) try out.append(alloc, '&');
+    const encoded_name = try urlEncodeAlloc(alloc, name);
+    defer alloc.free(encoded_name);
+    const encoded_value = try urlEncodeAlloc(alloc, scalar);
+    defer alloc.free(encoded_value);
+    try out.appendSlice(alloc, encoded_name);
+    try out.append(alloc, '=');
+    try out.appendSlice(alloc, encoded_value);
 }
 
 /// Resolve an OpenAPI operation into the ordinary, policy-checked web request.
@@ -1729,4 +1801,61 @@ test "cross-origin redirects include scheme and port changes" {
     try std.testing.expect(isCrossOrigin(base, try parseUrl("https://example.com:8443/b")));
     try std.testing.expect(isCrossOrigin(try parseUrl("http://example.com/a"), base));
     try std.testing.expect(!isCrossOrigin(base, try parseUrl("https://example.com/b")));
+}
+
+test "RPC HTTP encodes AUR parameters and repeated keys without endpoint special cases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const req = try rpcRequestAlloc(arena.allocator(), .{
+        .rpc = .http,
+        .url = "https://aur.archlinux.org/rpc/?v=5#section",
+        .parameters = "{\"type\":\"info\",\"arg[]\":[\"foo bar\",\"a&b\"]}",
+    });
+    try std.testing.expectEqualStrings("https://aur.archlinux.org/rpc/?v=5&type=info&arg%5B%5D=foo%20bar&arg%5B%5D=a%26b#section", req.url);
+    try std.testing.expect(req.rpc == null and req.parameters == null);
+    try std.testing.expect(!requiresEscalationApproval(.{ .rpc = .http }));
+    const post = try rpcRequestAlloc(arena.allocator(), .{ .rpc = .http, .url = "https://example.com/rpc", .method = .POST, .parameters = "{\"n\":2,\"ok\":true}" });
+    try std.testing.expectEqualStrings("n=2&ok=true", post.body.?);
+    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", post.headers[0].value);
+    try std.testing.expect(requiresEscalationApproval(post));
+}
+
+test "RPC JSON-RPC builds POST envelope for positional and named params" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "[1,2]", "{\"name\":\"hello\"}" }) |params| {
+        const req = try rpcRequestAlloc(arena.allocator(), .{ .rpc = .jsonrpc, .rpc_method = "echo", .url = "https://example.com/rpc", .parameters = params });
+        try std.testing.expectEqual(Method.POST, req.method);
+        try std.testing.expectEqualStrings("application/json", req.headers[0].value);
+        const body = try std.json.parseFromSlice(std.json.Value, arena.allocator(), req.body.?, .{});
+        try std.testing.expectEqualStrings("2.0", body.value.object.get("jsonrpc").?.string);
+        try std.testing.expectEqualStrings("echo", body.value.object.get("method").?.string);
+        try std.testing.expectEqual(@as(i64, 1), body.value.object.get("id").?.integer);
+        const actual = try std.json.Stringify.valueAlloc(arena.allocator(), body.value.object.get("params").?, .{});
+        try std.testing.expectEqualStrings(params, actual);
+    }
+    try std.testing.expect(requiresEscalationApproval(.{ .rpc = .jsonrpc }));
+}
+
+test "RPC rejects conflicting modes and invalid parameter shapes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const base: Request = .{ .rpc = .http, .url = "https://example.com/rpc" };
+    for ([_][]const u8{ "[]", "{\"x\":null}", "{\"x\":{}}", "{\"x\":[[]]}" }) |params| {
+        var req = base;
+        req.parameters = params;
+        try std.testing.expectError(error.InvalidArgs, rpcRequestAlloc(arena.allocator(), req));
+    }
+    var req = base;
+    req.openapi = "https://example.com/spec";
+    try std.testing.expectError(error.InvalidArgs, rpcRequestAlloc(arena.allocator(), req));
+    req = base;
+    req.rpc = .jsonrpc;
+    try std.testing.expectError(error.InvalidArgs, rpcRequestAlloc(arena.allocator(), req));
+    req.rpc_method = "echo";
+    req.parameters = "null";
+    try std.testing.expectError(error.InvalidArgs, rpcRequestAlloc(arena.allocator(), req));
+    req.parameters = null;
+    req.headers = &.{.{ .name = "Content-Type", .value = "text/plain" }};
+    try std.testing.expectError(error.InvalidArgs, rpcRequestAlloc(arena.allocator(), req));
 }
