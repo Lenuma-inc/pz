@@ -1,5 +1,5 @@
 pkgname=pz
-pkgver=0.9.1
+pkgver=0.10.0
 pkgrel=1
 pkgdesc='Coding agent with built-in sandboxing, policy enforcement, and auditing'
 arch=('x86_64' 'aarch64')

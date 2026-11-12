@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-12
+
+### Added
+- Native plugin tool rendering API for visual plugin ports.
+- Reversible context folding inspired by billion-context.
+- Native MCP discovery adapter and proxy API for plugins.
+- Multi-step tool extensions and web-access adaptation.
+- Plugin `footer_render` event and powerline-footer example.
+
+### Fixed
+- Include plugin commands in slash completion.
+- Restore Zig 0.17 compatibility for the context snapshot test fixture.
+
 ## [0.9.1] - 2026-11-11
 
 ### Added
