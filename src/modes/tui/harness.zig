@@ -14,6 +14,7 @@ const path_complete_mod = @import("path_complete.zig");
 const image_mod = @import("image.zig");
 const spinner = @import("spinner.zig");
 const core_time = @import("../../core/time.zig");
+const timing = @import("../../core/timing.zig");
 
 pub const Ui = struct {
     alloc: std.mem.Allocator,
@@ -118,6 +119,8 @@ pub const Ui = struct {
     }
 
     fn onProviderInner(self: *Ui, seq: ?u64, ev: core.providers.Event) !void {
+        const span = timing.Span.begin("tui.provider_event");
+        defer span.end();
         // Map provider-local seq to transcript-global seq space.
         // The provider's seq starts at 1 per turn, but the transcript's
         // internal counter may be much higher. Use the transcript's own
@@ -245,6 +248,8 @@ pub const Ui = struct {
     }
 
     pub fn draw(self: *Ui, out: anytype) !void {
+        const span = timing.Span.begin("tui.draw");
+        defer span.end();
         self.frm.clear();
         _ = self.copyToastActive(core_time.milliTimestamp());
 

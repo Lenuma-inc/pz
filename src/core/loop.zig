@@ -11,6 +11,7 @@ const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
 const core_time = @import("time.zig");
+const timing = @import("timing.zig");
 const attach = @import("attach.zig");
 const instructions = @import("instructions.zig");
 
@@ -838,6 +839,7 @@ pub const LoopCtx = struct {
                     continue :state .done;
                 }
 
+                const prepare_timing = timing.Span.begin("request.prepare");
                 if (self.saw_tool_call and self.opts.context_compactor != null and self.opts.context_window > 0 and
                     self.context_tokens >= self.opts.context_window *| 80 / 100)
                 {
@@ -882,6 +884,8 @@ pub const LoopCtx = struct {
                     self.stream = null;
                 }
                 try pluginLifecycle(self.opts, "turn_start", .{ .turnIndex = self.turns, .timestamp = nowMs(self.opts) });
+                prepare_timing.end();
+                const start_timing = timing.Span.begin("provider.start");
                 self.stream = self.opts.provider.start(.{
                     .model = self.opts.model,
                     .provider = self.opts.provider_label,
@@ -892,6 +896,7 @@ pub const LoopCtx = struct {
                 }) catch |start_err| {
                     return failWithReport(self.opts, .provider_start, start_err);
                 };
+                start_timing.end();
                 if (self.opts.abort_slot) |slot| slot.set(self.stream.?.aborter());
                 self.saw_tool_call = false;
                 self.end_turn = null;
@@ -906,7 +911,9 @@ pub const LoopCtx = struct {
                     continue :state .done;
                 }
 
+                const next_timing = timing.Span.begin("provider.next");
                 const ev = (self.stream.?.next() catch |next_err| return failWithReport(self.opts, .stream_next, next_err)) orelse {
+                    next_timing.end();
                     // Stream exhausted — end of turn
                     if (self.opts.abort_slot) |slot| slot.set(null);
                     if (isCanceled(self.opts)) {
@@ -924,6 +931,7 @@ pub const LoopCtx = struct {
                     continue :state .idle;
                 };
 
+                next_timing.end();
                 self.opts.mode.push(.{ .provider = ev }) catch |mode_err| {
                     return failWithReport(self.opts, .mode_push, mode_err);
                 };
@@ -970,9 +978,12 @@ pub const LoopCtx = struct {
 
                 var image: ?providers.Image = null;
                 defer if (image) |img| self.opts.alloc.free(img.data);
+                const tool_timing = timing.Span.begin("tool.run_and_hooks");
                 const tr = runTool(self.opts, tc, &image) catch |tool_err| {
                     return failWithReport(self.opts, .tool_run, tool_err);
                 };
+                tool_timing.end();
+                const result_timing = timing.Span.begin("tool.result_ui");
                 self.hist.pushToolResultOwned(tr) catch |hist_err| {
                     return failWithReport(self.opts, .tool_run, hist_err);
                 };
@@ -984,6 +995,8 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .mode_push, mode_err);
                 };
 
+                result_timing.end();
+                const persist_timing = timing.Span.begin("tool.persist_and_compact");
                 const tr_sess_ev = mapProviderEv(tr_ev, nowMs(self.opts));
                 const tr_stored = blk: {
                     self.opts.store.append(self.opts.sid, tr_sess_ev) catch |append_err| {
@@ -999,6 +1012,7 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .mode_push, mode_err);
                 };
 
+                persist_timing.end();
                 if (image) |img| {
                     const encoded = try self.opts.alloc.alloc(u8, std.base64.standard.Encoder.calcSize(img.data.len));
                     defer self.opts.alloc.free(encoded);

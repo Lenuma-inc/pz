@@ -10,6 +10,7 @@ const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 
 const core_time = @import("../time.zig");
+const timing = @import("../timing.zig");
 const utf8 = @import("../utf8.zig");
 const el_mod = @import("../event_loop.zig");
 pub const EventLoop = el_mod.EventLoop;
@@ -200,7 +201,11 @@ pub fn retryLoop(
     redirect_behavior: std.http.Client.Request.RedirectBehavior,
 ) !void {
     // Proactive refresh: check token expiry before first attempt
-    try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
+    {
+        const span = timing.Span.begin("http.auth_refresh");
+        defer span.end();
+        try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
+    }
     try appendSessionIdHeader(ar, hdrs, session_id);
 
     var attempt: u32 = 0;
@@ -208,6 +213,7 @@ pub fn retryLoop(
     while (true) : (attempt += 1) {
         if (cancel) |c| if (c.isCanceled()) return error.Canceled;
 
+        const send_timing = timing.Span.begin("http.connect_and_send");
         stream.req = try http.request(.POST, uri, .{
             .redirect_behavior = redirect_behavior,
             .extra_headers = hdrs.items,
@@ -223,7 +229,12 @@ pub fn retryLoop(
         try bw.end();
         try stream.req.connection.?.flush();
 
-        stream.response = try stream.req.receiveHead(&stream.redir_buf);
+        send_timing.end();
+        {
+            const span = timing.Span.begin("http.receive_headers");
+            defer span.end();
+            stream.response = try stream.req.receiveHead(&stream.redir_buf);
+        }
         const status_int: u16 = @intFromEnum(stream.response.?.head.status);
 
         // On 401 without OAuth: no refresh possible, propagate immediately
@@ -532,7 +543,11 @@ pub fn SseClient(comptime Cfg: type) type {
                     stream.dahl_quota = true;
                 }
             }
-            const body = try Cfg.buildBody(ar, wire_req, is_oauth);
+            const body = blk: {
+                const span = timing.Span.begin("http.build_body");
+                defer span.end();
+                break :blk try Cfg.buildBody(ar, wire_req, is_oauth);
+            };
             const uri = if (self.endpoint) |endpoint| try std.Uri.parse(endpoint) else Cfg.apiUri(is_oauth);
             var session_id: ?[]const u8 = null;
             if (comptime Cfg.provider_tag == auth_mod.Provider.openai) {
