@@ -3912,6 +3912,10 @@ fn runTui(
                     ui.onMouse(mev);
                     switch (mev) {
                         .release => try copyMouseSelection(alloc, &ui, pol),
+                        .motion => {
+                            try ui.drawSelection(out);
+                            continue;
+                        },
                         else => {},
                     }
                     try ui.draw(out);

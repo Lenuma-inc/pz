@@ -36,6 +36,7 @@ pub const Ui = struct {
     selection_end: ?mouse.Event.Pos = null,
     selection_active: bool = false,
     selection_ready: bool = false,
+    selection_backgrounds: std.ArrayList(frame.Color) = .empty,
     copy_toast_until_ms: i64 = 0,
 
     pub fn noteCopied(self: *Ui) void {
@@ -87,6 +88,7 @@ pub const Ui = struct {
     pub fn resize(self: *Ui, w: usize, h: usize) !void {
         if (w == self.frm.w and h == self.frm.h) return;
         self.clearSelection();
+        self.selection_backgrounds.clearRetainingCapacity();
         const new_frm = try frame.Frame.init(self.alloc, w, h);
         const new_rnd = try render.Renderer.init(self.alloc, w, h);
         self.renderer.deinit();
@@ -98,6 +100,7 @@ pub const Ui = struct {
     pub fn deinit(self: *Ui) void {
         if (self.ov) |*ov| ov.deinit(self.alloc);
         self.clearPathItems();
+        self.selection_backgrounds.deinit(self.alloc);
         self.renderer.deinit();
         self.frm.deinit(self.alloc);
         self.panels.deinit();
@@ -309,6 +312,8 @@ pub const Ui = struct {
             try ov.render(&self.frm);
         }
 
+        try self.selection_backgrounds.resize(self.alloc, self.frm.cells.len);
+        for (self.frm.cells, self.selection_backgrounds.items) |cell, *bg| bg.* = cell.style.bg;
         self.applySelection(tx_h);
         if (self.ov == null) try self.drawCopyToast(tx_h);
 
@@ -341,6 +346,24 @@ pub const Ui = struct {
             try out.writeAll("\x1b[?25l"); // hide cursor
         }
         try out.writeAll("\x1b[?2026l");
+    }
+
+    /// Mouse motion changes only selection backgrounds, not transcript layout.
+    pub fn drawSelection(self: *Ui, out: anytype) !void {
+        if (!self.selection_active) return;
+        if (self.selection_backgrounds.items.len != self.frm.cells.len or
+            self.frm.w <= 1 or self.ov != null or self.img_cap != .none or self.copy_toast_until_ms != 0)
+        {
+            return self.draw(out);
+        }
+        for (self.frm.cells, self.selection_backgrounds.items) |*cell, bg| cell.style.bg = bg;
+        self.applySelection(self.transcript_h);
+
+        // Preserve the editor cursor while publishing only changed frame cells.
+        try out.writeAll("\x1b[?2026h\x1b7\x1b[?25l");
+        errdefer out.writeAll("\x1b8\x1b[?25h\x1b[?2026l") catch {};
+        try self.renderer.render(&self.frm, out);
+        try out.writeAll("\x1b8\x1b[?25h\x1b[?2026l");
     }
 
     fn applySelection(self: *Ui, transcript_h: usize) void {
@@ -1045,6 +1068,29 @@ test "harness drag selects and extracts visible transcript text" {
     try ui.draw(&out);
     const selected_cell = try ui.frm.cell(pos.x, pos.y);
     try std.testing.expect(frame.Color.eql(selected_cell.style.bg, theme.get().sel_bg));
+}
+
+test "harness selection redraw restores backgrounds when drag shrinks" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+    try ui.onProvider(.{ .text = "hello world" });
+    var raw: [16384]u8 = undefined;
+    var out = TestBuf.init(&raw);
+    try ui.draw(&out);
+    const pos = findAsciiSeqInFrame(&ui.frm, "hello").?;
+    const original = (try ui.frm.cell(pos.x + 4, pos.y)).style.bg;
+    ui.onMouse(.{ .press = .{ .x = pos.x, .y = pos.y, .btn = 0 } });
+    ui.onMouse(.{ .motion = .{ .x = pos.x + 4, .y = pos.y, .btn = 0 } });
+    try ui.drawSelection(&out);
+    try std.testing.expect(frame.Color.eql((try ui.frm.cell(pos.x + 4, pos.y)).style.bg, theme.get().sel_bg));
+    ui.onMouse(.{ .motion = .{ .x = pos.x + 1, .y = pos.y, .btn = 0 } });
+    try ui.drawSelection(&out);
+    try std.testing.expect(frame.Color.eql((try ui.frm.cell(pos.x + 4, pos.y)).style.bg, original));
+    try std.testing.expect(frame.Color.eql((try ui.frm.cell(pos.x + 1, pos.y)).style.bg, theme.get().sel_bg));
+    ui.onMouse(.{ .release = .{ .x = pos.x + 1, .y = pos.y, .btn = 0 } });
+    const selected = (try ui.takeSelectedText()).?;
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("he", selected);
 }
 
 test "harness selection excludes scrollbar and preserves UTF-8 and line breaks" {
