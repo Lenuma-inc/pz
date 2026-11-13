@@ -10,7 +10,6 @@ const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 
 const core_time = @import("../time.zig");
-const timing = @import("../timing.zig");
 const utf8 = @import("../utf8.zig");
 const el_mod = @import("../event_loop.zig");
 pub const EventLoop = el_mod.EventLoop;
@@ -19,6 +18,79 @@ const ElEvent = el_mod.Event;
 const max_retries = 3;
 const base_delay_ms: u64 = 2000;
 const max_delay_ms: u64 = 60000;
+
+// Abort blocking connection/header I/O too, before a Stream is registered in
+// AbortSlot. Always join the task before releasing its request or arguments.
+fn runCancelable(cancel: ?*providers.CancelPoll, comptime function: anytype, args: anytype) !void {
+    const flag = cancel orelse return @call(.auto, function, args);
+    if (flag.isCanceled()) return error.Canceled;
+    const Task = struct {
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), task_args: @TypeOf(args)) anyerror!void {
+            defer self.done.store(true, .release);
+            return @call(.auto, function, task_args);
+        }
+    };
+    var task = Task{};
+    var future = try sys.io.concurrent(Task.run, .{ &task, args });
+    while (!task.done.load(.acquire)) {
+        if (flag.isCanceled()) return future.cancel(sys.io);
+        std.Io.sleep(sys.io, .fromMilliseconds(10), .awake) catch |err| {
+            _ = future.cancel(sys.io) catch {};
+            return err;
+        };
+    }
+    return future.await(sys.io);
+}
+
+test "canceling provider start interrupts blocking I/O and joins cleanup" {
+    const State = struct {
+        cancel_poll: providers.CancelPoll = .{ .vt = &providers.CancelPoll.Bind(@This(), isCanceled).vt },
+        started: std.atomic.Value(bool) = .init(false),
+        cleaned: std.atomic.Value(bool) = .init(false),
+
+        fn isCanceled(self: *@This()) bool {
+            return self.started.load(.acquire);
+        }
+
+        fn block(self: *@This()) !void {
+            defer self.cleaned.store(true, .release);
+            self.started.store(true, .release);
+            try std.Io.sleep(sys.io, .fromSeconds(60), .awake);
+        }
+    };
+    var state = State{};
+    try testing.expectError(error.Canceled, runCancelable(&state.cancel_poll, State.block, .{&state}));
+    try testing.expect(state.cleaned.load(.acquire));
+}
+
+test "cancelable provider start preserves success and errors" {
+    const State = struct {
+        cancel_poll: providers.CancelPoll = .{ .vt = &providers.CancelPoll.Bind(@This(), isCanceled).vt },
+        canceled: bool = false,
+        called: bool = false,
+
+        fn isCanceled(self: *@This()) bool {
+            return self.canceled;
+        }
+
+        fn run(self: *@This(), fail: bool) !void {
+            self.called = true;
+            if (fail) return error.TestFailure;
+        }
+    };
+    var state = State{};
+    try runCancelable(&state.cancel_poll, State.run, .{ &state, false });
+    try testing.expect(state.called);
+    try testing.expectError(error.TestFailure, runCancelable(&state.cancel_poll, State.run, .{ &state, true }));
+    state.canceled = true;
+    state.called = false;
+    try testing.expectError(error.Canceled, runCancelable(&state.cancel_poll, State.run, .{ &state, false }));
+    try testing.expect(!state.called);
+    try runCancelable(null, State.run, .{ &state, false });
+    try testing.expect(state.called);
+}
 
 // ── Utility functions ──────────────────────────────────────────────────
 
@@ -201,19 +273,16 @@ pub fn retryLoop(
     redirect_behavior: std.http.Client.Request.RedirectBehavior,
 ) !void {
     // Proactive refresh: check token expiry before first attempt
-    {
-        const span = timing.Span.begin("http.auth_refresh");
-        defer span.end();
-        try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
-    }
+    try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
     try appendSessionIdHeader(ar, hdrs, session_id);
 
     var attempt: u32 = 0;
     var did_refresh = false;
+    var request_live = false;
+    errdefer if (request_live) stream.req.deinit();
     while (true) : (attempt += 1) {
         if (cancel) |c| if (c.isCanceled()) return error.Canceled;
 
-        const send_timing = timing.Span.begin("http.connect_and_send");
         stream.req = try http.request(.POST, uri, .{
             .redirect_behavior = redirect_behavior,
             .extra_headers = hdrs.items,
@@ -223,18 +292,14 @@ pub fn retryLoop(
             .headers = .{ .accept_encoding = .omit },
         });
 
+        request_live = true;
         stream.req.transfer_encoding = .{ .content_length = body.len };
         var bw = try stream.req.sendBodyUnflushed(&stream.send_buf);
         try bw.writer.writeAll(body);
         try bw.end();
         try stream.req.connection.?.flush();
 
-        send_timing.end();
-        {
-            const span = timing.Span.begin("http.receive_headers");
-            defer span.end();
-            stream.response = try stream.req.receiveHead(&stream.redir_buf);
-        }
+        stream.response = try stream.req.receiveHead(&stream.redir_buf);
         const status_int: u16 = @intFromEnum(stream.response.?.head.status);
 
         // On 401 without OAuth: no refresh possible, propagate immediately
@@ -246,6 +311,7 @@ pub fn retryLoop(
             if (refreshAuth(alloc, auth, tag, ca_file, ar)) {
                 try drainResponse(stream, ar);
                 stream.req.deinit();
+                request_live = false;
                 hdrs.* = try rebuildHdrs(auth, ar);
                 try appendSessionIdHeader(ar, hdrs, session_id);
                 continue;
@@ -259,6 +325,7 @@ pub fn retryLoop(
 
         try drainResponse(stream, ar);
         stream.req.deinit();
+        request_live = false;
 
         // Backoff: min(base * 2^attempt, max)
         const delay: u64 = @min(max_delay_ms, base_delay_ms * (@as(u64, 1) << @intCast(attempt)));
@@ -543,11 +610,7 @@ pub fn SseClient(comptime Cfg: type) type {
                     stream.dahl_quota = true;
                 }
             }
-            const body = blk: {
-                const span = timing.Span.begin("http.build_body");
-                defer span.end();
-                break :blk try Cfg.buildBody(ar, wire_req, is_oauth);
-            };
+            const body = try Cfg.buildBody(ar, wire_req, is_oauth);
             const uri = if (self.endpoint) |endpoint| try std.Uri.parse(endpoint) else Cfg.apiUri(is_oauth);
             var session_id: ?[]const u8 = null;
             if (comptime Cfg.provider_tag == auth_mod.Provider.openai) {
@@ -570,7 +633,7 @@ pub fn SseClient(comptime Cfg: type) type {
             var hdrs = try Cfg.buildAuthHeaders(&self.auth, ar);
 
             var slp = RealSleeper{ .el = self.el };
-            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, session_id, self.cancel, if (self.endpoint != null) .unhandled else @enumFromInt(3));
+            try runCancelable(self.cancel, retryLoop, .{ stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, @as(*const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header), Cfg.buildAuthHeaders), session_id, self.cancel, @as(std.http.Client.Request.RedirectBehavior, if (self.endpoint != null) .unhandled else @enumFromInt(3)) });
             errdefer stream.req.deinit();
 
             stream.limits = if (self.endpoint != null) null else try @import("limits.zig").parse(Cfg.provider_tag, stream.response.?.head.bytes);
