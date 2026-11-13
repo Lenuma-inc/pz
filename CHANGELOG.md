@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-13
+
+### Added
+- Generic HTTP RPC and JSON-RPC 2.0 support in the web tool.
+
+### Fixed
+- Interrupt stalled HTTP requests when a new message arrives.
+- Avoid full TUI redraws during text selection.
+
 ## [0.10.0] - 2026-11-12
 
 ### Added
