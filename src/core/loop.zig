@@ -690,6 +690,29 @@ const Hist = struct {
     }
 };
 
+// Restart only an untouched response, once. Replaying after any event could
+// duplicate visible output or execute an already completed tool again.
+const StreamRetry = struct {
+    saw_event: bool = false,
+    used: bool = false,
+
+    fn retry(self: *StreamRetry, err: anyerror) bool {
+        if (err != error.HttpChunkTruncated or self.saw_event or self.used) return false;
+        self.used = true;
+        return true;
+    }
+};
+
+test "truncated stream retry is bounded and never replays emitted events" {
+    var fresh: StreamRetry = .{};
+    try std.testing.expect(!fresh.retry(error.Canceled));
+    try std.testing.expect(!fresh.retry(error.OutOfMemory));
+    try std.testing.expect(fresh.retry(error.HttpChunkTruncated));
+    try std.testing.expect(!fresh.retry(error.HttpChunkTruncated));
+    var emitted: StreamRetry = .{ .saw_event = true };
+    try std.testing.expect(!emitted.retry(error.HttpChunkTruncated));
+}
+
 pub const TurnState = enum {
     idle,
     streaming,
@@ -713,6 +736,8 @@ pub const LoopCtx = struct {
     stream: ?*providers.Stream,
     saw_tool_call: bool,
     end_turn: ?bool = null,
+    stream_req: ?providers.Request = null,
+    stream_retry: StreamRetry = .{},
     pending_tc: ?providers.ToolCall,
     turn_state: TurnState,
     ended: bool = false,
@@ -883,14 +908,16 @@ pub const LoopCtx = struct {
                 }
                 try pluginLifecycle(self.opts, "turn_start", .{ .turnIndex = self.turns, .timestamp = nowMs(self.opts) });
 
-                self.stream = self.opts.provider.start(.{
+                self.stream_retry = .{};
+                self.stream_req = .{
                     .model = self.opts.model,
                     .provider = self.opts.provider_label,
                     .prompt_cache_key = self.opts.sid,
                     .msgs = req_msgs,
                     .tools = self.req_tools,
                     .opts = self.opts.provider_opts,
-                }) catch |start_err| {
+                };
+                self.stream = self.opts.provider.start(self.stream_req.?) catch |start_err| {
                     return failWithReport(self.opts, .provider_start, start_err);
                 };
                 if (self.opts.abort_slot) |slot| slot.set(self.stream.?.aborter());
@@ -907,7 +934,19 @@ pub const LoopCtx = struct {
                     continue :state .done;
                 }
 
-                const ev = (self.stream.?.next() catch |next_err| return failWithReport(self.opts, .stream_next, next_err)) orelse {
+                const ev = (self.stream.?.next() catch |next_err| {
+                    if (!isCanceled(self.opts) and self.stream_retry.retry(next_err)) {
+                        if (self.opts.abort_slot) |slot| slot.set(null);
+                        self.stream.?.deinit();
+                        self.stream = null;
+                        self.stream = self.opts.provider.start(self.stream_req.?) catch |start_err| {
+                            return failWithReport(self.opts, .provider_start, start_err);
+                        };
+                        if (self.opts.abort_slot) |slot| slot.set(self.stream.?.aborter());
+                        continue :state .streaming;
+                    }
+                    return failWithReport(self.opts, .stream_next, next_err);
+                }) orelse {
                     // Stream exhausted — end of turn
                     if (self.opts.abort_slot) |slot| slot.set(null);
                     if (isCanceled(self.opts)) {
@@ -925,6 +964,7 @@ pub const LoopCtx = struct {
                     continue :state .idle;
                 };
 
+                self.stream_retry.saw_event = true;
                 self.opts.mode.push(.{ .provider = ev }) catch |mode_err| {
                     return failWithReport(self.opts, .mode_push, mode_err);
                 };

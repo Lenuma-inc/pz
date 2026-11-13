@@ -13,6 +13,11 @@ All notable changes to this project will be documented in this file.
 - Interrupt stalled HTTP requests when a new message arrives.
 - Avoid full TUI redraws during text selection.
 
+## [0.10.1]
+
+### Fixed
+- Retry an HTTP chunk truncation once before any response events are emitted, without replaying partial output or tool calls.
+
 ## [0.10.0] - 2026-11-12
 
 ### Added
