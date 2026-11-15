@@ -12,7 +12,7 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, policy: web.RedirectPolic
     const response = try web.fetchAlloc(alloc, .{
         .url = url,
         .headers = &.{
-            .{ .name = "Accept", .value = if (repo.api == .github) (if (args.op == .read) "application/vnd.github.raw+json" else "application/vnd.github+json") else "application/json" },
+            .{ .name = "Accept", .value = if (repo.api == .github) (if (args.op == .read) "application/vnd.github.raw+json" else "application/vnd.github+json") else if (repo.api == .cgit) "text/html, text/plain" else "application/json" },
             .{ .name = "User-Agent", .value = "pz" },
         },
     }, policy, if (args.op == .read) 2 * 1024 * 1024 else 8 * 1024 * 1024);
@@ -24,7 +24,11 @@ pub fn run(alloc: std.mem.Allocator, max_bytes: usize, policy: web.RedirectPolic
         404 => return error.NotFound,
         else => return error.GitHubHttpStatus,
     }
-    var text = switch (args.op) {
+    var text = if (repo.api == .cgit)
+        try cgitTextAlloc(alloc, response.body, args, url)
+    else if (repo.api == .gitoskop)
+        try gitoskopTextAlloc(alloc, response.body, args)
+    else switch (args.op) {
         .list => if (repo.api == .gitlab) try gitlabTreeAlloc(alloc, response.body, args) else try listAlloc(alloc, response.body),
         .read => try readLinesAlloc(alloc, response.body, args.from_line, args.to_line),
         .tree => if (repo.api == .gitlab) try gitlabTreeAlloc(alloc, response.body, args) else try treePageAlloc(alloc, response.body, args.path, if (repo.api == .github) null else args),
@@ -69,6 +73,11 @@ pub fn apiUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs) ![]u8 
     if (args.ref) |ref| if (ref.len == 0) return error.InvalidArgs;
     if (args.base) |base| if (base.len == 0) return error.InvalidArgs;
     if (args.op == .read and args.path.len == 0) return error.InvalidArgs;
+    if (args.number) |number| if (number == 0 or (args.op != .issue and args.op != .comments)) return error.InvalidArgs;
+    if ((args.op == .issue or args.op == .comments) and args.number == null) return error.InvalidArgs;
+    if (args.offset != null and !(repo.api == .cgit and args.op == .history)) return error.InvalidArgs;
+    if (repo.api == .cgit) return cgitUrlAlloc(alloc, args, repo);
+    if (repo.api == .gitoskop) return gitoskopUrlAlloc(alloc, args, repo);
     if (repo.api != .github and (args.op == .commit or args.op == .compare)) return error.UnsupportedOperation;
     if (repo.api == .gitlab) return gitlabUrlAlloc(alloc, args, repo);
     if (repo.api == .github) {
@@ -119,6 +128,11 @@ pub fn apiUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs) ![]u8 
             try out.writer.print("?per_page={d}&page={d}", .{ args.per_page, args.page });
         },
         .branches, .tags => try out.writer.print("/{s}?{s}={d}&page={d}", .{ @tagName(args.op), if (repo.api == .github) "per_page" else "limit", args.per_page, args.page }),
+        .issues => try out.writer.print("/issues?state={s}&{s}={d}&page={d}", .{ @tagName(args.state), if (repo.api == .github) "per_page" else "limit", args.per_page, args.page }),
+        .issue, .comments => {
+            try out.writer.print("/issues/{d}", .{args.number.?});
+            if (args.op == .comments) try out.writer.print("/comments?{s}={d}&page={d}", .{ if (repo.api == .github) "per_page" else "limit", args.per_page, args.page });
+        },
         .info => {},
     }
     return out.toOwnedSlice();
@@ -201,17 +215,10 @@ fn parseRepo(args: tools.Call.GithubArgs) !Repo {
         repo.path = rest[slash + 1 ..];
         for (repo.host) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '.' and ch != '-') return error.InvalidArgs;
         if (repo.host.len == 0) return error.InvalidArgs;
-        const known = std.StaticStringMap(Api).initComptime(.{
-            .{ "github.com", .github },    .{ "gitlab.com", .gitlab },
-            .{ "codeberg.org", .forgejo }, .{ "gitea.com", .gitea },
-        });
-        if (known.get(repo.host)) |api| {
-            if (args.api != null and args.api.? != api and !(api == .forgejo and args.api.? == .gitea)) return error.InvalidArgs;
-            repo.api = api;
-        } else {
-            repo.api = args.api orelse return error.InvalidArgs;
-            if (repo.api == .github) return error.InvalidArgs;
-        }
+        // Backend selection is explicit, never inferred from a host allowlist.
+        // GitHub's public API has a fixed origin; do not silently send an
+        // unrelated HTTPS repository path to api.github.com.
+        if (repo.api == .github and !std.mem.eql(u8, repo.host, "github.com")) return error.InvalidArgs;
     } else if (repo.api != .github) return error.InvalidArgs;
     var parts = std.mem.splitScalar(u8, repo.path, '/');
     var count: usize = 0;
@@ -220,7 +227,9 @@ fn parseRepo(args: tools.Call.GithubArgs) !Repo {
         for (part) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "-_.", ch) == null) return error.InvalidArgs;
         count += 1;
     }
-    if (count < 2 or (repo.api != .gitlab and count != 2)) return error.InvalidArgs;
+    if (repo.api == .cgit or repo.api == .gitoskop) {
+        if (count == 0) return error.InvalidArgs;
+    } else if (count < 2 or (repo.api != .gitlab and count != 2)) return error.InvalidArgs;
     return repo;
 }
 
@@ -257,6 +266,11 @@ fn gitlabUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs, repo: R
         },
         .branches, .tags => try out.writer.print("/repository/{s}?per_page={d}&page={d}", .{ @tagName(args.op), args.per_page, args.page }),
         .info => {},
+        .issues => try out.writer.print("/issues?state={s}&per_page={d}&page={d}", .{ if (args.state == .open) "opened" else @tagName(args.state), args.per_page, args.page }),
+        .issue, .comments => {
+            try out.writer.print("/issues/{d}", .{args.number.?});
+            if (args.op == .comments) try out.writer.print("/notes?per_page={d}&page={d}&sort=asc&order_by=created_at", .{ args.per_page, args.page });
+        },
         .commit, .compare => return error.UnsupportedOperation,
     }
     return out.toOwnedSlice();
@@ -310,6 +324,7 @@ pub fn metadataAlloc(alloc: std.mem.Allocator, body: []const u8, args: tools.Cal
     const parsed = try std.json.parseFromSlice(Value, alloc, body, .{});
     defer parsed.deinit();
     const value = parsed.value;
+    if (args.op == .issues or args.op == .issue or args.op == .comments) return discussionAlloc(alloc, value, args);
     switch (args.op) {
         .history, .branches, .tags => if (value != .array) return error.InvalidResponse,
         .info, .commit, .compare => if (value != .object) return error.InvalidResponse,
@@ -389,5 +404,210 @@ pub fn metadataAlloc(alloc: std.mem.Allocator, body: []const u8, args: tools.Cal
         },
         else => return error.InvalidArgs,
     }
+    return windowAlloc(alloc, &out, args);
+}
+
+fn cgitUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs, repo: Repo) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    const verb: []const u8 = switch (args.op) {
+        .list, .tree => "tree",
+        .read => "plain",
+        .history => "log",
+        .commit, .compare => "patch",
+        .branches, .tags => "refs",
+        .info => "summary",
+        else => return error.UnsupportedOperation,
+    };
+    if (args.page != 1) return error.UnsupportedOperation;
+    try out.writer.print("https://{s}/{s}/{s}/", .{ repo.host, repo.path, verb });
+    if (args.op == .list or args.op == .tree or args.op == .read or args.op == .history or args.op == .compare) try std.Uri.Component.percentEncode(&out.writer, args.path, pathChar);
+    if (args.op == .branches or args.op == .tags) try out.writer.writeAll(if (args.op == .branches) "heads" else "tags");
+    try out.writer.writeAll("?");
+    if (args.op == .commit or args.op == .compare) {
+        try out.writer.writeAll("id=");
+        try std.Uri.Component.percentEncode(&out.writer, args.ref orelse return error.InvalidArgs, unreserved);
+        if (args.op == .compare) {
+            try out.writer.writeAll("&id2=");
+            try std.Uri.Component.percentEncode(&out.writer, args.base orelse return error.InvalidArgs, unreserved);
+        }
+    } else if (args.ref) |ref| {
+        try out.writer.writeAll("h=");
+        try std.Uri.Component.percentEncode(&out.writer, ref, unreserved);
+    }
+    if (args.op == .history) try out.writer.print("&ofs={d}", .{args.offset orelse 0});
     return out.toOwnedSlice();
+}
+
+fn gitoskopUrlAlloc(alloc: std.mem.Allocator, args: tools.Call.GithubArgs, repo: Repo) ![]u8 {
+    for ([_]?[]const u8{ args.ref, args.base }) |maybe| if (maybe) |ref| {
+        if (ref[0] == '/' or std.mem.indexOf(u8, ref, "..") != null) return error.InvalidArgs;
+        var segments = std.mem.splitScalar(u8, ref, '/');
+        while (segments.next()) |segment| if (segment.len == 0 or std.mem.eql(u8, segment, ".")) return error.InvalidArgs;
+    };
+    if (args.op == .history and (@as(u64, args.page) - 1) * args.per_page > 50000) return error.InvalidArgs;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("https://{s}/{s}", .{ repo.host, repo.path });
+    switch (args.op) {
+        .info => {},
+        .branches, .tags => try out.writer.print("/{s}", .{@tagName(args.op)}),
+        .list, .tree, .read => {
+            try out.writer.print("/{s}/", .{if (args.op == .read) "raw" else "tree"});
+            try std.Uri.Component.percentEncode(&out.writer, args.ref orelse "HEAD", pathChar);
+            try out.writer.writeByte('/');
+            try std.Uri.Component.percentEncode(&out.writer, args.path, pathChar);
+        },
+        .history => {
+            try out.writer.writeAll("/log");
+            if (args.ref) |ref| {
+                try out.writer.writeByte('/');
+                try std.Uri.Component.percentEncode(&out.writer, ref, pathChar);
+            }
+            try out.writer.print("?limit={d}&offset={d}&path=", .{ args.per_page, (@as(u64, args.page) - 1) * args.per_page });
+            try std.Uri.Component.percentEncode(&out.writer, args.path, unreserved);
+        },
+        .commit => {
+            try out.writer.writeAll("/show/");
+            try std.Uri.Component.percentEncode(&out.writer, args.ref orelse return error.InvalidArgs, pathChar);
+        },
+        .compare => {
+            try out.writer.writeAll("/patch/");
+            try std.Uri.Component.percentEncode(&out.writer, args.base orelse return error.InvalidArgs, pathChar);
+            try out.writer.writeAll("..");
+            try std.Uri.Component.percentEncode(&out.writer, args.ref orelse return error.InvalidArgs, pathChar);
+        },
+        else => return error.UnsupportedOperation,
+    }
+    if ((args.op == .commit or args.op == .compare or args.op == .info or args.op == .read) and args.page != 1) return error.UnsupportedOperation;
+    return out.toOwnedSlice();
+}
+
+fn discussionAlloc(alloc: std.mem.Allocator, value: Value, args: tools.Call.GithubArgs) ![]u8 {
+    if (args.op == .issue and value != .object) return error.InvalidResponse;
+    if (args.op != .issue and value != .array) return error.InvalidResponse;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    const w = &out.writer;
+    const items = if (args.op == .issue) &[_]Value{value} else value.array.items;
+    if (args.op != .issue) try pageHeader(w, args, items.len);
+    for (items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        const id = if (args.op == .comments) field(item, "id") else if (field(item, "number") != .null) field(item, "number") else field(item, "iid");
+        if (id != .integer) return error.InvalidResponse;
+        try w.print("{s} #{d}", .{ if (args.op == .comments) "comment" else "issue", id.integer });
+        const state = textField(item, "state");
+        if (state.len > 0) {
+            try w.writeAll(" [");
+            try oneLine(w, state);
+            try w.writeByte(']');
+        }
+        const user = field(item, "user");
+        const author = field(item, "author");
+        try w.writeByte(' ');
+        try oneLine(w, first(textField(user, "login"), textField(author, "username")));
+        const title = textField(item, "title");
+        if (title.len > 0) {
+            try w.writeAll(" | ");
+            try oneLine(w, title);
+        }
+        if (args.op == .comments) {
+            try w.writeByte(' ');
+            try oneLine(w, textField(item, "created_at"));
+        }
+        try w.writeByte('\n');
+        if (args.op == .issue) {
+            const url = first(textField(item, "html_url"), textField(item, "web_url"));
+            if (url.len > 0) try w.print("{s}\n", .{url});
+        }
+        if (args.op != .issues) {
+            const body = field(item, "body");
+            const description = field(item, "description");
+            if (body != .null and body != .string or description != .null and description != .string) return error.InvalidResponse;
+            try w.print("{s}\n", .{first(str(body), str(description))});
+        }
+    }
+    return windowAlloc(alloc, &out, args);
+}
+
+pub fn cgitTextAlloc(alloc: std.mem.Allocator, body: []const u8, args: tools.Call.GithubArgs, url: []const u8) ![]u8 {
+    if (args.op == .read or args.op == .commit or args.op == .compare) return readLinesAlloc(alloc, body, args.from_line, args.to_line);
+    const extracted = try @import("web_text.zig").extractAlloc(alloc, body, .{ .url = url });
+    defer alloc.free(extracted);
+    return std.fmt.allocPrint(alloc, "cgit: directory trees are non-recursive; log page size is server-defined. Continue log using offset from the next link's ofs parameter (not a guessed page stride).\n{s}", .{extracted});
+}
+
+pub fn gitoskopTextAlloc(alloc: std.mem.Allocator, body: []const u8, args: tools.Call.GithubArgs) ![]u8 {
+    if (args.op == .read or args.op == .compare) return readLinesAlloc(alloc, body, args.from_line, args.to_line);
+    const parsed = try std.json.parseFromSlice(Value, alloc, body, .{});
+    defer parsed.deinit();
+    const value = parsed.value;
+    var out = std.Io.Writer.Allocating.init(alloc);
+    errdefer out.deinit();
+    const w = &out.writer;
+    switch (args.op) {
+        .list, .tree => {
+            const entries = field(value, "entries");
+            if (entries != .array) return error.InvalidResponse;
+            if (field(value, "truncated") == .bool and field(value, "truncated").bool) return error.GitTreeTruncated;
+            try w.writeAll("Directory listing (non-recursive)\n");
+            const start = @min((@as(u64, args.page) - 1) * args.per_page, entries.array.items.len);
+            const end = @min(start + args.per_page, entries.array.items.len);
+            for (entries.array.items[@intCast(start)..@intCast(end)]) |entry| {
+                try w.print("{s}\t{s}\n", .{ first(textField(entry, "kind"), textField(entry, "mode")), textField(entry, "name") });
+            }
+            if (end < entries.array.items.len) try w.print("next page {d} (same op/path/ref)\n", .{@as(u64, args.page) + 1});
+        },
+        .branches, .tags, .history => {
+            if (value != .array) return error.InvalidResponse;
+            const local = args.op != .history;
+            const start = if (local) @min((@as(u64, args.page) - 1) * args.per_page, value.array.items.len) else 0;
+            const end = if (local) @min(start + args.per_page, value.array.items.len) else value.array.items.len;
+            try pageHeader(w, args, @intCast(end - start));
+            for (value.array.items[@intCast(start)..@intCast(end)]) |entry| {
+                if (entry != .object) return error.InvalidResponse;
+                if (args.op == .history) try gitoskopCommitLine(w, entry) else try w.print("{s} {s}\n", .{ textField(entry, "name"), textField(entry, "target") });
+            }
+        },
+        .info => {
+            if (value != .object) return error.InvalidResponse;
+            for ([_][]const u8{ "default_branch", "branches", "tags", "size_bytes", "merge_status", "merge_with" }) |key| {
+                const v = field(value, key);
+                if (v == .null) continue;
+                try w.print("{s}: ", .{key});
+                switch (v) {
+                    .string => |text| try oneLine(w, text),
+                    .integer => |n| try w.print("{d}", .{n}),
+                    else => return error.InvalidResponse,
+                }
+                try w.writeByte('\n');
+            }
+            const commit = field(value, "last_commit");
+            if (commit != .null) try gitoskopCommitLine(w, commit);
+        },
+        .commit => {
+            if (value != .object) return error.InvalidResponse;
+            try w.print("{s} {s}\n{s}\n{s}\n", .{ textField(value, "oid"), textField(value, "author"), textField(value, "message"), textField(value, "patch") });
+            if (field(value, "truncated") == .bool and field(value, "truncated").bool) try w.writeAll("[server truncated commit output; missing patch is not proof of no changes]\n");
+        },
+        else => return error.UnsupportedOperation,
+    }
+    return windowAlloc(alloc, &out, args);
+}
+
+fn gitoskopCommitLine(w: *std.Io.Writer, commit: Value) !void {
+    if (commit != .object or textField(commit, "oid").len == 0) return error.InvalidResponse;
+    try oneLine(w, textField(commit, "oid"));
+    try w.writeByte(' ');
+    try oneLine(w, textField(commit, "author"));
+    try w.writeAll(" | ");
+    try oneLine(w, textField(commit, "subject"));
+    try w.writeByte('\n');
+}
+
+fn windowAlloc(alloc: std.mem.Allocator, out: *std.Io.Writer.Allocating, args: tools.Call.GithubArgs) ![]u8 {
+    if (args.from_line == 1 and args.to_line == null) return out.toOwnedSlice();
+    const text = try readLinesAlloc(alloc, out.written(), args.from_line, args.to_line);
+    out.deinit();
+    return text;
 }

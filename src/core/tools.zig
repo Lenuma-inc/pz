@@ -205,9 +205,12 @@ pub const Call = struct {
     };
 
     pub const GithubArgs = struct {
-        api: ?enum { github, gitlab, gitea, forgejo } = null,
+        api: ?enum { github, gitlab, gitea, forgejo, cgit, gitoskop } = null,
         repo: []const u8,
-        op: enum { list, read, tree, history, commit, compare, branches, tags, info } = .list,
+        op: enum { list, read, tree, history, commit, compare, branches, tags, info, issues, issue, comments } = .list,
+        number: ?u32 = null,
+        state: enum { open, closed, all } = .open,
+        offset: ?u32 = null,
         path: []const u8 = "",
         ref: ?[]const u8 = null,
         from_line: u32 = 1,

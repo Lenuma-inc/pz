@@ -3087,7 +3087,7 @@ test "basic tools PTY keyboard chain uses tools and receives github guidance" {
     const provider =
         \\req=$(cat)
         \\printf '%s' "$req" | grep -q 'use github before cloning' || { printf 'text:GUIDE_MISSING\nstop:done\n'; exit; }
-        \\printf '%s' "$req" | grep -q 'commit/compare are GitHub-only' || { printf 'text:INSPECTOR_GUIDE_MISSING\nstop:done\n'; exit; }
+        \\printf '%s' "$req" | grep -q 'commit/compare on GitLab/Gitea/Forgejo remain unsupported' || { printf 'text:INSPECTOR_GUIDE_MISSING\nstop:done\n'; exit; }
         \\n=$(cat provider-step 2>/dev/null || printf 0)
         \\printf '%s' "$((n + 1))" > provider-step
         \\case "$n" in

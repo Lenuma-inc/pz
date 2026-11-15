@@ -237,23 +237,36 @@ writing. It updates or creates files; file deletion and renaming are separate
 operations. `todo` keeps a task list for the current runtime session. `skill`
 without a name lists the available model-invocable skills.
 
-`github` inspects public GitHub, GitLab, Gitea and Forgejo repositories without
-cloning. It supports directory listings, line-ranged file reads, trees, history,
-branches, tags and repository metadata. Commit patches and comparisons are
-GitHub-only. Metadata is returned as compact text with pagination hints and
-explicit warnings for missing patches.
+`github` inspects public GitHub, GitLab, Gitea, Forgejo, cgit and gitoskop repositories
+without cloning. It supports directory listings, line-ranged file reads, trees,
+history, branches, tags and compact repository metadata. Commit patches and
+comparisons are supported on GitHub, cgit and gitoskop. On GitHub/GitLab/Gitea/Forgejo,
+`issues` lists one summary line per issue (`state`: `open`, `closed`, `all`),
+`issue` reads a body, and `comments` reads paginated discussion; the latter two
+require `number` (GitLab IID). Bodies and patches support `from_line`/`to_line`.
+Responses omit API noise such as avatars and nested user objects; missing patches
+and pagination are reported explicitly.
 
 Examples of model tool arguments:
 
 ```json
 {"repo":"owner/repo","op":"list","path":"src"}
 {"repo":"owner/repo","op":"read","path":"src/main.zig","from_line":1,"to_line":20}
-{"repo":"https://codeberg.org/owner/repo","op":"tree"}
+{"api":"forgejo","repo":"https://codeberg.org/owner/repo","op":"tree"}
 {"api":"gitea","repo":"https://git.example.org/owner/repo","op":"info"}
+{"repo":"doitsujin/dxvk","op":"issue","number":6041}
+{"repo":"doitsujin/dxvk","op":"comments","number":6041,"per_page":10}
+{"api":"cgit","repo":"https://git.example.org/cgit/project.git","op":"history","offset":0}
+{"api":"gitoskop","repo":"https://git.example.org/api/root/project.git","op":"list"}
 ```
 
-`owner/repo` selects GitHub. HTTPS URLs infer known hosts (github.com, gitlab.com,
-codeberg.org and gitea.com); self-hosted URLs require an explicit `api` value.
+`owner/repo` selects GitHub. There is no host inference or known-host list:
+choose the backend with `api` (`github` by default); non-GitHub HTTPS URLs require
+an explicit `api` value. cgit and gitoskop `list`/`tree` list one directory, not a
+recursive tree. cgit history pages have a server-defined size: keep `page=1` and
+continue with `offset` set to the next link's `ofs`, rather than guessing strides.
+gitoskop works on any HTTPS host and URL prefix: `repo` is the complete API URL
+up to the repository, not the Web UI or the gitoskop project's source URL.
 Omit `ref` for the default branch, or specify a branch, tag or commit. Reads are
 capped at 2 MiB, other API responses at 8 MiB, and returned output at the normal
 tool limit. GitHub directories hitting 1,000 entries and truncated GitHub trees

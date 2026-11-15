@@ -398,12 +398,12 @@ test "github history query keeps arbitrary printable refs inside one parameter" 
 test "github forge URLs encode nested namespaces and reject ambiguous hosts" {
     const Case = struct { args: tools.Call.GithubArgs, url: []const u8 };
     const cases = [_]Case{
-        .{ .args = .{ .repo = "https://gitlab.com/group/sub/repo", .op = .read, .path = "src/a b", .ref = "topic/a&b" }, .url = "https://gitlab.com/api/v4/projects/group%2Fsub%2Frepo/repository/files/src%2Fa%20b/raw?ref=topic%2Fa%26b" },
-        .{ .args = .{ .repo = "https://gitlab.com/g/r", .op = .tree, .page = 2 }, .url = "https://gitlab.com/api/v4/projects/g%2Fr/repository/tree?per_page=30&page=2&recursive=true&path=" },
-        .{ .args = .{ .repo = "https://codeberg.org/forgejo/forgejo", .op = .read, .path = "README.md" }, .url = "https://codeberg.org/api/v1/repos/forgejo/forgejo/raw/README.md" },
+        .{ .args = .{ .api = .gitlab, .repo = "https://gitlab.com/group/sub/repo", .op = .read, .path = "src/a b", .ref = "topic/a&b" }, .url = "https://gitlab.com/api/v4/projects/group%2Fsub%2Frepo/repository/files/src%2Fa%20b/raw?ref=topic%2Fa%26b" },
+        .{ .args = .{ .api = .gitlab, .repo = "https://gitlab.com/g/r", .op = .tree, .page = 2 }, .url = "https://gitlab.com/api/v4/projects/g%2Fr/repository/tree?per_page=30&page=2&recursive=true&path=" },
+        .{ .args = .{ .api = .forgejo, .repo = "https://codeberg.org/forgejo/forgejo", .op = .read, .path = "README.md" }, .url = "https://codeberg.org/api/v1/repos/forgejo/forgejo/raw/README.md" },
         .{ .args = .{ .repo = "https://forge.example/a/b", .api = .gitea, .op = .history, .ref = "a/b", .path = "a b", .page = 3 }, .url = "https://forge.example/api/v1/repos/a/b/commits?limit=30&page=3&sha=a%2Fb&path=a%20b" },
-        .{ .args = .{ .repo = "https://gitea.com/a/b", .op = .tags }, .url = "https://gitea.com/api/v1/repos/a/b/tags?limit=30&page=1" },
-        .{ .args = .{ .repo = "https://codeberg.org/a/b", .op = .tree }, .url = "https://codeberg.org/api/v1/repos/a/b/git/trees/HEAD?recursive=1&page=1&per_page=30" },
+        .{ .args = .{ .api = .gitea, .repo = "https://gitea.com/a/b", .op = .tags }, .url = "https://gitea.com/api/v1/repos/a/b/tags?limit=30&page=1" },
+        .{ .args = .{ .api = .forgejo, .repo = "https://codeberg.org/a/b", .op = .tree }, .url = "https://codeberg.org/api/v1/repos/a/b/git/trees/HEAD?recursive=1&page=1&per_page=30" },
     };
     inline for (cases) |case| {
         const url = try github.apiUrlAlloc(alloc, case.args);
@@ -425,11 +425,11 @@ test "github forge URLs encode nested namespaces and reject ambiguous hosts" {
         .{ .repo = "a/b", .api = .gitlab },
         .{ .repo = "https://user@forge.test/a/b", .api = .gitea },
         .{ .repo = "https://forge.test/a/../b", .api = .gitea },
-        .{ .repo = "https://gitlab.com/a/b?token=secret" },
+        .{ .api = .gitlab, .repo = "https://gitlab.com/a/b?token=secret" },
         .{ .repo = "http://gitlab.com/a/b" },
     };
     for (invalid) |args| try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, args));
-    try std.testing.expectError(error.UnsupportedOperation, github.apiUrlAlloc(alloc, .{ .repo = "https://gitlab.com/a/b", .op = .compare, .base = "a", .ref = "b" }));
+    try std.testing.expectError(error.UnsupportedOperation, github.apiUrlAlloc(alloc, .{ .api = .gitlab, .repo = "https://gitlab.com/a/b", .op = .compare, .base = "a", .ref = "b" }));
 }
 
 test "github compact metadata removes API noise but preserves useful evidence" {
@@ -440,7 +440,7 @@ test "github compact metadata removes API noise but preserves useful evidence" {
     try snap(@src(), "page 1 count 1; next page 2\nabc123 2026-10-30 Ada | Fix parser\n", history);
     const gitlab = try github.metadataAlloc(alloc,
         \\[{"id":"def456","message":"Fix parser\nDetails","author_name":"Ada","created_at":"2026-10-30","web_url":"noise"}]
-    , .{ .repo = "https://gitlab.com/x/y", .op = .history });
+    , .{ .api = .gitlab, .repo = "https://gitlab.com/x/y", .op = .history });
     defer alloc.free(gitlab);
     try snap(@src(), "page 1 count 1; next page 2\ndef456 2026-10-30 Ada | Fix parser\n", gitlab);
     const info = try github.metadataAlloc(alloc,
@@ -464,11 +464,11 @@ test "github forge trees distinguish pagination from incomplete GitHub trees" {
     const body =
         \\{"sha":"root","truncated":true,"tree":[{"path":"src/a","type":"blob","mode":"100644","sha":"a","size":7}]}
     ;
-    const page = try github.treePageAlloc(alloc, body, "src", .{ .repo = "https://codeberg.org/a/b", .op = .tree, .page = 2 });
+    const page = try github.treePageAlloc(alloc, body, "src", .{ .api = .forgejo, .repo = "https://codeberg.org/a/b", .op = .tree, .page = 2 });
     defer alloc.free(page);
     try snap(@src(), "tree root\npage 2 count 1; next page 3\n100644\tblob\ta\tsrc/a\t7 bytes\n", page);
     try std.testing.expectError(error.GitHubTreeTruncated, github.treeAlloc(alloc, body, "src"));
-    const gitlab = try github.gitlabTreeAlloc(alloc, "[{\"path\":\"src\",\"type\":\"tree\",\"mode\":\"040000\",\"id\":\"abc\"}]", .{ .repo = "https://gitlab.com/a/b", .op = .tree });
+    const gitlab = try github.gitlabTreeAlloc(alloc, "[{\"path\":\"src\",\"type\":\"tree\",\"mode\":\"040000\",\"id\":\"abc\"}]", .{ .api = .gitlab, .repo = "https://gitlab.com/a/b", .op = .tree });
     defer alloc.free(gitlab);
     try snap(@src(), "page 1 count 1; next page 2\n040000 abc src/\n", gitlab);
 }
@@ -480,4 +480,101 @@ test "github compact comparison retains status commits and readable patches" {
     const text = try github.metadataAlloc(alloc, body, .{ .repo = "x/y", .op = .compare, .base = "a", .ref = "b" });
     defer alloc.free(text);
     try snap(@src(), "page 1; next page 2 (commits)\nGitHub patch limits: commit 3000 files; compare 300 files on page 1; missing patch is not proof of no changes.\nstatus: ahead\nahead_by: 1\nbehind_by: 0\ntotal_commits: 1\nabc today Ada | Fix\nmodified a\n-old\n+new\n", text);
+}
+
+test "github discussion URLs cover GitHub GitLab and Forgejo without raw API calls" {
+    const Case = struct { args: tools.Call.GithubArgs, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .args = .{ .repo = "doitsujin/dxvk", .op = .issue, .number = 6041 }, .expected = "https://api.github.com/repos/doitsujin/dxvk/issues/6041" },
+        .{ .args = .{ .repo = "doitsujin/dxvk", .op = .comments, .number = 6041, .page = 2, .per_page = 10 }, .expected = "https://api.github.com/repos/doitsujin/dxvk/issues/6041/comments?per_page=10&page=2" },
+        .{ .args = .{ .repo = "x/y", .op = .issues, .state = .all }, .expected = "https://api.github.com/repos/x/y/issues?state=all&per_page=30&page=1" },
+        .{ .args = .{ .api = .gitlab, .repo = "https://gitlab.com/g/r", .op = .issues }, .expected = "https://gitlab.com/api/v4/projects/g%2Fr/issues?state=opened&per_page=30&page=1" },
+        .{ .args = .{ .api = .gitlab, .repo = "https://gitlab.com/g/r", .op = .comments, .number = 7 }, .expected = "https://gitlab.com/api/v4/projects/g%2Fr/issues/7/notes?per_page=30&page=1&sort=asc&order_by=created_at" },
+        .{ .args = .{ .api = .forgejo, .repo = "https://altlinux.space/rider/gitoskop", .op = .issue, .number = 1 }, .expected = "https://altlinux.space/api/v1/repos/rider/gitoskop/issues/1" },
+        .{ .args = .{ .repo = "https://forge.example/x/y", .api = .forgejo, .op = .comments, .number = 7 }, .expected = "https://forge.example/api/v1/repos/x/y/issues/7/comments?limit=30&page=1" },
+    };
+    for (cases) |case| {
+        const url = try github.apiUrlAlloc(alloc, case.args);
+        defer alloc.free(url);
+        try std.testing.expectEqualStrings(case.expected, url);
+    }
+    for ([_]tools.Call.GithubArgs{
+        .{ .repo = "x/y", .op = .issue },             .{ .repo = "x/y", .op = .comments, .number = 0 },
+        .{ .repo = "x/y", .op = .info, .number = 1 }, .{ .repo = "x/y", .op = .history, .offset = 5 },
+    }) |args| try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, args));
+}
+
+test "github discussion output strips API noise and retains bodies only on demand" {
+    const issue =
+        \\{"number":6041,"title":"GPU name","state":"open","body":"First line\nSecond line","html_url":"https://github.com/x/y/issues/6041","user":{"login":"ada","avatar_url":"NOISE"},"labels":[{"name":"NOISE"}],"repository_url":"NOISE"}
+    ;
+    const list_body = try std.fmt.allocPrint(alloc, "[{s}]", .{issue});
+    defer alloc.free(list_body);
+    const list = try github.metadataAlloc(alloc, list_body, .{ .repo = "x/y", .op = .issues });
+    defer alloc.free(list);
+    try std.testing.expectEqualStrings("page 1 count 1; next page 2\nissue #6041 [open] ada | GPU name\n", list);
+    const detail = try github.metadataAlloc(alloc, issue, .{ .repo = "x/y", .op = .issue, .number = 6041 });
+    defer alloc.free(detail);
+    try std.testing.expectEqualStrings("issue #6041 [open] ada | GPU name\nhttps://github.com/x/y/issues/6041\nFirst line\nSecond line\n", detail);
+    const window = try github.metadataAlloc(alloc, issue, .{ .repo = "x/y", .op = .issue, .number = 6041, .from_line = 4, .to_line = 4 });
+    defer alloc.free(window);
+    try std.testing.expectEqualStrings("4: Second line\n", window);
+    const comments = try github.metadataAlloc(alloc,
+        \\[{"id":91,"body":"Useful evidence\nMore evidence","created_at":"today","author":{"username":"bob","avatar_url":"NOISE"},"system":false,"extra":{"nested":"NOISE"}}]
+    , .{ .api = .gitlab, .repo = "https://gitlab.com/x/y", .op = .comments, .number = 7, .page = 2 });
+    defer alloc.free(comments);
+    try std.testing.expectEqualStrings("page 2 count 1; next page 3\ncomment #91 bob today\nUseful evidence\nMore evidence\n", comments);
+    try std.testing.expectError(error.InvalidResponse, github.metadataAlloc(alloc, "{}", .{ .repo = "x/y", .op = .issues }));
+}
+
+test "github cgit and generic gitoskop URLs encode refs paths and pagination" {
+    const Case = struct { args: tools.Call.GithubArgs, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .args = .{ .api = .cgit, .repo = "https://git.example.org/cgit/nested/project.git", .op = .read, .path = "src/a b", .ref = "topic/a&b" }, .expected = "https://git.example.org/cgit/nested/project.git/plain/src/a%20b?h=topic%2Fa%26b" },
+        .{ .args = .{ .api = .cgit, .repo = "https://git.example.org/project", .op = .history, .offset = 50, .path = "src" }, .expected = "https://git.example.org/project/log/src?&ofs=50" },
+        .{ .args = .{ .api = .cgit, .repo = "https://git.kernel.org/pub/scm/git/git.git", .op = .branches }, .expected = "https://git.kernel.org/pub/scm/git/git.git/refs/heads?" },
+        .{ .args = .{ .api = .cgit, .repo = "https://git.example.org/project", .op = .compare, .base = "v1", .ref = "v2" }, .expected = "https://git.example.org/project/patch/?id=v2&id2=v1" },
+        .{ .args = .{ .api = .gitoskop, .repo = "https://git.example.org/custom/api/root/nested/repo.git", .op = .read, .path = "src/a b", .ref = "topic/a" }, .expected = "https://git.example.org/custom/api/root/nested/repo.git/raw/topic/a/src/a%20b" },
+        .{ .args = .{ .api = .gitoskop, .repo = "https://other.example/project", .op = .history, .page = 3, .per_page = 10, .path = "a&b" }, .expected = "https://other.example/project/log?limit=10&offset=20&path=a%26b" },
+        .{ .args = .{ .api = .gitoskop, .repo = "https://other.example/project", .op = .commit, .ref = "abc" }, .expected = "https://other.example/project/show/abc" },
+        .{ .args = .{ .api = .gitoskop, .repo = "https://other.example/project", .op = .compare, .base = "v1", .ref = "v2" }, .expected = "https://other.example/project/patch/v1..v2" },
+    };
+    for (cases) |case| {
+        const url = try github.apiUrlAlloc(alloc, case.args);
+        defer alloc.free(url);
+        try std.testing.expectEqualStrings(case.expected, url);
+    }
+    try std.testing.expectError(error.UnsupportedOperation, github.apiUrlAlloc(alloc, .{ .api = .cgit, .repo = "https://git.example.org/project", .op = .issues }));
+    try std.testing.expectError(error.UnsupportedOperation, github.apiUrlAlloc(alloc, .{ .api = .cgit, .repo = "https://git.example.org/project", .op = .history, .page = 2 }));
+    try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, .{ .api = .gitoskop, .repo = "https://git.example.org/project", .op = .read, .path = "src/main", .ref = "../../outside" }));
+    try std.testing.expectError(error.InvalidArgs, github.apiUrlAlloc(alloc, .{ .api = .gitoskop, .repo = "https://git.example.org/project", .op = .history, .page = 10000 }));
+}
+
+test "github gitoskop responses are compact paginated and reject truncated trees" {
+    const args: tools.Call.GithubArgs = .{ .repo = "https://any.example/custom/root/repo.git", .api = .gitoskop, .op = .info };
+    const info = try github.gitoskopTextAlloc(alloc,
+        \\{"default_branch":"main","branches":2,"tags":3,"size_bytes":100,"last_commit":{"oid":"abc","author":"Ada","subject":"Fix","committer":"NOISE","time":123},"extra":{"noise":"NOISE"}}
+    , args);
+    defer alloc.free(info);
+    try std.testing.expectEqualStrings("default_branch: main\nbranches: 2\ntags: 3\nsize_bytes: 100\nabc Ada | Fix\n", info);
+    const tree = try github.gitoskopTextAlloc(alloc,
+        \\{"entries":[{"name":"src","kind":"tree","oid":"abc"},{"name":"README","kind":"blob","oid":"def"}],"truncated":false}
+    , .{ .repo = args.repo, .api = .gitoskop, .op = .tree, .per_page = 1, .page = 2 });
+    defer alloc.free(tree);
+    try std.testing.expectEqualStrings("Directory listing (non-recursive)\nblob\tREADME\n", tree);
+    try std.testing.expectError(error.GitTreeTruncated, github.gitoskopTextAlloc(alloc, "{\"entries\":[],\"truncated\":true}", .{ .repo = args.repo, .api = .gitoskop, .op = .tree }));
+    const commit = try github.gitoskopTextAlloc(alloc, "{\"oid\":\"abc\",\"author\":\"Ada\",\"message\":\"Fix\",\"patch\":\"-old\\n+new\",\"truncated\":true}", .{ .repo = args.repo, .api = .gitoskop, .op = .commit, .ref = "abc" });
+    defer alloc.free(commit);
+    try std.testing.expect(std.mem.indexOf(u8, commit, "-old\n+new") != null);
+    try std.testing.expect(std.mem.indexOf(u8, commit, "server truncated") != null);
+}
+
+test "github cgit HTML extraction preserves source links without page chrome" {
+    const text = try github.cgitTextAlloc(alloc,
+        \\<html><head><title>noise</title></head><body><nav>NOISE</nav><div id="content"><table><tr><th>Path</th><th>Type</th></tr><tr><td><a href="/project/tree/src">src</a></td><td>directory</td></tr></table><a href="/project/log/?ofs=50">next</a></div></body></html>
+    , .{ .repo = "https://git.example.org/project", .api = .cgit }, "https://git.example.org/project/tree/");
+    defer alloc.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "NOISE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "src") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ofs=50") != null);
 }
