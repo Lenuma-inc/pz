@@ -621,6 +621,35 @@ const Hist = struct {
         try self.items.append(self.alloc, .{ .clear = {} });
     }
 
+    /// A process can die after persisting a call but before its result. Repair
+    /// only replayed history, never re-execute a potentially destructive tool.
+    fn closeInterruptedCalls(self: *Hist) !void {
+        try self.flushText();
+        const end = self.items.items.len;
+        var start: usize = 0;
+        for (self.items.items, 0..) |ent, i| {
+            if (ent == .clear or (ent == .item and ent.item.role == .user)) start = i + 1;
+        }
+        var i = start;
+        while (i < end) : (i += 1) {
+            const part = self.items.items[i].item.part;
+            if (part != .tool_call) continue;
+            const id = part.tool_call.id;
+            var found = false;
+            for (self.items.items[i + 1 .. end]) |ent| {
+                if (ent == .item and ent.item.part == .tool_result and std.mem.eql(u8, id, ent.item.part.tool_result.id)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) try self.pushToolResultDup(.tool, .{
+                .id = id,
+                .output = "Tool execution was interrupted before its result was saved. Outcome unknown; do not assume success or automatically repeat the operation. Inspect existing state before continuing.",
+                .is_err = true,
+            });
+        }
+    }
+
     fn appendFromSession(self: *Hist, ev: session.Event) !void {
         switch (ev.data) {
             .text, .thinking, .usage, .message => {},
@@ -632,6 +661,7 @@ const Hist = struct {
                 try self.pushPartOwned(.assistant, .{ .text = memory });
             },
             .prompt => |prompt| {
+                try self.closeInterruptedCalls();
                 try self.pushPartOwned(.user, .{ .text = try self.alloc.dupe(u8, prompt.text) });
                 var total: usize = 0;
                 if (prompt.attachments.len > attach.max_files * 2) return error.TooManyAttachments;
@@ -771,6 +801,8 @@ pub const LoopCtx = struct {
                 }
             }
         }
+
+        try hist.closeInterruptedCalls();
 
         var prompt_ev = session.Event{
             .at_ms = nowMs(opts),
@@ -7298,4 +7330,35 @@ test "context folds compress closed tools after latest user while preserving tai
         .from = 3, .to = 3, .summary = "tail", .fingerprints = .{tail_fp[0..]},
     }} }, .{});
     try std.testing.expectError(error.InvalidPluginHookResult, applyContextFolds(alloc, &msgs, 5, tail));
+}
+
+test "replay closes interrupted calls before the next prompt without retrying" {
+    var hist = Hist{ .alloc = std.testing.allocator };
+    defer hist.deinit();
+    try hist.appendFromSession(.{ .at_ms = 1, .data = .{ .tool_call = .{ .id = "lost", .name = "agent", .args = "{}" } } });
+    try hist.appendFromSession(.{ .at_ms = 2, .data = .{ .prompt = .{ .text = "continue" } } });
+    try std.testing.expectEqual(@as(usize, 3), hist.items.items.len);
+    const result = hist.items.items[1].item.part.tool_result;
+    try std.testing.expectEqualStrings("lost", result.id);
+    try std.testing.expect(result.is_err);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "Outcome unknown") != null);
+    try std.testing.expectEqual(providers.Role.user, hist.items.items[2].item.role);
+    try hist.closeInterruptedCalls();
+    try std.testing.expectEqual(@as(usize, 3), hist.items.items.len);
+}
+
+test "replay repairs only missing results including multiple pending calls" {
+    var hist = Hist{ .alloc = std.testing.allocator };
+    defer hist.deinit();
+    for ([_][]const u8{ "done", "lost-a", "lost-b" }) |id| {
+        try hist.appendFromSession(.{ .at_ms = 1, .data = .{ .tool_call = .{ .id = id, .name = "agent", .args = "{}" } } });
+    }
+    try hist.appendFromSession(.{ .at_ms = 2, .data = .{ .tool_result = .{ .id = "done", .output = "original", .is_err = false } } });
+    try hist.closeInterruptedCalls();
+    try std.testing.expectEqual(@as(usize, 6), hist.items.items.len);
+    try std.testing.expectEqualStrings("original", hist.items.items[3].item.part.tool_result.output);
+    try std.testing.expectEqualStrings("lost-a", hist.items.items[4].item.part.tool_result.id);
+    try std.testing.expectEqualStrings("lost-b", hist.items.items[5].item.part.tool_result.id);
+    try hist.closeInterruptedCalls();
+    try std.testing.expectEqual(@as(usize, 6), hist.items.items.len);
 }

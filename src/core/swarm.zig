@@ -49,6 +49,25 @@ pub const Member = struct {
         self.inbox.deinit(self.team.alloc);
     }
 
+    /// Compatibility interface for a single agent, using the same worker lifecycle
+    /// and cancellable wait as swarm. Never joins a running worker on cancellation.
+    pub fn runAgent(self: *Member, alloc: std.mem.Allocator, id: []const u8, prompt: []const u8, inference: ?providers.Inference, cancel: ?*tools.CancelSrc) ![]u8 {
+        if (self.worker != null) return error.PolicyDenied;
+        try self.team.spawn(id, prompt, inference, .general);
+        errdefer self.team.stop(id) catch {};
+        const text = try self.team.wait(self, alloc, id, 300000, cancel);
+        errdefer alloc.free(text);
+        defer self.team.close(id) catch {};
+        self.team.mu.lockUncancelable(sys.io);
+        const w = self.team.find(id).?;
+        const failure = w.err;
+        const canceled = w.state == .canceled;
+        self.team.mu.unlock(sys.io);
+        if (failure) |err| return err;
+        if (canceled) return error.Canceled;
+        return text;
+    }
+
     pub fn run(self: *Member, alloc: std.mem.Allocator, args: Args, cancel: ?*tools.CancelSrc) ![]u8 {
         if (args.timeout_ms > 300000) return error.InvalidArgs;
         return switch (args.op) {

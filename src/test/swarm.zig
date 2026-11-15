@@ -142,3 +142,57 @@ test "swarm mock-terminal renders tool exchange and synthesis" {
     defer alloc.free(summary);
     try snap(@src(), "swarm=true\nresult=true", summary);
 }
+
+test "agent compatibility uses swarm policy inference and releases completed workers" {
+    const Exec = struct {
+        fn run(_: *anyopaque, ar: std.mem.Allocator, member: *swarm.Member, task: []const u8, out: *std.Io.Writer) !void {
+            try std.testing.expectEqualStrings("inherited-model", member.inference.?.model);
+            try std.testing.expectError(error.PolicyDenied, member.runAgent(ar, "nested", "task", null, null));
+            if (std.mem.eql(u8, task, "fail")) return error.TestWorkerFailed;
+            try out.writeAll(task);
+        }
+    };
+    var ctx: u8 = 0;
+    var team: swarm.Team = .{ .alloc = alloc, .ctx = &ctx, .exec = Exec.run, .check = check };
+    const parent = team.parent();
+    defer team.deinit();
+    try std.testing.expectError(error.PolicyDenied, parent.runAgent(alloc, "blocked", "task", null, null));
+    for (0..swarm.max_workers + 1) |_| {
+        const text = try parent.runAgent(alloc, "single", "answer", .{ .model = "inherited-model" }, null);
+        defer alloc.free(text);
+        const parsed = try std.json.parseFromSlice(struct { state: []const u8, text: []const u8 }, alloc, text, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("done", parsed.value.state);
+        try std.testing.expectEqualStrings("answer", parsed.value.text);
+    }
+    try std.testing.expectError(error.TestWorkerFailed, parent.runAgent(alloc, "single", "fail", .{ .model = "inherited-model" }, null));
+    const workers = try invoke(parent, .{ .op = .list });
+    defer alloc.free(workers);
+    try std.testing.expectEqualStrings("[]", workers);
+}
+
+test "agent cancellation stops its swarm worker and preserves lifecycle control" {
+    const tools = @import("../core/tools.zig");
+    const Exec = struct {
+        fn run(_: *anyopaque, ar: std.mem.Allocator, member: *swarm.Member, _: []const u8, _: *std.Io.Writer) !void {
+            const text = try member.run(ar, .{ .op = .recv, .timeout_ms = 300000 }, null);
+            ar.free(text);
+        }
+    };
+    const Cancel = struct {
+        src: tools.CancelSrc = .{ .vt = &tools.CancelSrc.Bind(@This(), canceled).vt },
+        fn canceled(_: *@This()) bool {
+            return true;
+        }
+    };
+    var ctx: u8 = 0;
+    var cancel = Cancel{};
+    var team: swarm.Team = .{ .alloc = alloc, .ctx = &ctx, .exec = Exec.run, .check = check };
+    const parent = team.parent();
+    defer team.deinit();
+    try std.testing.expectError(error.Canceled, parent.runAgent(alloc, "single", "wait", null, &cancel.src));
+    const text = try invoke(parent, .{ .op = .wait, .id = "single", .timeout_ms = 2000 });
+    defer alloc.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"state\":\"canceled\"") != null);
+    try action(parent, .{ .op = .close, .id = "single" });
+}

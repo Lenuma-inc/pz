@@ -955,25 +955,20 @@ pub const Runtime = struct {
     }
 
     fn runAgent(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
-        // If no explicit hook is provided but we have a policy hash,
-        // use the production spawner with streaming progress.
-        var spawn_ctx: ?agent_tool.PolicySpawnCtx = null;
-        var sh_ptr: ?*agent_tool.StreamHook = null;
-        if (self.agent_hook == null and self.policy_hash != null) {
-            spawn_ctx = .{
-                .alloc = self.alloc,
-                .policy_hash = self.policy_hash.?,
-                .inference = call.inference,
-            };
-            sh_ptr = &spawn_ctx.?.stream_hook;
+        if (self.agent_hook == null) {
+            const member = self.member orelse return error.SwarmUnavailable;
+            if (self.policy_hash == null) return error.PolicyMismatch;
+            const args = call.args.agent;
+            const text = try member.runAgent(self.alloc, args.agent_id, args.prompt, call.inference, call.cancel);
+            errdefer self.alloc.free(text);
+            return shared.buildResult(self.alloc, call.id, call.at_ms, text, self.max_bytes, text.len);
         }
-        defer if (spawn_ctx) |*ctx| ctx.cleanup();
+        // Explicit hooks remain available for embedded callers and tests.
         const h = agent_tool.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
             .hook = self.agent_hook,
-            .stream_hook = sh_ptr,
             .policy_hash = self.policy_hash,
         });
         return h.run(call, sink);
