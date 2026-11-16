@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-16
+
+### Added
+- GitHub issue and pull request discussions in the repository inspection tool.
+- cgit and gitoskop backends for repository inspection.
+
+### Fixed
+- Use the swarm lifecycle for delegated agents.
+- Recover interrupted tool calls without leaving incomplete tool responses.
+
 ## [0.11.0] - 2026-11-13
 
 ### Added
