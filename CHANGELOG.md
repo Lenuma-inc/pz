@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-19
+
+### Added
+- GPT-6.2 Sol and GPT-6.2 Astra in the bundled OpenAI model catalog, with reasoning efforts and context windows from the official Codex catalog.
+
+### Changed
+- Refresh OpenAI model ordering and the GPT-6.1 Sol context window from the official catalog.
+
 ## [0.12.0] - 2026-11-16
 
 ### Added

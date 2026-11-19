@@ -3,12 +3,14 @@
 const std = @import("std");
 pub const Entry = struct { id: []const u8, default_effort: []const u8, efforts: []const []const u8, context_window: ?u32 };
 pub const entries = [_]Entry{
-    .{ .id = "gpt-6.1-sol", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
+    .{ .id = "gpt-6.2-sol", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 500000 },
+    .{ .id = "gpt-6.2-astra", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
+    .{ .id = "gpt-6.1-terra", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 500000 },
+    .{ .id = "gpt-6.1-sol", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 500000 },
     .{ .id = "gpt-6-astra", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
     .{ .id = "gpt-6-sol", .default_effort = "medium", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
     .{ .id = "gpt-6-luna", .default_effort = "medium", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
     .{ .id = "gpt-5.6-sol", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
-    .{ .id = "gpt-6.1-terra", .default_effort = "low", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 500000 },
     .{ .id = "gpt-5.6-terra", .default_effort = "medium", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
     .{ .id = "gpt-5.6-luna", .default_effort = "medium", .efforts = &.{ "low", "medium", "high", "xhigh", "max" }, .context_window = 272000 },
     .{ .id = "gpt-5.5", .default_effort = "medium", .efforts = &.{ "low", "medium", "high", "xhigh" }, .context_window = 272000 },
