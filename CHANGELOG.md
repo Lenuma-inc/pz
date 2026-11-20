@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-20
+
+### Fixed
+- Request fresh approval after a denial when the user explicitly asks again.
+- Treat requested changes to pz instructions and approval behavior as source edits for future builds.
+
 ## [0.12.1] - 2026-11-19
 
 ### Added

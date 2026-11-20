@@ -72,7 +72,7 @@ const bash_params = [_]tools.Tool.Param{
     .{ .name = "cmd", .ty = .string, .required = true, .desc = "Shell command" },
     .{ .name = "cwd", .ty = .string, .required = false, .desc = "Working directory" },
     .{ .name = "env", .ty = .string, .required = false, .desc = "Environment variables (KEY=VALUE, one per line)" },
-    .{ .name = "sandbox_permissions", .ty = .string, .required = false, .desc = "use_default (default): read disk, write workspace and /tmp, no network. For sandbox permission or network failures, retry with require_escalated and justification; the harness asks the user before running outside the sandbox. Never retry after approval is denied." },
+    .{ .name = "sandbox_permissions", .ty = .string, .required = false, .desc = "use_default (default): read disk, write workspace and /tmp, no network. For sandbox permission or network failures, retry with require_escalated and justification; the harness asks the user before running outside the sandbox. After a user denies approval, request it again only if the user explicitly asks you to retry the request in a later message. A fresh approval is required. Policy denials cannot be retried while the policy remains in force." },
     .{ .name = "justification", .ty = .string, .required = false, .desc = "Required for require_escalated: explain why this command needs access outside the sandbox" },
 };
 
@@ -1356,10 +1356,12 @@ test "bash escalation requires an explicit matching interactive grant" {
     }
     ask.raw = "{}";
     try std.testing.expectError(error.MissingField, rt.approveBash(call));
+    const seen_before_retry = ask.seen;
     ask.raw = "{\"cancelled\":false,\"answers\":[{\"id\":\"sandbox\",\"answer\":\"Approve once\",\"index\":0}]}";
     const res = try rt.runBash(call, noop.sink());
     defer rt.deinitResult(res);
     try std.testing.expectEqualStrings("approved", res.out[0].chunk);
+    try std.testing.expectEqual(seen_before_retry + 1, ask.seen);
     rt.sandbox_locked = true;
     const seen = ask.seen;
     try std.testing.expectError(error.PolicyDenied, rt.runBash(call, noop.sink()));

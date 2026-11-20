@@ -1837,9 +1837,10 @@ fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.I
             const tag = if (approval_err == error.ApprovalRequired) "required" else "denied";
             return .{
                 .id = try opts.alloc.dupe(u8, tc.id),
-                .output = try std.fmt.allocPrint(opts.alloc, "approval {s}: {s} derived from untrusted input", .{
+                .output = try std.fmt.allocPrint(opts.alloc, "approval {s}: {s} derived from untrusted input{s}", .{
                     tag,
                     summary,
+                    if (approval_err == error.ApprovalDenied) ". " ++ approval_denied_guidance else "",
                 }),
                 .is_err = true,
             };
@@ -1905,15 +1906,16 @@ fn runTool(opts: Opts, incoming_tc: providers.ToolCall, image_out: *?providers.I
             .output = if (run_err == error.TooLarge)
                 try opts.alloc.dupe(u8, "tool-failed:TooLarge (response or output exceeds the tool limit; narrow the path, read a smaller line range or paginate)")
             else if (run_err == error.Denied)
-                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. For bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.", .{@errorName(run_err)})
+                try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. For bash sandbox or network restrictions, use sandbox_permissions=require_escalated with a justification to request approval. Do not claim success.", .{@errorName(run_err)})
             else
                 try std.fmt.allocPrint(opts.alloc, "tool-failed:{s}. {s}", .{ @errorName(run_err), switch (run_err) {
                     error.CommandParseFailed => "The protected-path checker could not parse this shell command. Execution was blocked even if sandbox approval was granted. Simplify the command; requesting sandbox approval again will not fix this parse failure.",
-                    error.ProtectedPathDenied => "Bash cannot access protected agent configuration paths, even with sandbox escalation. This restriction applies to shell access, not to the approved file-editing workflow. For requested config changes, use read to inspect the exact file, then edit, write, or patch; the harness requests config approval before modification. Do not use bash escalation or ask as a substitute for config approval. If config approval is denied, stop.",
+                    error.ProtectedPathDenied => "Bash cannot access protected agent configuration paths, even with sandbox escalation. This restriction applies to shell access, not to the approved file-editing workflow. For requested config changes, use read to inspect the exact file, then edit, write, or patch; the harness requests config approval before modification. Do not use bash escalation or ask as a substitute for config approval. If the user denies config approval, request it again through the same file-editing workflow only if the user explicitly asks you to retry the request in a later message.",
                     error.NotFound => "A path or executable was not found. Check the path and runtime dependencies before retrying.",
                     error.PolicyMismatch => "The child agent policy handshake failed. Report the configuration failure; user network approval cannot override it.",
                     error.ApprovalRequired => "This action requires interactive approval, which is unavailable in this mode.",
-                    error.ApprovalDenied, error.PolicyDenied => "Access was denied. Do not retry this action or request the same permission again.",
+                    error.ApprovalDenied => approval_denied_guidance,
+                    error.PolicyDenied => "Blocked by policy. Do not retry while the policy remains in force.",
                     else => "Inspect the failure and correct its cause; do not assume it is a sandbox or network restriction.",
                 } }),
             .is_err = true,
@@ -2073,6 +2075,8 @@ fn resultOut(alloc: std.mem.Allocator, res: tools.Result) ![]const u8 {
     };
 }
 
+const approval_denied_guidance = "Request approval again only if the user explicitly asks you to retry the request in a later message. Use the same approval mechanism and wait for fresh approval.";
+
 fn joinFailedChunks(alloc: std.mem.Allocator, out: []const tools.Output, msg: []const u8) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
@@ -2087,7 +2091,7 @@ fn joinFailedChunks(alloc: std.mem.Allocator, out: []const tools.Output, msg: []
     const markers = [_][]const u8{ "Permission denied", "Operation not permitted", "Read-only file system", "Network is unreachable" };
     for (markers) |marker| {
         if (std.ascii.findIgnoreCase(buf.items, marker) != null) {
-            try buf.appendSlice(alloc, "\nFor bash sandbox or network restrictions, retry with sandbox_permissions=require_escalated and justification; the harness requests approval. Never retry after ApprovalDenied or PolicyDenied. Do not claim success.");
+            try buf.appendSlice(alloc, "\nFor bash sandbox or network restrictions, use sandbox_permissions=require_escalated with a justification to request approval. Do not claim success.");
             break;
         }
     }
